@@ -85,6 +85,20 @@ pub struct PlayerMove {
     pub dash_remaining: f32,
     /// Cooldown avant de pouvoir re-dash.
     pub dash_cooldown: f32,
+    /// **Wall-jump** (M1) — cooldown avant de pouvoir re-wall-jumper.
+    /// Sans cooldown un joueur peut spammer wall-jump sur le même mur
+    /// en boucle et monter à l'infini.
+    pub wall_jump_cooldown: f32,
+    /// Normale du dernier mur depuis lequel on a wall-jumpé. Utilisé
+    /// pour interdire le re-wall-jump sur le MÊME mur immédiatement
+    /// (sinon climb infini sur une seule paroi). Le re-jump est OK
+    /// dès qu'on a touché un autre mur ou le sol.
+    pub last_wall_normal: Option<Vec3>,
+    /// **Mantling** (M2) — temps restant en secondes. > 0 = on est
+    /// en train de "grimper" un rebord : la velocity verticale est
+    /// forcée vers le haut, l'air control est suspendu. Termine au
+    /// timer = 0 ou si la collision butte.
+    pub mantling_remaining: f32,
 }
 
 impl PlayerMove {
@@ -99,6 +113,9 @@ impl PlayerMove {
             slide_cooldown: 0.0,
             dash_remaining: 0.0,
             dash_cooldown: 0.0,
+            wall_jump_cooldown: 0.0,
+            last_wall_normal: None,
+            mantling_remaining: 0.0,
         }
     }
 
@@ -159,6 +176,22 @@ pub const DASH_DURATION: f32 = 0.15;
 pub const DASH_COOLDOWN: f32 = 0.9;
 /// Vitesse imprimée par un dash (unités/s).
 pub const DASH_SPEED: f32 = 520.0;
+/// Cooldown entre deux wall-jumps (secondes).
+pub const WALL_JUMP_COOLDOWN: f32 = 0.5;
+/// Distance horizontale max pour détecter un mur exploitable
+/// (probe trace_box latérale autour du joueur).
+pub const WALL_JUMP_PROBE_DIST: f32 = 28.0;
+/// Vitesse Z appliquée au wall-jump. Légèrement supérieure au saut
+/// standard pour compenser le fait qu'on part d'une position en l'air.
+pub const WALL_JUMP_Z_VEL: f32 = 320.0;
+/// Push horizontal away-from-wall (u/s).
+pub const WALL_JUMP_PUSH: f32 = 380.0;
+/// Vitesse verticale pendant un mantling (climb rate, u/s).
+pub const MANTLE_RISE_VEL: f32 = 240.0;
+/// Durée max d'une session mantling (s) avant que le joueur reprenne
+/// le contrôle classique. Couvre une marche d'environ 60u (Q3
+/// MAX_MANTLE_HEIGHT non standard).
+pub const MANTLE_DURATION: f32 = 0.25;
 
 /// Applique la friction de Q3 (exponentielle par tick) avec un coefficient
 /// explicite. L'appelant choisit `friction` = `params.friction` pendant un
@@ -269,6 +302,71 @@ impl PlayerMove {
         // Mise à jour de on_ground : petit trace vers le bas.
         self.update_ground(world, hull, mask);
 
+        // **Wall-jump** (M1) — touche jump pressée en l'air avec un mur
+        // dans la fenêtre de probe latérale → kick. Détection via 4
+        // probes orthogonales (avant/arrière/gauche/droite) en
+        // `trace_box`. Premier hit avec normale presque verticale (mur
+        // pas plafond) gagne. Cooldown + interdiction de re-wall-jump
+        // sur le même mur empêche le climb infini.
+        if cmd.jump
+            && !self.on_ground
+            && self.wall_jump_cooldown <= 0.0
+        {
+            let basis = self.view_angles.to_vectors();
+            let probe_dirs = [
+                basis.forward,
+                -basis.forward,
+                basis.right,
+                -basis.right,
+            ];
+            let mut best_normal: Option<Vec3> = None;
+            for dir in probe_dirs {
+                let mut d = dir;
+                d.z = 0.0;
+                if d.length_squared() < 1e-4 {
+                    continue;
+                }
+                let d = d.normalize();
+                let end = self.origin + d * WALL_JUMP_PROBE_DIST;
+                let tr = world.trace_box(self.origin, end, hull, mask);
+                if tr.fraction < 1.0 && tr.plane_normal.z.abs() < 0.4 {
+                    // Mur quasi-vertical (z entre -0.4 et 0.4 = pente
+                    // > 65°). On exclut les pentes raides "marchables"
+                    // qui devraient passer en step-up plutôt qu'en
+                    // wall-jump.
+                    let n = tr.plane_normal;
+                    // Empêche le re-wall-jump sur le MÊME mur.
+                    if let Some(prev) = self.last_wall_normal {
+                        if prev.dot(n) > 0.95 {
+                            continue;
+                        }
+                    }
+                    best_normal = Some(n);
+                    break;
+                }
+            }
+            if let Some(n) = best_normal {
+                self.velocity.x = n.x * WALL_JUMP_PUSH;
+                self.velocity.y = n.y * WALL_JUMP_PUSH;
+                self.velocity.z = WALL_JUMP_Z_VEL;
+                self.wall_jump_cooldown = WALL_JUMP_COOLDOWN;
+                self.last_wall_normal = Some(n);
+            }
+        }
+        // Touch ground reset le tracking : nouveau wall-jump autorisé
+        // sur n'importe quel mur après être passé par le sol.
+        if self.on_ground {
+            self.last_wall_normal = None;
+        }
+
+        // **Mantling** (M2) — pendant la fenêtre active, on force la
+        // velocity verticale à `MANTLE_RISE_VEL` et on tue la gravité.
+        // Détection de déclenchement plus bas après pmove standard,
+        // pour avoir accès à la collision finale.
+        if self.mantling_remaining > 0.0 {
+            self.velocity.z = MANTLE_RISE_VEL;
+        }
+
         self.integrate_velocity(cmd, params);
 
         // Slide move : jusqu'à 4 itérations (si la vitesse se réoriente).
@@ -375,6 +473,22 @@ impl PlayerMove {
             );
         }
 
+        // **Mantling** (M2) — détection : on est en l'air, on a tapé un
+        // mur ce tick (`hit_wall`), on appuie sur jump ou on avance
+        // forward, et un trace au-dessus du joueur révèle un sol
+        // praticable atteignable depuis HULL_MAXS.z + STEP_HEIGHT.
+        // Si oui → on arme la fenêtre `mantling_remaining` qui force
+        // la velocity verticale au tick suivant jusqu'à ce qu'on soit
+        // au-dessus du rebord.
+        if hit_wall
+            && !self.on_ground
+            && self.mantling_remaining <= 0.0
+            && cmd.forward > 0.1
+            && self.try_detect_mantle(world, hull, mask)
+        {
+            self.mantling_remaining = MANTLE_DURATION;
+        }
+
         // Re-check ground après le move.
         self.update_ground(world, hull, mask);
     }
@@ -433,6 +547,10 @@ impl PlayerMove {
         self.slide_cooldown = (self.slide_cooldown - cmd.delta_time).max(0.0);
         self.dash_remaining = (self.dash_remaining - cmd.delta_time).max(0.0);
         self.dash_cooldown = (self.dash_cooldown - cmd.delta_time).max(0.0);
+        self.wall_jump_cooldown =
+            (self.wall_jump_cooldown - cmd.delta_time).max(0.0);
+        self.mantling_remaining =
+            (self.mantling_remaining - cmd.delta_time).max(0.0);
 
         // Wish velocity = intention du joueur dans le plan horizontal.
         // `cmd.forward` / `cmd.side` sont des fractions dans [-1, 1]
@@ -582,6 +700,49 @@ impl PlayerMove {
         }
     }
 
+    /// Détection mantling : trace courte vers l'avant à hauteur de
+    /// poitrine pour vérifier qu'on a un mur, puis trace vers le bas
+    /// au-dessus + forward du joueur pour confirmer qu'il y a un sol
+    /// praticable. Retourne `true` si le rebord est éligible.
+    fn try_detect_mantle(
+        &self,
+        world: &CollisionWorld,
+        hull: TraceBox,
+        mask: Contents,
+    ) -> bool {
+        let basis = self.view_angles.to_vectors();
+        let mut fwd = basis.forward;
+        fwd.z = 0.0;
+        if fwd.length_squared() < 1e-4 {
+            return false;
+        }
+        let fwd = fwd.normalize();
+        // Probe 1 : mur à hauteur poitrine (z ~ 0). Si rien n'est là,
+        // pas de mantling à faire.
+        let chest = self.origin;
+        let chest_end = chest + fwd * 24.0;
+        let chest_tr = world.trace_box(chest, chest_end, hull, mask);
+        if chest_tr.fraction >= 1.0 {
+            return false;
+        }
+        // Probe 2 : depuis 60 unités au-dessus + 24 devant, on trace
+        // vers le bas. Si on trouve un sol < 60u plus bas, c'est un
+        // rebord praticable.
+        let above = self.origin + Vec3::Z * 60.0 + fwd * 24.0;
+        let down_end = above - Vec3::Z * 65.0;
+        let down_tr = world.trace_box(above, down_end, hull, mask);
+        if down_tr.fraction >= 1.0 {
+            return false;
+        }
+        if down_tr.plane_normal.z < MIN_GROUND_NORMAL_Z {
+            return false;
+        }
+        // Le ledge doit être au-dessus de notre tête (sinon le step-up
+        // standard suffit, pas besoin de mantling).
+        let ledge_z = down_tr.end_pos.z;
+        ledge_z > self.origin.z + 8.0
+    }
+
     fn try_step_up(
         &mut self,
         cmd: MoveCmd,
@@ -615,6 +776,9 @@ impl PlayerMove {
             slide_cooldown: self.slide_cooldown,
             dash_remaining: self.dash_remaining,
             dash_cooldown: self.dash_cooldown,
+            wall_jump_cooldown: self.wall_jump_cooldown,
+            last_wall_normal: self.last_wall_normal,
+            mantling_remaining: self.mantling_remaining,
         };
         // On refait juste le slide (sans ré-intégrer la vitesse), en réutilisant
         // tick_collide… mais tick_collide ré-appliquerait la vitesse. On fait

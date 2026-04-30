@@ -127,17 +127,76 @@ pub enum GameType {
     /// Team Deathmatch — équipes red/blue, dégâts entre coéquipiers
     /// gates par `friendly_fire`.
     TeamDeathmatch,
+    /// **CTF** — Capture The Flag. Chaque équipe a un drapeau à sa base.
+    /// Voler le drapeau adverse + le ramener à sa base = +1 capture
+    /// (équipe). Friendly-fire désactivé par défaut. Score par capture
+    /// (5 caps = win). Drapeau lâché au sol revient à la base après
+    /// `CTF_FLAG_RETURN_SEC` ou si un coéquipier le touche (return).
+    CaptureTheFlag,
 }
 
 impl GameType {
-    /// Mappe un nom CLI vers l'enum. Tolère `ffa`, `tdm`, et leurs
-    /// variantes courantes. Default si inconnu = FFA (préserve le
-    /// comportement antérieur quand on ajoute le flag).
+    /// Mappe un nom CLI vers l'enum. Tolère `ffa`, `tdm`, `ctf`.
+    /// Default si inconnu = FFA.
     pub fn from_cli(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "tdm" | "team" | "teamdm" | "team-dm" | "team_dm" => Self::TeamDeathmatch,
+            "ctf" | "capture" | "flag" => Self::CaptureTheFlag,
             _ => Self::FreeForAll,
         }
+    }
+
+    /// `true` si le mode utilise des équipes (TDM ou CTF). Les règles
+    /// de tinting MD3, scoreboard groupé, et FF gate s'appliquent dans
+    /// les deux cas.
+    pub fn is_team_based(self) -> bool {
+        matches!(self, Self::TeamDeathmatch | Self::CaptureTheFlag)
+    }
+}
+
+/// Délai (secondes) avant qu'un drapeau lâché au sol revienne
+/// automatiquement à sa base. Q3 vanilla = 30 s.
+pub const CTF_FLAG_RETURN_SEC: f32 = 30.0;
+/// Limite de captures pour gagner une partie CTF.
+pub const CTF_CAPTURE_LIMIT: u32 = 5;
+/// Distance (unités) à laquelle un joueur peut interagir avec un
+/// drapeau (pickup, return, capture).
+pub const CTF_FLAG_PICKUP_RADIUS: f32 = 48.0;
+
+/// État d'un drapeau CTF (rouge ou bleu).
+#[derive(Debug, Clone)]
+pub struct CtfFlag {
+    /// Position de la base (où revient le drapeau).
+    pub home_pos: Vec3,
+    /// Position actuelle.
+    pub current_pos: Vec3,
+    /// `Some(slot_id)` si un joueur porte le drapeau.
+    pub carrier: Option<u8>,
+    /// Timestamp (relatif au server.start) où le drapeau a été lâché
+    /// au sol. `None` = à la base ou porté.
+    pub dropped_at: Option<Instant>,
+}
+
+impl CtfFlag {
+    pub fn new(home: Vec3) -> Self {
+        Self {
+            home_pos: home,
+            current_pos: home,
+            carrier: None,
+            dropped_at: None,
+        }
+    }
+
+    pub fn is_at_home(&self) -> bool {
+        self.carrier.is_none() && self.dropped_at.is_none()
+    }
+
+    /// Reset le drapeau à sa base. Appelé par le timer 30s, par un
+    /// touch-return d'un coéquipier, ou par `force_restart_match`.
+    pub fn return_to_base(&mut self) {
+        self.current_pos = self.home_pos;
+        self.carrier = None;
+        self.dropped_at = None;
     }
 }
 
@@ -827,6 +886,18 @@ pub struct ServerState {
     /// coéquipiers s'appliquent normalement. Si `false` (défaut TDM),
     /// `deal_damage` retourne tôt pour les hits same-team. Ignoré en FFA.
     pub friendly_fire: bool,
+    /// **CTF state** — drapeaux par équipe. `home_pos` = position de
+    /// la base (où le drapeau revient quand return). `current_pos` =
+    /// position actuelle (différente de home si lâché au sol). `carrier`
+    /// = `Some(slot_id)` si un joueur le porte, `None` sinon.
+    /// `dropped_at` = timestamp où il a été lâché (None si à la base
+    /// ou porté). Flag actifs uniquement quand `gametype == CaptureTheFlag`.
+    pub ctf_red_flag: CtfFlag,
+    pub ctf_blue_flag: CtfFlag,
+    /// Captures par équipe — incrément à chaque return-with-flag à la
+    /// base. Premier à atteindre [`CTF_CAPTURE_LIMIT`] gagne le match.
+    pub ctf_red_caps: u32,
+    pub ctf_blue_caps: u32,
     /// Snapshot full le plus récent émis. Sert de **baseline** pour les
     /// deltas envoyés ensuite à n'importe quel client. Reset à chaque
     /// nouveau full broadcast (cf. `broadcast_snapshot`).
@@ -887,6 +958,14 @@ impl ServerState {
             slot_ids_in_use: 0,
             gametype,
             friendly_fire,
+            // Drapeaux CTF placés à des positions par défaut. Ces
+            // positions sont overridées par les entities `team_CTF_redflag`
+            // / `team_CTF_blueflag` du BSP au chargement (cf. `attach_world`
+            // qui scanne les entities pour s'auto-positionner).
+            ctf_red_flag: CtfFlag::new(Vec3::new(-512.0, 0.0, 64.0)),
+            ctf_blue_flag: CtfFlag::new(Vec3::new(512.0, 0.0, 64.0)),
+            ctf_red_caps: 0,
+            ctf_blue_caps: 0,
             start: Instant::now(),
             snapshot_accum: 0.0,
             pinned_baseline: None,
@@ -1011,6 +1090,10 @@ impl ServerState {
         // 2.quater bis. Powerups : décrément timers + regen tick.
         self.tick_powerups(dt_sec);
 
+        // 2.quater ter. CTF : pickups/return/captures de drapeaux. No-op
+        // hors mode CTF. Dépend de slots.player.origin → après pmove.
+        self.tick_ctf();
+
         // 2.quinquies. Match flow : check fraglimit / timelimit, gérer
         //              l'intermission, restart auto.
         self.tick_match();
@@ -1089,6 +1172,41 @@ impl ServerState {
 
         // Chat : commande `say "<message>"`. Émise par un client connecté
         // pour broadcaster un message texte à tous les autres slots via
+        // **getinfo / infoResponse** (Pack 8 — LAN browser). Q3 vanilla
+        // protocole : un client diffuse `getinfo <challenge>` en broadcast
+        // UDP, chaque serveur répond avec `infoResponse <challenge>
+        // \hostname\...\maxclients\...\clients\...\gametype\...\mapname\...`.
+        // Le challenge sert à filtrer les réponses non-sollicitées.
+        if let Some(msg) = &parsed {
+            if msg.command == "getinfo" {
+                let challenge = std::str::from_utf8(&msg.payload)
+                    .unwrap_or("")
+                    .trim();
+                let info = format!(
+                    "infoResponse {}\n\
+                     \\hostname\\Q3RUST\
+                     \\maxclients\\{}\
+                     \\clients\\{}\
+                     \\gametype\\{}\
+                     \\protocol\\1",
+                    challenge,
+                    self.max_clients,
+                    self.slots.len(),
+                    match self.gametype {
+                        GameType::FreeForAll => "ffa",
+                        GameType::TeamDeathmatch => "tdm",
+                        GameType::CaptureTheFlag => "ctf",
+                    },
+                );
+                let resp = OobMessage {
+                    command: "infoResponse".into(),
+                    payload: info[12..].as_bytes().to_vec(),
+                };
+                self.send_raw(dg.addr, resp.to_bytes());
+                return;
+            }
+        }
+
         // `ServerEvent::Chat`. Pas géré par le handshake — on intercepte
         // en amont et on retourne (pas de réponse OOB attendue).
         if let Some(msg) = &parsed {
@@ -1529,6 +1647,41 @@ impl ServerState {
         let fraglimit_hit = leader_frags >= FRAG_LIMIT;
         let timelimit_hit =
             self.match_started_at.elapsed().as_secs_f32() >= TIME_LIMIT_SEC;
+        // **CTF** — la victoire est déterminée par les captures, pas
+        // par les frags. On bypass leader_id/tied_at_top dans ce mode.
+        if self.gametype == GameType::CaptureTheFlag {
+            if self.ctf_red_caps >= CTF_CAPTURE_LIMIT
+                || self.ctf_blue_caps >= CTF_CAPTURE_LIMIT
+            {
+                // Pseudo-slot pour signaler l'équipe gagnante. On
+                // utilise les slot_ids virtuels 254/253 (RED/BLUE) ;
+                // le vrai vainqueur est représenté par les caps dans
+                // le snapshot. Côté HUD, on lira ctf_*_caps directement.
+                let virtual_winner = if self.ctf_red_caps > self.ctf_blue_caps {
+                    254
+                } else if self.ctf_blue_caps > self.ctf_red_caps {
+                    253
+                } else {
+                    MATCH_DRAW
+                };
+                self.end_match(virtual_winner);
+                return;
+            }
+            if timelimit_hit {
+                let virtual_winner = if self.ctf_red_caps > self.ctf_blue_caps {
+                    254
+                } else if self.ctf_blue_caps > self.ctf_red_caps {
+                    253
+                } else {
+                    MATCH_DRAW
+                };
+                self.end_match(virtual_winner);
+                return;
+            }
+            // Pas de fin sur fraglimit en CTF — on retourne tôt pour
+            // ne pas déclencher la branche standard ci-dessous.
+            return;
+        }
 
         if fraglimit_hit || timelimit_hit {
             // Si timelimit avec égalité au sommet, c'est une draw.
@@ -1599,7 +1752,147 @@ impl ServerState {
             p.available = true;
             p.respawn_at = None;
         }
+        // **CTF reset** : drapeaux à leurs bases, captures à 0.
+        self.ctf_red_flag.return_to_base();
+        self.ctf_blue_flag.return_to_base();
+        self.ctf_red_caps = 0;
+        self.ctf_blue_caps = 0;
         self.pending_events.push(ServerEvent::MatchStarted);
+    }
+
+    /// **CTF tick** — appelé chaque frame en mode CTF. Gère le pickup
+    /// (joueur ennemi qui touche un drapeau au sol/à la base), le
+    /// return (coéquipier qui touche son drapeau lâché), la capture
+    /// (carrier qui ramène le drapeau adverse à sa propre base alors
+    /// que celle-ci est intacte), et le timeout de retour automatique
+    /// d'un drapeau lâché trop longtemps.
+    pub fn tick_ctf(&mut self) {
+        if self.gametype != GameType::CaptureTheFlag {
+            return;
+        }
+        let now = Instant::now();
+        // Auto-return après timeout.
+        if let Some(t) = self.ctf_red_flag.dropped_at {
+            if (now - t).as_secs_f32() >= CTF_FLAG_RETURN_SEC {
+                self.ctf_red_flag.return_to_base();
+                info!("ctf: drapeau ROUGE auto-return (timeout)");
+            }
+        }
+        if let Some(t) = self.ctf_blue_flag.dropped_at {
+            if (now - t).as_secs_f32() >= CTF_FLAG_RETURN_SEC {
+                self.ctf_blue_flag.return_to_base();
+                info!("ctf: drapeau BLEU auto-return (timeout)");
+            }
+        }
+        // Si un porteur est mort (slot disparu / mort), on lâche le
+        // drapeau à sa dernière position.
+        for flag_team in [q3_net::team::RED, q3_net::team::BLUE] {
+            let flag = if flag_team == q3_net::team::RED {
+                &mut self.ctf_red_flag
+            } else {
+                &mut self.ctf_blue_flag
+            };
+            if let Some(carrier) = flag.carrier {
+                let alive = self
+                    .slots
+                    .values()
+                    .any(|s| s.slot_id == carrier && s.health > 0);
+                if !alive {
+                    info!("ctf: porteur slot={} mort, drapeau {} lâché",
+                        carrier,
+                        if flag_team == q3_net::team::RED { "rouge" } else { "bleu" });
+                    flag.carrier = None;
+                    flag.dropped_at = Some(now);
+                    // current_pos reste à la dernière position connue.
+                }
+            }
+        }
+        // Update current_pos des drapeaux portés (suit le porteur).
+        let mut updates: Vec<(u8, Vec3)> = Vec::new();
+        for s in self.slots.values() {
+            if Some(s.slot_id) == self.ctf_red_flag.carrier
+                || Some(s.slot_id) == self.ctf_blue_flag.carrier
+            {
+                updates.push((s.slot_id, s.player.origin + Vec3::Z * 32.0));
+            }
+        }
+        for (sid, pos) in updates {
+            if Some(sid) == self.ctf_red_flag.carrier {
+                self.ctf_red_flag.current_pos = pos;
+            }
+            if Some(sid) == self.ctf_blue_flag.carrier {
+                self.ctf_blue_flag.current_pos = pos;
+            }
+        }
+        // Interactions joueur ↔ drapeaux : pickup / return / capture.
+        // On collecte les positions/teams pour éviter le double-borrow.
+        let players: Vec<(u8, u8, Vec3)> = self
+            .slots
+            .values()
+            .filter(|s| s.health > 0 && !s.spectator)
+            .map(|s| (s.slot_id, s.team, s.player.origin))
+            .collect();
+        for (sid, team, pos) in players {
+            for flag_team in [q3_net::team::RED, q3_net::team::BLUE] {
+                let (flag_pos, is_at_home, has_carrier, dropped) = {
+                    let flag = if flag_team == q3_net::team::RED {
+                        &self.ctf_red_flag
+                    } else {
+                        &self.ctf_blue_flag
+                    };
+                    (flag.current_pos, flag.is_at_home(),
+                     flag.carrier.is_some(), flag.dropped_at.is_some())
+                };
+                let dist = (flag_pos - pos).length();
+                if dist > CTF_FLAG_PICKUP_RADIUS || has_carrier {
+                    continue;
+                }
+                if team == flag_team {
+                    // Coéquipier touche son propre drapeau.
+                    if dropped {
+                        // Return.
+                        if flag_team == q3_net::team::RED {
+                            self.ctf_red_flag.return_to_base();
+                        } else {
+                            self.ctf_blue_flag.return_to_base();
+                        }
+                        info!("ctf: drapeau {} returned par slot={sid}",
+                            if flag_team == q3_net::team::RED { "rouge" } else { "bleu" });
+                        continue;
+                    }
+                    // À la base : check capture si on porte l'autre flag
+                    // ET notre flag est home.
+                    let other_flag_carrier = if flag_team == q3_net::team::RED {
+                        self.ctf_blue_flag.carrier
+                    } else {
+                        self.ctf_red_flag.carrier
+                    };
+                    if other_flag_carrier == Some(sid) && is_at_home {
+                        // **CAPTURE !**
+                        if flag_team == q3_net::team::RED {
+                            self.ctf_red_caps += 1;
+                            self.ctf_blue_flag.return_to_base();
+                        } else {
+                            self.ctf_blue_caps += 1;
+                            self.ctf_red_flag.return_to_base();
+                        }
+                        info!("ctf: CAPTURE! équipe {:?} (red={} blue={})",
+                            flag_team, self.ctf_red_caps, self.ctf_blue_caps);
+                    }
+                } else if !has_carrier {
+                    // Ennemi pickup.
+                    if flag_team == q3_net::team::RED {
+                        self.ctf_red_flag.carrier = Some(sid);
+                        self.ctf_red_flag.dropped_at = None;
+                    } else {
+                        self.ctf_blue_flag.carrier = Some(sid);
+                        self.ctf_blue_flag.dropped_at = None;
+                    }
+                    info!("ctf: drapeau {} pickup par slot={sid}",
+                        if flag_team == q3_net::team::RED { "rouge" } else { "bleu" });
+                }
+            }
+        }
     }
 
     /// Construit la liste de pickups serveur depuis les entités du
