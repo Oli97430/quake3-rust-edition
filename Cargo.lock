@@ -1987,7 +1987,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "q3-bot"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "q3-collision",
  "q3-common",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "q3-bsp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "q3-collision"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bitflags 2.11.1",
  "q3-bsp",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "q3-common"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.1",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "q3-engine"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "q3-filesystem"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hashbrown 0.15.5",
  "parking_lot",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "q3-game"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hashbrown 0.15.5",
  "q3-bsp",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "q3-image"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hashbrown 0.15.5",
  "image",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "q3-math"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "q3-model"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "q3-common",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "q3-net"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "q3-renderer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytemuck",
  "font8x8",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "q3-shader"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hashbrown 0.15.5",
  "q3-common",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "q3-sound"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hashbrown 0.15.5",
  "parking_lot",
