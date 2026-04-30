@@ -719,11 +719,31 @@ fn fs_blur(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(col, 1.0);
 }
 
+// --- ACES tonemap (Hill / Narkowicz fitted) -----------------------------
+// Approximation analytique d'ACES Filmic — donne un look "cinéma"
+// (rolloff naturel des highlights, saturation préservée). Appliqué
+// sur la couleur avant écriture surface, ça compresse le bloom additif
+// dans une plage SDR plus douce qu'un simple clamp à 1.0.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e),
+                 vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 // --- Compose : additif sur la surface ----------------------------------
 @fragment
 fn fs_compose(in: VsOut) -> @location(0) vec4<f32> {
-    let bloom = textureSample(tex, samp, in.uv).rgb;
-    return vec4<f32>(bloom * u_param.a, 1.0);
+    let bloom = textureSample(tex, samp, in.uv).rgb * u_param.a;
+    // Tonemap ACES sur le bloom seul. La surface en dessous a déjà
+    // été tonemap-perçue par l'œil (sRGB 0..1) ; on évite le double-
+    // mapping en appliquant ACES uniquement sur la contribution add
+    // qu'on empile dessus, pour que les highlights ne saturent pas
+    // brutalement à blanc.
+    return vec4<f32>(aces_tonemap(bloom), 1.0);
 }
 "#;
 
