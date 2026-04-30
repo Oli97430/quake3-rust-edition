@@ -81,7 +81,8 @@ pub struct PostFx {
 
     compose_pipeline: wgpu::RenderPipeline,
     compose_uniform: wgpu::Buffer,
-    compose_bg: Option<wgpu::BindGroup>,
+    /// Compose utilise 2 bind groups (group 0 single + group 1 extra).
+    compose_bg: Option<(wgpu::BindGroup, wgpu::BindGroup)>,
 
     width: u32,
     height: u32,
@@ -157,38 +158,27 @@ impl PostFx {
             push_constant_ranges: &[],
         });
 
-        // BGL "compose" : sampler + 2 textures (HDR scene + bloom) + uniform.
+        // BGL "compose-extra" — bind group additionnel sur GROUP(1)
+        // pour le compose : bloom_tex + compose_uniform. Le compose
+        // pipeline a layout = [bgl_single, bgl_compose_extra]. Sépare
+        // les bindings du chemin single (extract/blur) qui restent
+        // sur group(0). Évite le conflit `@group(0) @binding(2)` qui
+        // existait quand on avait UN seul bind group multi-rôles.
         let bgl_compose = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("postfx-bgl-compose"),
+            label: Some("postfx-bgl-compose-extra"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -201,7 +191,7 @@ impl PostFx {
         });
         let layout_compose = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("postfx-layout-compose"),
-            bind_group_layouts: &[&bgl_compose],
+            bind_group_layouts: &[&bgl_single, &bgl_compose],
             push_constant_ranges: &[],
         });
 
@@ -291,6 +281,12 @@ impl PostFx {
     /// la création de PostFx, et à chaque resize. Sépare la création
     /// statique des bind groups (qui dépendent du view, recréé sur
     /// resize) de la stack des pipelines (qui ne change jamais).
+    ///
+    /// Pour le compose on crée DEUX bind groups :
+    /// * group(0) — single layout réutilisé : sampler + hdr_tex +
+    ///   uniform "fake" (juste pour valider le BGL ; pas lu par le
+    ///   compose shader).
+    /// * group(1) — compose-extra : bloom_tex + compose_uniform.
     pub fn set_hdr_input(&mut self, hdr_view: &TextureView) {
         self.extract_bg = Some(make_bg_single(
             &self.device,
@@ -300,16 +296,27 @@ impl PostFx {
             &self.extract_uniform,
             "postfx-extract-bg",
         ));
-        self.compose_bg = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("postfx-compose-bg"),
+        // Compose : binding `tex` = HDR view (group 0), binding `bloom_tex`
+        // = bloom_a (group 1). On réutilise extract_uniform comme stub
+        // sur le single BGL — non lu par fs_compose mais nécessaire
+        // pour que le BGL soit complet.
+        let compose_g0 = make_bg_single(
+            &self.device,
+            &self.bgl_single,
+            &self.sampler,
+            hdr_view,
+            &self.extract_uniform,
+            "postfx-compose-bg-g0",
+        );
+        let compose_g1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("postfx-compose-bg-g1"),
             layout: &self.bgl_compose,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(hdr_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bloom_a_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: self.compose_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_a_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: self.compose_uniform.as_entire_binding() },
             ],
-        }));
+        });
+        self.compose_bg = Some((compose_g0, compose_g1));
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -360,18 +367,14 @@ impl PostFx {
     /// début du HUD. `surface_view` doit pointer sur la swapchain
     /// courante (LoadOp::Clear → on remplit chaque pixel).
     pub fn apply(&self, encoder: &mut wgpu::CommandEncoder, surface_view: &TextureView) {
-        let (Some(extract_bg), Some(compose_bg)) = (&self.extract_bg, &self.compose_bg) else {
-            // PostFx pas encore initialisé via `set_hdr_input` — skip.
-            // Le frame sera noir, le suivant fera le bind correctement.
+        let (Some(extract_bg), Some((compose_g0, compose_g1))) =
+            (&self.extract_bg, &self.compose_bg)
+        else {
             return;
         };
-        // 1. Bright extract HDR → bloom_a.
         run_pass(encoder, &self.bloom_a_view, &self.extract_pipeline, extract_bg, "postfx-extract-pass");
-        // 2. Blur H : bloom_a → bloom_b.
         run_pass(encoder, &self.bloom_b_view, &self.blur_pipeline, &self.blur_bg_h, "postfx-blur-h-pass");
-        // 3. Blur V : bloom_b → bloom_a.
         run_pass(encoder, &self.bloom_a_view, &self.blur_pipeline, &self.blur_bg_v, "postfx-blur-v-pass");
-        // 4. Compose tonemap : HDR + bloom_a → surface (full replace).
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("postfx-compose-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -387,7 +390,8 @@ impl PostFx {
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.compose_pipeline);
-        pass.set_bind_group(0, compose_bg, &[]);
+        pass.set_bind_group(0, compose_g0, &[]);
+        pass.set_bind_group(1, compose_g1, &[]);
         pass.draw(0..3, 0..1);
     }
 }
@@ -511,15 +515,22 @@ fn vs_fullscreen(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// ─── Group 0 — common (sampler + main tex + single uniform) ───
+// Utilisé tel quel par extract/blur. Pour le compose, `tex` porte
+// le HDR scene (binding 1) ; le `u_param` (binding 2) est présent
+// mais ignoré par fs_compose (qui lit u_compose dans group(1)).
 @group(0) @binding(0) var samp: sampler;
-
-// Single-bind layout (extract / blur).
 @group(0) @binding(1) var tex: texture_2d<f32>;
 struct GenericU { a: f32, b: f32, c: f32, d: f32 };
 @group(0) @binding(2) var<uniform> u_param: GenericU;
 
-// Compose layout (HDR + bloom → surface).
-@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
+// ─── Group 1 — compose-extra (bloom + compose uniform) ───
+// Présent UNIQUEMENT pour le compose pipeline. Les pipelines extract
+// et blur ne lisent pas ces variables (validation OK : binding inutilisé
+// sur un BGL absent du pipeline_layout = warning, pas une erreur).
+@group(1) @binding(0) var bloom_tex: texture_2d<f32>;
+struct ComposeUParam { intensity: f32, exposure: f32, p1: f32, p2: f32 };
+@group(1) @binding(1) var<uniform> u_compose: ComposeUParam;
 
 // --- ACES Filmic tonemap (Hill / Narkowicz fitted) ---
 fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
@@ -573,14 +584,13 @@ fn fs_blur(in: VsOut) -> @location(0) vec4<f32> {
 // La surface est sRGB → wgpu fait le linear→sRGB encoding lors du write.
 // On retourne donc des valeurs LINÉAIRES tonemappées.
 //
-// `binding(1)` = HDR scene, `binding(2)` = bloom blurré.
-// Le param uniform est en `binding(3)` ici (compose layout).
-struct ComposeU { intensity: f32, exposure: f32, p1: f32, p2: f32 };
-@group(0) @binding(3) var<uniform> u_compose: ComposeU;
-
+// HDR = group(0) binding(1) (`tex`)
+// bloom = group(1) binding(0) (`bloom_tex`)
+// compose param = group(1) binding(1) (`u_compose`)
+// — déclarés en haut du fichier, partagés avec les autres entrypoints
+// du même module shader.
 @fragment
 fn fs_compose(in: VsOut) -> @location(0) vec4<f32> {
-    // `tex` (binding 1) = HDR scene.
     let scene = textureSample(tex, samp, in.uv).rgb * u_compose.exposure;
     let bloom = textureSample(bloom_tex, samp, in.uv).rgb * u_compose.intensity;
     let mapped = aces_tonemap(scene + bloom);
