@@ -216,6 +216,16 @@ impl PlayerMove {
         let mut time_left = dt;
         let mut hit_wall = false;
         let mut planes: smallvec::SmallVec<[Vec3; 5]> = smallvec::SmallVec::new();
+        // **Step-up bug fix** : on capture l'état AVANT la boucle slide
+        // pour le repasser à `try_step_up`. Sinon le step-up part de la
+        // position post-collision (collée au riser de la marche) avec
+        // une vélocité déjà clippée tangente au mur ⇒ le re-slide à
+        // hauteur de marche n'avance plus, l'heuristique
+        // `step_d > orig_d` rejette toujours, et le joueur est obligé
+        // de sauter pour franchir une simple marche. Q3 vanilla appelle
+        // ça `primal_velocity` dans `PM_SlideMove`.
+        let primal_origin = self.origin;
+        let primal_velocity = self.velocity;
 
         for _ in 0..4 {
             if time_left <= 0.0 {
@@ -290,9 +300,19 @@ impl PlayerMove {
         }
 
         // Step-up : si on a tapé un mur pendant un mouvement horizontal, tente
-        // de monter la marche et re-slider depuis là.
+        // de monter la marche et re-slider depuis là — en repartant de la
+        // position et de la vélocité **avant** le slide pour préserver
+        // l'élan vers la marche (cf. `primal_*`).
         if hit_wall && self.on_ground {
-            self.try_step_up(cmd, params, world, hull, mask);
+            self.try_step_up(
+                cmd,
+                params,
+                world,
+                hull,
+                mask,
+                primal_origin,
+                primal_velocity,
+            );
         }
 
         // Re-check ground après le move.
@@ -436,9 +456,15 @@ impl PlayerMove {
         world: &CollisionWorld,
         hull: TraceBox,
         mask: Contents,
+        // État avant la boucle slide — la position et la vélocité que le
+        // joueur avait à l'instant `T` quand il a tapé la marche, pas
+        // après que la collision ait clippé sa course.
+        primal_origin: Vec3,
+        primal_velocity: Vec3,
     ) {
-        let start_origin = self.origin;
-        let start_vel = self.velocity;
+        let post_slide_origin = self.origin;
+        let start_origin = primal_origin;
+        let start_vel = primal_velocity;
 
         // 1) Trace UP de STEP_HEIGHT.
         let up = start_origin + Vec3::Z * STEP_HEIGHT;
@@ -502,12 +528,19 @@ impl PlayerMove {
         }
         stepped.origin = down_tr.end_pos;
 
-        // Accepte le step-up seulement s'il nous fait avancer plus loin.
-        let orig_d = (self.origin - start_origin).length_squared();
-        let step_d = (stepped.origin - start_origin).length_squared();
-        if step_d > orig_d {
+        // Accepte le step-up seulement s'il nous fait avancer plus loin
+        // que ce que la simple boucle slide a obtenu. On compare en
+        // distance HORIZONTALE (XY) — sinon une montée verticale pure
+        // gagnerait artificiellement contre un slide horizontal qui
+        // glissait le long du mur.
+        let post_xy = (post_slide_origin - start_origin).truncate();
+        let step_xy = (stepped.origin - start_origin).truncate();
+        if step_xy.length_squared() > post_xy.length_squared() {
             self.origin = stepped.origin;
             self.velocity = stepped.velocity;
+        } else {
+            // Step-up rejeté : on garde le résultat post-slide.
+            self.origin = post_slide_origin;
         }
     }
 }
