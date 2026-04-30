@@ -1,0 +1,16 @@
+[package]
+name = "q3-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Chargeur d'images pour Q3 (TGA, JPG, PNG) avec cache"
+
+[dependencies]
+q3-common = { workspace = true }
+q3-filesystem = { workspace = true }
+image = { workspace = true }
+parking_lot = { workspace = true }
+hashbrown = { workspace = true }
+tracing = { workspace = true }

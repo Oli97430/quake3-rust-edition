@@ -1,0 +1,17 @@
+[package]
+name = "q3-game"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Logique de jeu Quake 3 (entités, physique joueur, règles)"
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-bsp = { workspace = true }
+q3-collision = { workspace = true }
+tracing = { workspace = true }
+hashbrown = { workspace = true }
+smallvec = { workspace = true }

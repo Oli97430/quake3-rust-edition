@@ -1,0 +1,14 @@
+[package]
+name = "q3-shader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Parseur de scripts .shader Quake 3"
+
+[dependencies]
+q3-common = { workspace = true }
+tracing = { workspace = true }
+hashbrown = { workspace = true }
+smallvec = { workspace = true }

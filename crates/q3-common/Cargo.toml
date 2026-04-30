@@ -1,0 +1,19 @@
+[package]
+name = "q3-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Types partagés du moteur : Cvar, Cmd, erreurs, logger"
+
+[dependencies]
+q3-math = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+hashbrown = { workspace = true }
+smallvec = { workspace = true }
+bitflags = { workspace = true }

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logo carré "Q3 RUST" 256×256 — utilisable comme icone, avatar GitHub,
+  point d'entrée graphique. Vectoriel, palette HUD cohérente avec
+  banner.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"
+     preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"   stop-color="#3a1908"/>
+      <stop offset="60%"  stop-color="#1a1216"/>
+      <stop offset="100%" stop-color="#04050b"/>
+    </radialGradient>
+    <linearGradient id="title-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#ffe28a"/>
+      <stop offset="100%" stop-color="#d96a1c"/>
+    </linearGradient>
+    <linearGradient id="rust-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f29c4d"/>
+      <stop offset="100%" stop-color="#7a2f0b"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+  </defs>
+
+  <!-- Fond carré arrondi style icone OS. -->
+  <rect width="256" height="256" rx="38" ry="38" fill="url(#bg)"/>
+
+  <!-- Liseré accent cyan en haut + bas. -->
+  <rect x="14" y="14" width="228" height="3" rx="1.5" fill="#26a8f0"/>
+  <rect x="14" y="239" width="228" height="2" rx="1" fill="#26a8f0" opacity="0.55"/>
+
+  <!-- Glow Q3. -->
+  <g filter="url(#glow)" opacity="0.7">
+    <text x="128" y="120" font-family="Impact, 'Arial Black', sans-serif"
+          font-size="78" font-weight="900" letter-spacing="2"
+          fill="#ff8a26" text-anchor="middle">Q3</text>
+  </g>
+  <!-- Q3 nette. -->
+  <text x="128" y="120" font-family="Impact, 'Arial Black', sans-serif"
+        font-size="78" font-weight="900" letter-spacing="2"
+        text-anchor="middle"
+        fill="url(#title-fill)"
+        stroke="#1a1216" stroke-width="2"
+        paint-order="stroke">Q3</text>
+
+  <!-- RUST en dessous. -->
+  <text x="128" y="178" font-family="Impact, 'Arial Black', sans-serif"
+        font-size="48" font-weight="900" letter-spacing="3"
+        text-anchor="middle"
+        fill="url(#rust-fill)"
+        stroke="#1a1216" stroke-width="2"
+        paint-order="stroke">RUST</text>
+
+  <!-- EDITION minuscule. -->
+  <text x="128" y="206" font-family="'Trebuchet MS', sans-serif"
+        font-size="14" letter-spacing="6"
+        fill="#cfe6ff" opacity="0.8" text-anchor="middle">EDITION</text>
+</svg>

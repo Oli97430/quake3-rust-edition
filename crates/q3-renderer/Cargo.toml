@@ -1,0 +1,27 @@
+[package]
+name = "q3-renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Renderer wgpu + fenêtre winit pour Quake 3 Rust"
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-bsp = { workspace = true }
+q3-shader = { workspace = true }
+q3-image = { workspace = true }
+q3-filesystem = { workspace = true }
+q3-model = { workspace = true }
+glam = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+raw-window-handle = { workspace = true }
+bytemuck = { workspace = true }
+hashbrown = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+font8x8 = { workspace = true }
