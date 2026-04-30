@@ -71,6 +71,20 @@ pub struct PlayerMove {
     /// tient dans l'espace au-dessus, d'où la nécessité de le stocker sur
     /// le PlayerMove et non de le recalculer du cmd à chaque tick.
     pub crouching: bool,
+    /// **Slide tactique** — temps restant en secondes. > 0 = en train de
+    /// glisser : friction réduite, hull crouch forcé, l'élan d'entrée
+    /// est conservé. Décrémenté chaque tick. Termine à 0 ou si le
+    /// joueur saute (qui consomme le boost de momentum).
+    pub slide_remaining: f32,
+    /// Cooldown avant de pouvoir re-déclencher un slide. Évite le spam.
+    pub slide_cooldown: f32,
+    /// **Dash** — durée d'invulnérabilité pendant le dash actif. Pendant
+    /// la fenêtre, l'air control est désactivé et la vitesse imprimée
+    /// par le dash domine. Dash se cumule avec strafe-jump : à la fin
+    /// du dash, le moteur reprend ses calculs de friction normaux.
+    pub dash_remaining: f32,
+    /// Cooldown avant de pouvoir re-dash.
+    pub dash_cooldown: f32,
 }
 
 impl PlayerMove {
@@ -81,7 +95,21 @@ impl PlayerMove {
             view_angles: Angles::ZERO,
             on_ground: true,
             crouching: false,
+            slide_remaining: 0.0,
+            slide_cooldown: 0.0,
+            dash_remaining: 0.0,
+            dash_cooldown: 0.0,
         }
+    }
+
+    /// `true` pendant la fenêtre active d'un slide tactique.
+    pub fn is_sliding(&self) -> bool {
+        self.slide_remaining > 0.0
+    }
+
+    /// `true` pendant la fenêtre active d'un dash.
+    pub fn is_dashing(&self) -> bool {
+        self.dash_remaining > 0.0
     }
 }
 
@@ -97,8 +125,40 @@ pub struct MoveCmd {
     /// Shift maintenu : marche lente — cap la vitesse à `walk_speed`, ce
     /// qui rend les pas silencieux dans le système footsteps de l'engine.
     pub walk: bool,
+    /// **Edge** : `true` uniquement à la frame où le joueur déclenche un
+    /// slide tactique (Ctrl appuyé en course). Le moteur consomme ce
+    /// flag pour démarrer la fenêtre `slide_remaining`. Différent de
+    /// `crouch` qui est continu (state).
+    pub slide_pressed: bool,
+    /// **Edge** : `true` quand le joueur déclenche un dash via
+    /// double-tap d'une touche directionnelle. La direction du dash
+    /// est dérivée de `(forward, side)` au moment du déclenchement.
+    pub dash_pressed: bool,
     pub delta_time: f32,
 }
+
+/// Durée active d'un slide tactique (secondes). Calé sur le rythme Q3 :
+/// 0.6 s = ~3 unités d'altitude écrasée + ~150 u parcourues à 250 u/s.
+pub const SLIDE_DURATION: f32 = 0.6;
+/// Cooldown entre deux slides (secondes). Évite le spam et oblige à
+/// reconstruire de la vitesse entre chaque glisse.
+pub const SLIDE_COOLDOWN: f32 = 1.0;
+/// Boost de vitesse appliqué au lancement du slide. Le slide est rentable
+/// quand l'on a déjà de l'élan (> 220 u/s) — sinon l'absence de friction
+/// pendant la fenêtre paye le boost. Plafond souple à 700 u/s pour ne
+/// pas bricoler une voiture de course.
+pub const SLIDE_BOOST_MULT: f32 = 1.35;
+/// Vitesse min pour pouvoir slider — sinon le slide se réduit à un
+/// crouch banal et perd son intérêt.
+pub const SLIDE_MIN_SPEED: f32 = 220.0;
+/// Plafond de vitesse résultante d'un slide (clamp).
+pub const SLIDE_MAX_SPEED: f32 = 700.0;
+/// Durée du dash (secondes). Court — c'est une impulsion, pas un sprint.
+pub const DASH_DURATION: f32 = 0.15;
+/// Cooldown entre deux dashes.
+pub const DASH_COOLDOWN: f32 = 0.9;
+/// Vitesse imprimée par un dash (unités/s).
+pub const DASH_SPEED: f32 = 520.0;
 
 /// Applique la friction de Q3 (exponentielle par tick) avec un coefficient
 /// explicite. L'appelant choisit `friction` = `params.friction` pendant un
@@ -322,6 +382,58 @@ impl PlayerMove {
     fn integrate_velocity(&mut self, cmd: MoveCmd, params: PhysicsParams) {
         let basis = self.view_angles.to_vectors();
 
+        // ─── Trigger SLIDE tactique ───────────────────────────────────
+        // Conditions : edge `slide_pressed`, on_ground, vitesse horizontale
+        // suffisante, cooldown écoulé. On force le crouch (hull bas) et
+        // on boost la vélocité dans la direction courante.
+        if cmd.slide_pressed
+            && self.on_ground
+            && self.slide_cooldown <= 0.0
+            && !self.is_sliding()
+        {
+            let horiz = Vec3::new(self.velocity.x, self.velocity.y, 0.0);
+            let speed = horiz.length();
+            if speed >= SLIDE_MIN_SPEED {
+                let dir = horiz / speed;
+                let new_speed = (speed * SLIDE_BOOST_MULT).min(SLIDE_MAX_SPEED);
+                self.velocity.x = dir.x * new_speed;
+                self.velocity.y = dir.y * new_speed;
+                self.crouching = true;
+                self.slide_remaining = SLIDE_DURATION;
+                self.slide_cooldown = SLIDE_COOLDOWN;
+            }
+        }
+
+        // ─── Trigger DASH ─────────────────────────────────────────────
+        // Edge `dash_pressed`, cooldown écoulé. Direction = wish input
+        // ((forward, side) projetés sur view) si > 0, sinon forward
+        // par défaut (dash en avant).
+        if cmd.dash_pressed && self.dash_cooldown <= 0.0 {
+            let mut dash_dir =
+                basis.forward * cmd.forward + basis.right * cmd.side;
+            dash_dir.z = 0.0;
+            let dl = dash_dir.length();
+            let dash_dir = if dl > 0.0001 {
+                dash_dir / dl
+            } else {
+                let mut f = basis.forward;
+                f.z = 0.0;
+                f.normalize()
+            };
+            // Le dash écrase la composante horizontale de la velocity et
+            // s'additionne à la verticale (donc on peut dasher en l'air).
+            self.velocity.x = dash_dir.x * DASH_SPEED;
+            self.velocity.y = dash_dir.y * DASH_SPEED;
+            self.dash_remaining = DASH_DURATION;
+            self.dash_cooldown = DASH_COOLDOWN;
+        }
+
+        // Décrémente les timers (clampés à 0).
+        self.slide_remaining = (self.slide_remaining - cmd.delta_time).max(0.0);
+        self.slide_cooldown = (self.slide_cooldown - cmd.delta_time).max(0.0);
+        self.dash_remaining = (self.dash_remaining - cmd.delta_time).max(0.0);
+        self.dash_cooldown = (self.dash_cooldown - cmd.delta_time).max(0.0);
+
         // Wish velocity = intention du joueur dans le plan horizontal.
         // `cmd.forward` / `cmd.side` sont des fractions dans [-1, 1]
         // (bouton enfoncé = 1.0), qu'on scale par `max_speed` pour
@@ -357,27 +469,48 @@ impl PlayerMove {
             // déplacement n'est enfoncée — fait passer le temps d'arrêt
             // depuis `max_speed` d'environ 350 ms à ~110 ms tout en
             // préservant la courbe Q3 classique pendant un strafe-jump.
+            // Pendant un slide tactique on coupe quasi entièrement la
+            // friction pour préserver l'élan boost (sensation glisse) ;
+            // en sortie de slide la friction normale reprend la main.
             let no_wish = wish_dir.length_squared() < 1e-6;
-            let friction = if no_wish {
+            let friction = if self.is_sliding() {
+                params.friction * 0.15
+            } else if no_wish {
                 params.friction * params.stop_friction_mult
             } else {
                 params.friction
             };
             self.velocity = apply_friction(self.velocity, cmd.delta_time, params, friction);
-            self.velocity = accelerate(
-                self.velocity,
-                wish_dir,
-                wish_speed,
-                params.accelerate,
-                cmd.delta_time,
-            );
-            // Saut désactivé pendant le crouch — Q3 permet techniquement
-            // le "duck jump" mais le résultat est une hauteur ridicule
-            // et ça casse la lisibilité du mouvement. On aligne sur le
-            // comportement par défaut de la plupart des mods compétitifs.
-            if cmd.jump && !self.crouching {
+            // Pendant un dash, on bypasse l'accélération wish — la
+            // vélocité imprimée par le dash domine sans être contredite
+            // par le steering du joueur. À la fin du dash (timer 0) on
+            // reprend le pmove standard.
+            if !self.is_dashing() {
+                self.velocity = accelerate(
+                    self.velocity,
+                    wish_dir,
+                    wish_speed,
+                    params.accelerate,
+                    cmd.delta_time,
+                );
+            }
+            // **Slide-jump** : sauter pendant un slide consomme la
+            // fenêtre slide (slide_remaining → 0) ET applique le saut.
+            // La vélocité horizontale boostée du slide est préservée,
+            // donc on s'envole comme un kangourou de la momentum gagnée.
+            // Saut normal aussi possible (on_ground sans crouch).
+            let jump_allowed_now = cmd.jump
+                && (!self.crouching || self.is_sliding());
+            if jump_allowed_now {
                 self.velocity.z = params.jump_velocity;
                 self.on_ground = false;
+                if self.is_sliding() {
+                    self.slide_remaining = 0.0;
+                    // On déstandby le crouch pour que le hull se relève
+                    // en l'air — sinon le joueur reste petit pendant
+                    // tout le saut, ce qui rend le mantling impossible.
+                    self.crouching = false;
+                }
             }
         } else {
             // Air control : même formule mais accel bien plus faible.
@@ -478,6 +611,10 @@ impl PlayerMove {
             view_angles: self.view_angles,
             on_ground: false,
             crouching: self.crouching,
+            slide_remaining: self.slide_remaining,
+            slide_cooldown: self.slide_cooldown,
+            dash_remaining: self.dash_remaining,
+            dash_cooldown: self.dash_cooldown,
         };
         // On refait juste le slide (sans ré-intégrer la vitesse), en réutilisant
         // tick_collide… mais tick_collide ré-appliquerait la vitesse. On fait

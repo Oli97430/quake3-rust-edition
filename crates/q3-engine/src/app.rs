@@ -475,6 +475,16 @@ pub struct App {
     /// on veut garder la continuité sonore de la volée + la voix humaine
     /// qui annonce « Humiliation! » par-dessus.
     sfx_humiliation: Option<SoundHandle>,
+    /// **Announcer fraglimit countdown** (A5) — Q3 a des samples vocaux
+    /// canoniques pour les 3 derniers frags du match. Joués UNE FOIS
+    /// au moment où le compteur joueur passe sous le seuil.
+    sfx_one_frag: Option<SoundHandle>,
+    sfx_two_frags: Option<SoundHandle>,
+    sfx_three_frags: Option<SoundHandle>,
+    /// `Some(n)` si on a déjà annoncé "{n} frag(s) left" — empêche la
+    /// répétition à chaque kill quand on stationne à n=1 par exemple.
+    /// Reset à `None` au restart de match.
+    last_frags_announced: Option<u32>,
     /// Médaille « Excellent » — Q3 la joue quand le joueur enchaîne 2
     /// frags en moins de 2 secondes. Implémentée via `last_frag_at` :
     /// si `time_sec - last_frag_at ≤ EXCELLENT_WINDOW_SEC` au moment d'un
@@ -1130,6 +1140,12 @@ struct Projectile {
     /// pour les projectiles qui émettent une traînée (rocket, grenade, BFG).
     /// `0.0` garantit qu'un premier puff sort dès le tick de spawn.
     next_trail_at: f32,
+    /// **Lock-on** (W5) — index dans `self.bots` du bot poursuivi.
+    /// `None` = projectile balistique normal. Pendant l'update, la
+    /// vélocité est progressivement réorientée vers le centre du bot
+    /// (steering proportionnel à `HOMING_TURN_RATE`). Si le bot meurt
+    /// ou disparaît, le projectile redevient balistique.
+    homing_target: Option<usize>,
 }
 
 /// Effet d'explosion — dessiné chaque frame tant que `time_sec < expire_at`.
@@ -1825,6 +1841,39 @@ impl WeaponId {
         }
     }
 
+    /// Paramètres du **tir secondaire** (alt-fire). `None` = pas d'alt
+    /// défini pour cette arme → le moteur retombe sur le primaire.
+    /// Convention :
+    /// * **Shotgun slug** : 1 pellet AP, 0 spread, +damage, cooldown long.
+    /// * **Railgun ricochet** : même params que primaire mais flag de
+    ///   ricochet géré en aval (cf. `alt_active` dans fire_weapon).
+    /// * **Rocket lock-on** : params identiques à primaire, le lock-on
+    ///   s'applique au moment du spawn projectile.
+    fn secondary_params(self) -> Option<WeaponParams> {
+        let p = self.params();
+        match self {
+            Self::Shotgun => Some(WeaponParams {
+                damage: 80,        // un slug de précision (vs 11×10 spread)
+                cooldown: 1.5,     // beaucoup plus long que SG primaire
+                pellets: 1,
+                spread_deg: 0.0,
+                ammo_cost: 2,      // 2 cartouches pour un slug
+                ..p
+            }),
+            Self::Railgun => Some(WeaponParams {
+                cooldown: p.cooldown * 1.4, // ricochet = pas spammable
+                damage: 65, // dmg primaire conservé pour le 1er hit
+                ..p
+            }),
+            Self::Rocketlauncher => Some(WeaponParams {
+                cooldown: p.cooldown * 1.5, // lock-on a un coût rythmique
+                ..p
+            }),
+            // Pas d'alt défini → primaire utilisé.
+            _ => None,
+        }
+    }
+
     fn params(self) -> WeaponParams {
         match self {
             Self::Gauntlet => WeaponParams {
@@ -2260,8 +2309,24 @@ struct Input {
     walk: bool,
     /// `true` tant que bouton gauche est enfoncé.
     fire: bool,
+    /// `true` tant que bouton droit est enfoncé pour le **tir
+    /// secondaire** (alt-fire). En spectator c'est utilisé pour cycler
+    /// la follow-cam — le toggle de mode est géré côté handler souris.
+    /// Edge consommé par fire_weapon → false après 1 tir alt.
+    secondary_fire: bool,
     /// `true` tant que TAB est maintenu — affiche l'overlay scoreboard.
     scoreboard: bool,
+    /// **Slide tactique** (M3) — armé à la frame où Ctrl passe de
+    /// relâché → enfoncé pendant qu'on court vite. Consommé au prochain
+    /// `MoveCmd::slide_pressed` puis remis à false.
+    slide_armed: bool,
+    /// **Dash** (M4) — armé par double-tap d'une touche directionnelle
+    /// dans une fenêtre de 250 ms. Consommé au prochain
+    /// `MoveCmd::dash_pressed`.
+    dash_armed: bool,
+    /// Timestamps du dernier press par direction, pour détecter le
+    /// double-tap. Indexé `[forward, back, left, right]`.
+    last_dir_press: [f32; 4],
 }
 
 impl Input {
@@ -2623,6 +2688,10 @@ impl App {
             sfx_hit: None,
             sfx_kill_confirm: None,
             sfx_humiliation: None,
+            sfx_one_frag: None,
+            sfx_two_frags: None,
+            sfx_three_frags: None,
+            last_frags_announced: None,
             sfx_excellent: None,
             last_frag_at: f32::NEG_INFINITY,
             sfx_impressive: None,
@@ -3023,6 +3092,31 @@ impl App {
                 if let Some(h) = try_load_sfx(&self.vfs, snd, p) {
                     self.sfx_humiliation = Some(h);
                     info!("sfx: humiliation '{p}' chargé");
+                    break;
+                }
+            }
+            // Announcer fraglimit countdown (A5). Samples Q3 canoniques
+            // dans `sound/feedback/`. Les 3 derniers frags annoncés —
+            // au-delà aucune annonce. Si un sample manque, l'annonce
+            // est silencieuse (le check fraglimit reste fonctionnel).
+            for p in &["sound/feedback/1_frag.wav", "sound/feedback/one_frag.wav"] {
+                if let Some(h) = try_load_sfx(&self.vfs, snd, p) {
+                    self.sfx_one_frag = Some(h);
+                    info!("sfx: one_frag '{p}' chargé");
+                    break;
+                }
+            }
+            for p in &["sound/feedback/2_frags.wav", "sound/feedback/two_frags.wav"] {
+                if let Some(h) = try_load_sfx(&self.vfs, snd, p) {
+                    self.sfx_two_frags = Some(h);
+                    info!("sfx: two_frags '{p}' chargé");
+                    break;
+                }
+            }
+            for p in &["sound/feedback/3_frags.wav", "sound/feedback/three_frags.wav"] {
+                if let Some(h) = try_load_sfx(&self.vfs, snd, p) {
+                    self.sfx_three_frags = Some(h);
+                    info!("sfx: three_frags '{p}' chargé");
                     break;
                 }
             }
@@ -3602,6 +3696,7 @@ impl App {
         self.chat_feed.clear();
         self.pickup_toasts.clear();
         self.player_streak = 0;
+        self.last_frags_announced = None;
         self.next_chat_at = 0.0;
         self.next_player_taunt_at = 0.0;
         self.last_death_cause = None;
@@ -4470,6 +4565,28 @@ impl App {
     /// le dernier respawn).
     fn on_player_frag(&mut self) {
         self.player_streak = self.player_streak.saturating_add(1);
+
+        // **Announcer fraglimit countdown** (A5) — annonce vocale Q3
+        // canonique aux 3 derniers frags. `last_frags_announced` évite
+        // de re-annoncer si le compteur stationne (ex: 1 frag left
+        // pendant 5 kills suite à un autoswitch-streak côté ennemi).
+        let frags_left = FRAG_LIMIT.saturating_sub(self.frags);
+        if (1..=3).contains(&frags_left)
+            && self.last_frags_announced != Some(frags_left)
+        {
+            self.last_frags_announced = Some(frags_left);
+            let handle = match frags_left {
+                1 => self.sfx_one_frag,
+                2 => self.sfx_two_frags,
+                3 => self.sfx_three_frags,
+                _ => None,
+            };
+            if let (Some(snd), Some(h)) = (self.sound.as_ref(), handle) {
+                play_medal(snd, h, self.player.origin);
+                info!("announcer: {frags_left} frag(s) left");
+            }
+        }
+
         // Tiers Unreal : label + couleur. Seuls les seuils exacts
         // déclenchent un toast — entre 3 et 5 on reste silencieux.
         let (label, color) = match self.player_streak {
@@ -4679,13 +4796,11 @@ impl App {
     /// Respecte `PARTICLE_MAX` : les plus vieilles particules sont drop
     /// en priorité quand on approche du cap.
     fn push_explosion_particles(&mut self, origin: Vec3) {
+        // Couche 1 — sparks chauds (orange/jaune, rapide, courte vie).
         for _ in 0..PARTICLE_EXPLOSION_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                // Vec plein → drop la plus vieille pour faire de la place.
                 self.particles.remove(0);
             }
-            // Direction hémisphérique : flip z si négatif pour biaiser
-            // vers le haut (le sol est presque toujours dessous du boom).
             let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit());
             let len = dir.length();
             if len < 1e-3 {
@@ -4696,13 +4811,10 @@ impl App {
             if dir.z < 0.0 {
                 dir.z = -dir.z;
             }
-            // Vitesse ∈ [0.5, 1.0) × PARTICLE_EXPLOSION_SPEED pour variance.
             let speed = PARTICLE_EXPLOSION_SPEED * (0.5 + 0.5 * rand_unit().abs());
             let velocity = dir * speed;
-            // Couleur entre orange vif et jaune incandescent.
             let hue = rand_unit().abs();
             let color = [1.0, 0.55 + 0.40 * hue, 0.15 + 0.30 * hue, 1.0];
-            // Lifetime ∈ [0.7, 1.0) × PARTICLE_EXPLOSION_LIFETIME.
             let lifetime = PARTICLE_EXPLOSION_LIFETIME * (0.7 + 0.3 * rand_unit().abs());
             self.particles.push(Particle {
                 origin,
@@ -4711,6 +4823,55 @@ impl App {
                 expire_at: self.time_sec + lifetime,
                 lifetime,
             });
+        }
+        // Couche 2 — **débris** (P3) : chunks gris-foncés à orange terne,
+        // plus lents, plus longs en vie, biais vers le bas (gravité fait
+        // déjà son boulot mais le tir initial est plus latéral). Donne
+        // l'impression d'un vrai morceau de matière éjectée.
+        let debris_count = (PARTICLE_EXPLOSION_COUNT / 3).max(6);
+        for _ in 0..debris_count {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.remove(0);
+            }
+            let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit() * 0.6);
+            let len = dir.length();
+            if len < 1e-3 {
+                dir = Vec3::Z;
+            } else {
+                dir /= len;
+            }
+            // Speed plus lent (~50 % du flash) — débris alourdis.
+            let speed = PARTICLE_EXPLOSION_SPEED
+                * 0.55
+                * (0.4 + 0.6 * rand_unit().abs());
+            let velocity = dir * speed;
+            // Tons sombres : gris brun → orange terni (cendres tièdes).
+            let h = rand_unit().abs();
+            let color = [0.30 + 0.30 * h, 0.20 + 0.20 * h, 0.10 + 0.10 * h, 1.0];
+            // Vie 1.5× plus longue pour qu'ils traînent.
+            let lifetime =
+                PARTICLE_EXPLOSION_LIFETIME * 1.5 * (0.7 + 0.3 * rand_unit().abs());
+            self.particles.push(Particle {
+                origin,
+                velocity,
+                color,
+                expire_at: self.time_sec + lifetime,
+                lifetime,
+            });
+        }
+        // Couche 3 — **flash initial** (P3) : un dlight ultra-bref super
+        // intense pour évoquer la détonation chimique (vs. la fire-glow
+        // qui suit, plus longue et tiède). Renforce la lecture "boum"
+        // de l'œil sans nécessiter de billboard.
+        if let Some(r) = self.renderer.as_mut() {
+            r.spawn_dlight(
+                origin,
+                500.0,           // radius
+                [1.0, 0.95, 0.85],
+                8.0,             // intensity boost vs glow standard 4-5
+                self.time_sec,
+                0.08,            // lifetime court (80 ms)
+            );
         }
     }
 
@@ -5810,8 +5971,21 @@ impl App {
         use q3_collision::Contents;
         let Some(world) = self.world.as_ref() else { return false; };
         let weapon = self.active_weapon;
-        let params = weapon.params();
+        // **Tir secondaire** (RMB) — chaque arme implémente sa variante
+        // alt-fire via `secondary_params(weapon)` qui modifie damage/
+        // pellets/spread/cooldown/range au lancement. Pour les armes
+        // sans alt-fire défini, on retombe sur les params primaires.
+        let secondary = self.input.secondary_fire;
+        let mut params = weapon.params();
+        let mut alt_active = false;
+        if secondary {
+            if let Some(alt) = weapon.secondary_params() {
+                params = alt;
+                alt_active = true;
+            }
+        }
         let slot = weapon.slot() as usize;
+        let _ = alt_active; // utilisé plus bas pour rocket lock-on / rail ricochet
 
         // Early-out si pas assez de munitions. On joue un "click empty"
         // bridé à 1 fois par 0.4 s pour éviter le spam log/audio.
@@ -5976,6 +6150,17 @@ impl App {
                 ),
             };
             let dmg_mul = self.player_damage_multiplier();
+            // **Rocket lock-on** (W5) — alt-fire sur RL : on cherche le
+            // bot le plus proche dans un cône frontal de 30° et 1500u.
+            // Si trouvé, on tag le projectile pour homing. Sinon, ça
+            // part en ligne droite comme un primaire — lock raté = tir
+            // perdu, pas un cancel : le joueur s'engage en pressant RMB.
+            let homing_target = if alt_active && weapon == WeaponId::Rocketlauncher
+            {
+                find_lock_target(&self.bots, eye, basis.forward, self.time_sec)
+            } else {
+                None
+            };
             self.projectiles.push(Projectile {
                 origin: spawn,
                 velocity: basis.forward * speed,
@@ -5990,6 +6175,7 @@ impl App {
                 mesh,
                 tint,
                 next_trail_at: 0.0,
+                homing_target,
             });
             return true;
         }
@@ -6130,6 +6316,101 @@ impl App {
                 let hit_pt = eye + fwd * t_wall;
                 pending_sparks.push((hit_pt, world_trace.plane_normal, spark_world_color));
                 pending_wall_marks.push((hit_pt, world_trace.plane_normal));
+
+                // **Rail ricochet** (W7) : si alt-fire actif sur railgun
+                // ET le tir a tapé un mur sans bot, on rebondit le rai
+                // selon la loi de Snell-Descartes (réflexion miroir) et
+                // on relance une trace courte (1024u) depuis le point
+                // d'impact, en cherchant un bot. Dégâts à 50% pour
+                // équilibrer.
+                if alt_active && matches!(weapon, WeaponId::Railgun) {
+                    let n = world_trace.plane_normal;
+                    let reflected = fwd - n * 2.0 * fwd.dot(n);
+                    let ricochet_origin =
+                        hit_pt + reflected * 2.0; // léger lift hors mur
+                    let ricochet_range = 1024.0_f32;
+                    let ricochet_end =
+                        ricochet_origin + reflected * ricochet_range;
+                    let r_trace = world.collision.trace_ray(
+                        ricochet_origin,
+                        ricochet_end,
+                        Contents::MASK_SHOT,
+                    );
+                    let r_t_wall = r_trace.fraction * ricochet_range;
+                    let mut r_best: Option<(f32, usize)> = None;
+                    for (i, d) in self.bots.iter().enumerate() {
+                        if d.health.is_dead() || d.invul_until > self.time_sec
+                        {
+                            continue;
+                        }
+                        let center =
+                            d.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+                        let oc = center - ricochet_origin;
+                        let t_closest = oc.dot(reflected);
+                        if t_closest < 0.0 || t_closest > r_t_wall {
+                            continue;
+                        }
+                        let d_perp_sq =
+                            oc.length_squared() - t_closest * t_closest;
+                        if d_perp_sq > BOT_HIT_RADIUS * BOT_HIT_RADIUS {
+                            continue;
+                        }
+                        match r_best {
+                            Some((t, _)) if t <= t_closest => {}
+                            _ => r_best = Some((t_closest, i)),
+                        }
+                    }
+                    // Visuel : 2nd beam du point d'impact vers la fin
+                    // du ricochet (bot ou mur).
+                    let (r_t_hit, r_hit_pt) = match r_best {
+                        Some((t, _)) => (t, ricochet_origin + reflected * t),
+                        None if r_trace.fraction < 1.0 => (
+                            r_t_wall,
+                            ricochet_origin + reflected * r_t_wall,
+                        ),
+                        None => (ricochet_range, ricochet_end),
+                    };
+                    let _ = r_t_hit;
+                    self.beams.push(ActiveBeam {
+                        a: hit_pt,
+                        b: r_hit_pt,
+                        color: [0.95, 0.45, 0.85, 0.75], // teinte ricochet
+                        expire_at: self.time_sec + 0.5,
+                        lifetime: 0.5,
+                        style: BeamStyle::Spiral,
+                    });
+                    if let Some((t, idx)) = r_best {
+                        let dmg = (params.damage as f32 * 0.5) as i32
+                            * self.player_damage_multiplier();
+                        let bot_driver = &mut self.bots[idx];
+                        let bot_pos =
+                            bot_driver.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+                        let taken = bot_driver.health.take_damage(dmg);
+                        if taken > 0 {
+                            bot_driver.last_damage_at = self.time_sec;
+                            any_hit = true;
+                            pending_damage_nums
+                                .push((bot_pos, taken, false));
+                            let r_hit = ricochet_origin + reflected * t;
+                            pending_sparks.push((
+                                r_hit,
+                                -reflected,
+                                spark_flesh_color,
+                            ));
+                            if bot_driver.health.is_dead() {
+                                let name = bot_driver.bot.name.clone();
+                                self.frags = self.frags.saturating_add(1);
+                                pending_player_frags += 1;
+                                pending_kills.push((
+                                    KillActor::Player,
+                                    KillActor::Bot(name),
+                                    weapon,
+                                ));
+                                pending_gibs.push(bot_pos);
+                            }
+                        }
+                    }
+                }
             }
 
             // Visuel : LG et Railgun tracent une ligne œil → point d'impact.
@@ -6345,6 +6626,40 @@ impl App {
             // Gravité : accélère Vz vers le bas chaque tick.
             if p.gravity != 0.0 {
                 p.velocity.z -= p.gravity * dt;
+            }
+            // **Rocket lock-on** (W5) — steering proportionnel vers le
+            // centre du bot ciblé. Si le bot meurt entre temps ou
+            // disparaît de la liste, on dropping le target → balistique.
+            // `HOMING_TURN_RATE` ≈ 4 rad/s : assez tournant pour suivre
+            // un bot qui strafe, pas tellement que le rocket fait des
+            // U-turn impossibles à esquiver.
+            if let Some(target_idx) = p.homing_target {
+                const HOMING_TURN_RATE: f32 = 4.0;
+                if let Some(bot) = self.bots.get(target_idx) {
+                    if !bot.health.is_dead() {
+                        let target_pos =
+                            bot.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+                        let to_t = target_pos - p.origin;
+                        let dist = to_t.length();
+                        if dist > 1.0 {
+                            let want_dir = to_t / dist;
+                            let cur_speed = p.velocity.length().max(1.0);
+                            let cur_dir = p.velocity / cur_speed;
+                            // Lerp directionnel limité par HOMING_TURN_RATE
+                            // (radians/s). On approxime via slerp simple :
+                            // mix puis renormalise.
+                            let mix = (HOMING_TURN_RATE * dt).min(1.0);
+                            let new_dir = (cur_dir * (1.0 - mix)
+                                + want_dir * mix)
+                                .normalize();
+                            p.velocity = new_dir * cur_speed;
+                        }
+                    } else {
+                        p.homing_target = None;
+                    }
+                } else {
+                    p.homing_target = None;
+                }
             }
             let next = p.origin + p.velocity * dt;
 
@@ -6965,6 +7280,26 @@ impl App {
     /// (sélection d'arme). Roue ouverte → envoi de message pour les
     /// digits `1..=8` ou cancel pour `9`. Centralisé ici plutôt que
     /// dispersé dans 9 branches du `match` clavier.
+    /// Détecte un double-tap d'une touche directionnelle pour déclencher
+    /// un dash. `dir_idx` : 0=forward, 1=back, 2=left, 3=right.
+    /// Fenêtre de 250 ms entre les deux presses — au-delà on ne considère
+    /// pas le 2e tap comme une suite mais comme un nouveau tap initial.
+    fn detect_double_tap(&mut self, dir_idx: usize) {
+        const DOUBLE_TAP_WINDOW: f32 = 0.25;
+        if dir_idx >= 4 { return; }
+        let now = self.time_sec;
+        let last = self.input.last_dir_press[dir_idx];
+        if now - last < DOUBLE_TAP_WINDOW {
+            // 2e tap dans la fenêtre → arme le dash. Le pmove le
+            // consomme au prochain tick et arme son cooldown.
+            self.input.dash_armed = true;
+            // Reset le timestamp pour ne pas re-déclencher au 3e tap.
+            self.input.last_dir_press[dir_idx] = 0.0;
+        } else {
+            self.input.last_dir_press[dir_idx] = now;
+        }
+    }
+
     fn handle_digit_or_wheel(&mut self, digit: u8) {
         if self.chat_wheel_open {
             self.chat_wheel_open = false;
@@ -7183,13 +7518,25 @@ impl App {
             // Les alias KeyQ/KeyZ couvrent le cas où le joueur presse
             // LES LETTRES labellisées "A" et "W" sur un clavier AZERTY.
             KeyCode::KeyW | KeyCode::KeyZ | KeyCode::ArrowUp => {
-                self.input.fwd_down = pressed
+                let was = self.input.fwd_down;
+                self.input.fwd_down = pressed;
+                if pressed && !was { self.detect_double_tap(0); }
             }
-            KeyCode::KeyS | KeyCode::ArrowDown => self.input.back_down = pressed,
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                let was = self.input.back_down;
+                self.input.back_down = pressed;
+                if pressed && !was { self.detect_double_tap(1); }
+            }
             KeyCode::KeyA | KeyCode::KeyQ | KeyCode::ArrowLeft => {
-                self.input.left_down = pressed
+                let was = self.input.left_down;
+                self.input.left_down = pressed;
+                if pressed && !was { self.detect_double_tap(2); }
             }
-            KeyCode::KeyD | KeyCode::ArrowRight => self.input.right_down = pressed,
+            KeyCode::KeyD | KeyCode::ArrowRight => {
+                let was = self.input.right_down;
+                self.input.right_down = pressed;
+                if pressed && !was { self.detect_double_tap(3); }
+            }
             KeyCode::Space => {
                 self.input.jump = pressed;
                 // En spectator, SPACE relâche la follow-cam → free-fly.
@@ -7199,7 +7546,22 @@ impl App {
                 }
             }
             // Ctrl : crouch (gauche ou droite, les deux font le job façon Q3).
-            KeyCode::ControlLeft | KeyCode::ControlRight => self.input.crouch = pressed,
+            // Si la touche passe de relâché → enfoncée pendant qu'on
+            // court vite, on arme aussi le **slide tactique** (M3) qui
+            // sera consommé au prochain MoveCmd. Le slide réutilise
+            // CTRL pour ne pas prendre une touche supplémentaire — la
+            // physique distingue les deux via `slide_pressed` (edge)
+            // vs `crouch` (state).
+            KeyCode::ControlLeft | KeyCode::ControlRight => {
+                let was_pressed = self.input.crouch;
+                self.input.crouch = pressed;
+                if pressed && !was_pressed && self.player.on_ground {
+                    let speed_xy = self.player.velocity.truncate().length();
+                    if speed_xy >= q3_game::movement::SLIDE_MIN_SPEED {
+                        self.input.slide_armed = true;
+                    }
+                }
+            }
             // Shift : walk — vitesse réduite et footsteps silencieux.
             KeyCode::ShiftLeft | KeyCode::ShiftRight => self.input.walk = pressed,
             // TAB maintenu : overlay scoreboard. Relâché → retour HUD normal.
@@ -7504,14 +7866,21 @@ impl ApplicationHandler for App {
                         } else {
                             self.input.fire = state == ElementState::Pressed;
                         }
-                    } else if button == MouseButton::Right
-                        && self.is_spectator
-                        && state == ElementState::Pressed
-                    {
-                        // RMB cycle prev en spectator. Hors spectator,
-                        // pas (encore) de bind pour ne pas perturber
-                        // un alt-fire futur.
-                        self.cycle_follow_target(-1);
+                    } else if button == MouseButton::Right {
+                        if self.is_spectator {
+                            // En spectator : cycle prev de la follow-cam.
+                            if state == ElementState::Pressed {
+                                self.cycle_follow_target(-1);
+                            }
+                        } else {
+                            // En jeu : tir secondaire (alt-fire). Hold
+                            // pour les armes à charge continue (LG alt,
+                            // BFG alt) ; consommé sur edge pour les
+                            // armes single-shot (rail, shotgun slug,
+                            // rocket lock).
+                            self.input.secondary_fire =
+                                state == ElementState::Pressed;
+                        }
                     }
                 }
             }
@@ -7657,6 +8026,12 @@ impl ApplicationHandler for App {
                                         jump: cmd.buttons & q3_net::buttons::JUMP != 0,
                                         crouch: cmd.buttons & q3_net::buttons::CROUCH != 0,
                                         walk: cmd.buttons & q3_net::buttons::WALK != 0,
+                                        // Slide / dash : edges locales,
+                                        // pas resync via wire pour
+                                        // l'instant — replay côté
+                                        // client uniquement.
+                                        slide_pressed: false,
+                                        dash_pressed: false,
                                         delta_time: dt,
                                     };
                                     self.player.tick_collide(mc, params, &world.collision);
@@ -7894,6 +8269,15 @@ impl ApplicationHandler for App {
                         self.physics_accumulator = max_accum;
                     }
 
+                    // Edges slide/dash : on consomme les flags armés
+                    // (set par les handlers clavier) et on les remet à
+                    // false une fois injectés dans la cmd. Le pmove
+                    // déclenche slide_remaining / dash_remaining et
+                    // gère lui-même les cooldowns.
+                    let slide_pressed =
+                        std::mem::take(&mut self.input.slide_armed);
+                    let dash_pressed =
+                        std::mem::take(&mut self.input.dash_armed);
                     let cmd = MoveCmd {
                         forward: self.input.forward_axis(),
                         side: self.input.side_axis(),
@@ -7901,6 +8285,8 @@ impl ApplicationHandler for App {
                         jump: self.input.jump,
                         crouch: self.input.crouch,
                         walk: self.input.walk,
+                        slide_pressed,
+                        dash_pressed,
                         delta_time: PHYSICS_STEP,
                     };
                     let was_on_ground = self.player.on_ground;
@@ -8450,13 +8836,31 @@ impl ApplicationHandler for App {
                                 r.push_beam_lightning(b.a, b.b, col, 4.0, 14, lg_seed);
                             }
                             BeamStyle::Spiral => {
-                                // 2 tours complets, rayon 3u Q3, segments
-                                // nombreux pour une courbe lisse. Gradient
-                                // de color → color-faded pour un trail qui
-                                // s'évanouit vers l'impact.
+                                // **Rail beam upgrade** (P9) : double
+                                // hélice — outer halo coloré (rayon 4u,
+                                // 96 segments pour une spirale lisse) +
+                                // inner core blanc-bouillant (rayon 1u)
+                                // pour un cœur lumineux qui contraste.
+                                // Gradient color → tail-faded pour que
+                                // l'œil suive la direction du tir.
                                 let mut tail = col;
-                                tail[3] *= 0.2;
-                                r.push_beam_spiral(b.a, col, b.b, tail, 3.0, 2.0, 48);
+                                tail[3] *= 0.15;
+                                // Outer halo (couleur arme).
+                                r.push_beam_spiral(b.a, col, b.b, tail, 4.0, 2.5, 96);
+                                // Inner core (blanc-bouillant). Alpha
+                                // boosté pour bien sortir au centre.
+                                let mut core = [1.0, 1.0, 1.0, col[3] * 1.0];
+                                let mut core_tail = core;
+                                core_tail[3] *= 0.25;
+                                r.push_beam_spiral(
+                                    b.a, core, b.b, core_tail, 1.0, 2.5, 64,
+                                );
+                                // Trace centrale droite — donne le sens
+                                // du tir et masque le "mou" central de
+                                // la spirale en gros plan.
+                                let mut axis = col;
+                                axis[3] *= 0.5;
+                                r.push_beam(b.a, b.b, axis);
                             }
                         }
                     }
@@ -9242,6 +9646,47 @@ fn draw_chat_wheel(r: &mut Renderer, w: f32, h: f32, elapsed: f32) {
         );
         let _ = inner_r;
     }
+}
+
+/// Cherche le bot le plus proche dans un cône frontal pour la cible
+/// d'une roquette **lock-on** (W5). Retourne `Some(index)` dans
+/// `bots`, ou `None` si aucun bot vivant ne tient dans le cône
+/// (~30° de demi-angle, 1500u de range). On exclut les bots morts ou
+/// en invul de spawn — pas de lock douteux sur un mort qui clignote.
+fn find_lock_target(
+    bots: &[BotDriver],
+    eye: Vec3,
+    forward: Vec3,
+    time_sec: f32,
+) -> Option<usize> {
+    const LOCK_RANGE: f32 = 1500.0;
+    // cos(30°) ≈ 0.866 — le cible doit être dans ce cône frontal pour
+    // lock. Plus serré = lock plus exigeant (skill check).
+    const LOCK_DOT_THRESHOLD: f32 = 0.866;
+    let mut best: Option<(f32, usize)> = None;
+    for (i, d) in bots.iter().enumerate() {
+        if d.health.is_dead() || d.invul_until > time_sec {
+            continue;
+        }
+        let center = d.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+        let to_t = center - eye;
+        let dist = to_t.length();
+        if dist > LOCK_RANGE || dist < 1.0 {
+            continue;
+        }
+        let dot = to_t.dot(forward) / dist;
+        if dot < LOCK_DOT_THRESHOLD {
+            continue;
+        }
+        // Heuristique : on prend le plus PROCHE dans le cône (pas le
+        // plus aligné). Plus naturel — un ennemi à 200u un peu sur le
+        // côté lock avant un ennemi à 1400u parfaitement centré.
+        match best {
+            Some((d_prev, _)) if d_prev <= dist => {}
+            _ => best = Some((dist, i)),
+        }
+    }
+    best.map(|(_, i)| i)
 }
 
 /// Logique pure de cycle follow-cam. Sortie : nouveau `follow_slot`.
@@ -11452,6 +11897,7 @@ fn tick_bots(
                 mesh: rocket_mesh.clone(),
                 tint: [1.0, 1.0, 1.0, 1.0],
                 next_trail_at: 0.0,
+                homing_target: None, // bots ne lock-on pas pour l'instant
             });
             d.next_rocket_at = now + BOT_ROCKET_COOLDOWN * skill.fire_cooldown_mult();
             d.last_fire_at = now;
@@ -11472,9 +11918,13 @@ fn tick_bots(
             jump: bc.up_move > 0.0,
             // Les bots ne se baissent ni ne marchent pour l'instant :
             // l'IA est trop simpliste pour exploiter ces modes (pas de
-            // stealth, pas de conduits à traverser accroupi).
+            // stealth, pas de conduits à traverser accroupi). Pas de
+            // slide / dash non plus — on les ajoutera quand l'IA saura
+            // les utiliser tactiquement.
             crouch: false,
             walk: false,
+            slide_pressed: false,
+            dash_pressed: false,
             delta_time: dt,
         };
         let was_on_ground = d.body.on_ground;
@@ -13172,6 +13622,8 @@ mod input_tests {
             jump: input.jump,
             crouch: input.crouch,
             walk: input.walk,
+            slide_pressed: false,
+            dash_pressed: false,
             delta_time: 1.0 / 60.0,
         };
         assert_eq!(cmd.forward, 1.0, "W seul doit produire forward=1.0");
