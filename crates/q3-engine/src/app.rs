@@ -9452,40 +9452,58 @@ impl ApplicationHandler for App {
                     if self.show_perf_overlay {
                         draw_perf_overlay(r, &self.frame_times);
                     }
-                    // **Bot diagnostic banner** — visible en permanence
-                    // dès qu'on a des bots, pour confirmer leur présence
-                    // et état. Disparaît quand 0 bot. Coût zéro hors
-                    // diag : un seul push_text 1× par frame.
-                    if !self.bots.is_empty() {
-                        let alive = self.bots.iter().filter(|b| !b.health.is_dead()).count();
-                        let rig_status = if self.bot_rig.is_some() {
-                            "OK"
-                        } else {
-                            "MISSING"
-                        };
-                        let banner = format!(
-                            "BOTS: {} alive / {} total | rig: {}",
+                    // **Bot diagnostic banner** — voyant, toujours
+                    // visible, contient l'état complet pour diag à
+                    // distance. Couleurs :
+                    // * jaune = bots OK (rig + alive)
+                    // * rouge = problème (rig manquant OR bot count=0)
+                    let alive = self
+                        .bots
+                        .iter()
+                        .filter(|b| !b.health.is_dead())
+                        .count();
+                    let rig_status = if self.bot_rig.is_some() {
+                        "OK"
+                    } else {
+                        "MISSING"
+                    };
+                    let banner = if self.bots.is_empty() {
+                        format!(
+                            "[DIAG] NO BOTS in self.bots | pending={} | rig={} | world={}",
+                            self.pending_local_bots,
+                            rig_status,
+                            if self.world.is_some() { "OK" } else { "NONE" }
+                        )
+                    } else {
+                        format!(
+                            "[DIAG] BOTS {}/{} alive | rig={} | players_visible_3D={}",
                             alive,
                             self.bots.len(),
-                            rig_status
-                        );
-                        let bw = banner.len() as f32 * 8.0 * HUD_SCALE;
-                        let bx = (r.width() as f32 - bw) * 0.5;
-                        let by = 6.0;
-                        r.push_rect(
-                            bx - 8.0,
-                            by - 4.0,
-                            bw + 16.0,
-                            8.0 * HUD_SCALE + 8.0,
-                            [0.05, 0.05, 0.1, 0.7],
-                        );
-                        let col = if self.bot_rig.is_some() {
-                            COL_YELLOW
-                        } else {
-                            COL_RED
-                        };
-                        push_text_shadow(r, bx, by, HUD_SCALE, col, &banner);
-                    }
+                            rig_status,
+                            if self.bot_rig.is_some() { "TRUE (MD3)" } else { "FALSE (beam fallback)" }
+                        )
+                    };
+                    let scale = HUD_SCALE * 1.2;
+                    let bw = banner.len() as f32 * 8.0 * scale;
+                    let fw = r.width() as f32;
+                    let bx = (fw - bw) * 0.5;
+                    let by = 6.0;
+                    let bg = if self.bots.is_empty() || self.bot_rig.is_none() {
+                        [0.45, 0.05, 0.05, 0.92] // rouge dense
+                    } else {
+                        [0.04, 0.20, 0.10, 0.85] // vert
+                    };
+                    r.push_rect(
+                        0.0, 0.0, fw, 8.0 * scale + 16.0, bg,
+                    );
+                    push_text_shadow(
+                        r,
+                        bx,
+                        by,
+                        scale,
+                        if self.bots.is_empty() { COL_YELLOW } else { COL_WHITE },
+                        &banner,
+                    );
                     // Roue de chat rapide (touche V). Rendue après le HUD
                     // mais avant le menu pour qu'elle disparaisse en
                     // ouvrant les options. La fenêtre d'animation
