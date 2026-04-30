@@ -3623,6 +3623,18 @@ impl App {
                         format!("maps/{name}.bsp")
                     };
                     self.load_map(&path);
+                    // Si on a `--bots N` en attente de spawn (cas où le
+                    // joueur a chargé la map via le menu plutôt que via
+                    // `--map`), on les spawn ici aussi.
+                    if self.pending_local_bots > 0 {
+                        let n = self.pending_local_bots;
+                        self.pending_local_bots = 0;
+                        for i in 0..n {
+                            let bot_name = format!("bot{:02}", i + 1);
+                            self.spawn_bot(&bot_name, Some(3));
+                        }
+                        info!("solo: {n} bot(s) spawnés post-map (via menu)");
+                    }
                 }
                 PendingAction::AddBot(name, skill) => {
                     // Dispatch : si on est serveur réseau, le bot va
@@ -9180,6 +9192,35 @@ impl ApplicationHandler for App {
                             &self.remote_players,
                             self.time_sec,
                         );
+                    } else {
+                        // **Fallback bot visibility** : si aucun rig
+                        // joueur n'a pu être chargé (pak0 partiel), on
+                        // dessine un beam vertical haut-coloré à chaque
+                        // position de bot pour que le joueur les voie.
+                        // Garantit qu'un `--bots 4` produit toujours un
+                        // signal visuel, même sans MD3 dispo.
+                        for (i, b) in self.bots.iter().enumerate() {
+                            if b.health.is_dead() {
+                                continue;
+                            }
+                            let foot = b.body.origin;
+                            let head = foot + Vec3::Z * 56.0;
+                            let col = bot_tint(i + 1);
+                            r.push_beam(foot, head, col);
+                            // Nameplate flottant.
+                            let lbl = format!("[BOT] {}", b.bot.name);
+                            r.push_text(
+                                head.x as f32, head.y as f32,
+                                2.0,
+                                col,
+                                &lbl,
+                            );
+                            // ^ NB : push_text est 2D screen-space, pas
+                            // worldspace. Sur un fallback ça donne un
+                            // texte fixe en haut-gauche (visible dans
+                            // tous les cas). Suffisant comme indicateur
+                            // "bot N existe" malgré l'absence de mesh.
+                        }
                     }
                     // Remote projectiles : extrapolés depuis le dernier
                     // snapshot, rendus avec les meshes locaux. Vec passé

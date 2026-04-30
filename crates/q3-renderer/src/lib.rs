@@ -64,6 +64,17 @@ const PREFERRED_SURFACE_FORMATS: &[wgpu::TextureFormat] = &[
 /// Format du depth buffer.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// **Format HDR** de la passe scene. Tous les pipelines world/3D
+/// (worldspawn, MD3, sky, particles, decals, beams, flares) ciblent
+/// ce format au lieu de la surface sRGB. Permet de stocker des
+/// luminances > 1.0 (muzzle flashes, particles bouillonnants, glow
+/// du soleil) sans les écrêter avant le tonemap final.
+///
+/// `Rgba16Float` est universellement supporté par wgpu sur Vulkan /
+/// DX12 / Metal. La surface finale reste en sRGB 8 bits — la passe
+/// `tonemap_to_surface` convertit HDR → SDR via ACES.
+pub const SCENE_HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// Vertex GPU : reconstruit à partir d'un `DrawVert` BSP.
 ///
 /// `lightmap_layer` : index de la couche dans le `texture_2d_array` de
@@ -119,6 +130,13 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
+
+    /// Texture HDR offscreen (Rgba16Float, taille surface). Toutes les
+    /// passes scene/3D y dessinent. Au final de la frame, `tonemap.apply`
+    /// lit cette texture + le bloom et écrit en sRGB sur la swapchain.
+    /// Recréée sur resize. `view` cloné pour le bind dans PostFx.
+    hdr_color_tex: wgpu::Texture,
+    hdr_color_view: wgpu::TextureView,
 
     pipeline: wgpu::RenderPipeline,
     camera: Camera,
@@ -251,6 +269,8 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let depth_view = create_depth_view(&device, size.0, size.1);
+        let (hdr_color_tex, hdr_color_view) =
+            create_hdr_color_view(&device, size.0, size.1);
 
         // Camera
         let camera = Camera::new(
@@ -361,7 +381,9 @@ impl Renderer {
                 entry_point: "fs_main",
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    // Pipeline world : cible HDR pour préserver les
+                    // luminances > 1 jusqu'au tonemap final.
+                    format: SCENE_HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -370,24 +392,31 @@ impl Renderer {
             cache: None,
         });
 
+        // Sub-renderers world/3D ciblent SCENE_HDR_FORMAT — les valeurs
+        // HDR sont préservées jusqu'au tonemap. Le TextRenderer reste
+        // sur le format surface (LDR sRGB) car le HUD est dessiné
+        // APRÈS le tonemap, directement sur la swapchain.
         let text = TextRenderer::new(device.clone(), queue.clone(), format);
-        let sky = SkyRenderer::new(device.clone(), &camera_bgl, format);
-        let beam = BeamRenderer::new(device.clone(), queue.clone(), &camera_bgl, format);
-        let decal = DecalRenderer::new(device.clone(), queue.clone(), &camera_bgl, format);
+        let sky = SkyRenderer::new(device.clone(), &camera_bgl, SCENE_HDR_FORMAT);
+        let beam = BeamRenderer::new(device.clone(), queue.clone(), &camera_bgl, SCENE_HDR_FORMAT);
+        let decal = DecalRenderer::new(device.clone(), queue.clone(), &camera_bgl, SCENE_HDR_FORMAT);
         let dlight = DlightSet::new(&device, queue.clone());
         let fog_uniform = FogUniform::new(&device, queue.clone());
-        let particle = ParticleRenderer::new(device.clone(), queue.clone(), &camera_bgl, format);
-        let flare = FlareRenderer::new(device.clone(), queue.clone(), &camera_bgl, format);
+        let particle = ParticleRenderer::new(device.clone(), queue.clone(), &camera_bgl, SCENE_HDR_FORMAT);
+        let flare = FlareRenderer::new(device.clone(), queue.clone(), &camera_bgl, SCENE_HDR_FORMAT);
 
         // Post-process : créé avec des clones pour pouvoir conserver
-        // device/queue dans Renderer (qui les expose en `pub`).
-        let post = post::PostFx::new(
+        // device/queue dans Renderer (qui les expose en `pub`). Le
+        // bind group input HDR sera fait juste après, quand on aura
+        // le `hdr_color_view`.
+        let mut post = post::PostFx::new(
             device.clone(),
             queue.clone(),
             format,
             size.0,
             size.1,
         );
+        post.set_hdr_input(&hdr_color_view);
 
         Ok(Self {
             device,
@@ -395,6 +424,8 @@ impl Renderer {
             surface,
             surface_config,
             depth_view,
+            hdr_color_tex,
+            hdr_color_view,
             pipeline,
             camera,
             camera_buffer,
@@ -526,14 +557,14 @@ impl Renderer {
             mat_cache.bind_group_layout(),
             &self.dlight.bind_group_layout,
             &self.fog_uniform.bind_group_layout,
-            self.surface_config.format,
+            SCENE_HDR_FORMAT,
         );
         let md3 = Md3Renderer::new(
             self.device.clone(),
             self.queue.clone(),
             &self.camera_bgl,
             mat_cache.bind_group_layout(),
-            self.surface_config.format,
+            SCENE_HDR_FORMAT,
         );
         debug!("renderer: matériaux attachés");
         self.material_cache = Some(mat_cache);
@@ -861,10 +892,16 @@ impl Renderer {
         self.surface_config.height = h;
         self.surface.configure(&self.device, &self.surface_config);
         self.depth_view = create_depth_view(&self.device, w, h);
+        // Re-alloue le HDR target — il vit en parallèle de la swapchain.
+        let (tex, view) = create_hdr_color_view(&self.device, w, h);
+        self.hdr_color_tex = tex;
+        self.hdr_color_view = view;
         self.camera.set_aspect(w as f32 / h as f32);
         // Post-process : recrée scene_capture + bloom mip chain à la
         // nouvelle résolution. Fait une fois par resize, pas chaud.
         self.post.resize(w, h);
+        // PostFx doit re-binder son input HDR sur le nouveau view.
+        self.post.set_hdr_input(&self.hdr_color_view);
     }
 
     /// Rend une frame. `now` est l'horloge applicative (secondes) utilisée
@@ -935,6 +972,11 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // **HDR pipeline** : la scene est rendue dans `hdr_view`
+        // (Rgba16Float, taille surface). Le tonemap final écrit en sRGB
+        // sur `view` (swapchain). Le HUD est ensuite dessiné par-dessus
+        // sur `view` directement (LDR, pas de bloom).
+        let hdr_view = &self.hdr_color_view;
 
         let mut encoder = self
             .device
@@ -946,7 +988,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color),
@@ -1013,7 +1055,7 @@ impl Renderer {
             let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1047,7 +1089,7 @@ impl Renderer {
                 let mut md3_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("md3-world-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: hdr_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
@@ -1077,7 +1119,7 @@ impl Renderer {
             let mut decal_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("decal-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1108,7 +1150,7 @@ impl Renderer {
             let mut part_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("particle-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1139,7 +1181,7 @@ impl Renderer {
             let mut flare_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("flare-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1169,7 +1211,7 @@ impl Renderer {
             let mut beam_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("beam-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: hdr_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1198,7 +1240,7 @@ impl Renderer {
                 let mut overlay_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("md3-overlay-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: hdr_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
@@ -1224,11 +1266,11 @@ impl Renderer {
         // --- passe POST-PROCESS : bloom additif sur la scène -------------
         // Insérée entre la fin du rendu 3D et le HUD pour que le HUD
         // n'hérite pas du glow (le texte HUD ne doit pas pulser comme
-        // un néon — sauf demande explicite). Coût ≈ 4 passes plein
-        // écran à 1/16 de pixels (la chaîne de blur tourne en /4).
-        if self.bloom_enabled {
-            self.post.apply(&mut encoder, &frame.texture, &view);
-        }
+        // un néon — sauf demande explicite). En pipeline HDR, `apply`
+        // fait le tonemap final → écrit la scène complète sur la
+        // surface (remplacement total, pas additif). Donc OBLIGATOIRE
+        // sinon la swapchain reste à zéro et le HUD apparaît seul.
+        self.post.apply(&mut encoder, &view);
 
         // --- passe HUD : load color, pas de depth, alpha-blending --------
         {
@@ -1475,4 +1517,31 @@ fn create_depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView
         view_formats: &[],
     });
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Crée la texture HDR offscreen pour la passe scene. Usages :
+/// `RENDER_ATTACHMENT` (write par les passes scene), `TEXTURE_BINDING`
+/// (read par PostFx pour bright extract + tonemap composite).
+fn create_hdr_color_view(
+    device: &wgpu::Device,
+    w: u32,
+    h: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hdr-color"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SCENE_HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
