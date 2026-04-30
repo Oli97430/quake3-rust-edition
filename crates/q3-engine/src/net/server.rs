@@ -2828,6 +2828,13 @@ fn apply_one_usercmd(
         jump: cmd.buttons & buttons::JUMP != 0,
         crouch: cmd.buttons & buttons::CROUCH != 0,
         walk: cmd.buttons & buttons::WALK != 0,
+        // Slide / dash non transportés par UserCmd v1 — feature locale
+        // côté client uniquement (replay vs serveur autoritatif risque
+        // un 1-frame mismatch sur le boost, mais pas de désync majeur
+        // car la friction reduce kicks in au prochain tick côté serveur
+        // via le crouch state). Sera remonté en `cmd.buttons` v2.
+        slide_pressed: false,
+        dash_pressed: false,
         delta_time: dt,
     };
     slot.player.tick_collide(move_cmd, params, collision);
