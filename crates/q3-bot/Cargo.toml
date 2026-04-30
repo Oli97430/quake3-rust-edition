@@ -1,0 +1,15 @@
+[package]
+name = "q3-bot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "IA des bots (FSM, nav, combat) — squelette minimal"
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-collision = { workspace = true }
+tracing = { workspace = true }
+smallvec = { workspace = true }

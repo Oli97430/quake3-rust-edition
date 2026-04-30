@@ -1,0 +1,16 @@
+[package]
+name = "q3-filesystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "VFS Quake 3 : archives .pk3 (zip) + fichiers loose"
+
+[dependencies]
+q3-common = { workspace = true }
+zip = { workspace = true }
+parking_lot = { workspace = true }
+hashbrown = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

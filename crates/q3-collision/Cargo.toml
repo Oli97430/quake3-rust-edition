@@ -1,0 +1,15 @@
+[package]
+name = "q3-collision"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Collision tracer Quake 3 (BSP + brushes)"
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-bsp = { workspace = true }
+bitflags = { workspace = true }
+tracing = { workspace = true }

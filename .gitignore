@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+/assets/baseq3/*.pk3
+!/assets/baseq3/pak0-testmap.pk3
+.vscode/
+.idea/
+*.log

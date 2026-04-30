@@ -1,0 +1,17 @@
+[package]
+name = "q3-math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Math primitives for Quake 3 in Rust (glam + Q3 coordinate conventions)"
+
+[dependencies]
+glam = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]

@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.78"
+license = "GPL-2.0-or-later"
+authors = ["Quake 3 RUST EDITION contributors"]
+repository = "https://local/quake-rust"
+
+[workspace.dependencies]
+# math
+glam = { version = "0.29", features = ["bytemuck", "serde"] }
+
+# binary parsing / zero-copy
+bytemuck = { version = "1.18", features = ["derive"] }
+byteorder = "1.5"
+
+# errors
+thiserror = "1.0"
+anyhow = "1.0"
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# archive (pk3 = zip)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# graphics / window
+winit = "0.30"
+wgpu = "22"
+pollster = "0.3"
+raw-window-handle = "0.6"
+
+# utils
+parking_lot = "0.12"
+hashbrown = "0.15"
+smallvec = "1.13"
+bitflags = "2.6"
+serde = { version = "1", features = ["derive"] }
+
+# sound
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis"] }
+
+# networking
+tokio = { version = "1.40", features = ["full"] }
+bytes = "1.7"
+
+# image decoding (TGA, JPG, PNG)
+image = { version = "0.25", default-features = false, features = ["tga", "jpeg", "png"] }
+
+# bitmap font for console/HUD text
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+
+# inner workspace crates
+q3-math = { path = "crates/q3-math" }
+q3-common = { path = "crates/q3-common" }
+q3-filesystem = { path = "crates/q3-filesystem" }
+q3-bsp = { path = "crates/q3-bsp" }
+q3-shader = { path = "crates/q3-shader" }
+q3-collision = { path = "crates/q3-collision" }
+q3-model = { path = "crates/q3-model" }
+q3-sound = { path = "crates/q3-sound" }
+q3-net = { path = "crates/q3-net" }
+q3-bot = { path = "crates/q3-bot" }
+q3-image = { path = "crates/q3-image" }
+q3-renderer = { path = "crates/q3-renderer" }
+q3-game = { path = "crates/q3-game" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

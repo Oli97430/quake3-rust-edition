@@ -1,0 +1,42 @@
+[package]
+name = "q3-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Binaire principal Quake 3 Rust — assemble tous les sous-systèmes"
+default-run = "q3"
+
+[[bin]]
+name = "q3"
+path = "src/main.rs"
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-filesystem = { workspace = true }
+q3-bsp = { workspace = true }
+q3-collision = { workspace = true }
+q3-renderer = { workspace = true }
+q3-image = { workspace = true }
+q3-game = { workspace = true }
+q3-sound = { workspace = true }
+q3-bot = { workspace = true }
+q3-net = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+glam = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embarque l'icone Windows + métadonnées de version dans le .exe.
+# `winres` lit `assets/icon.ico` si présent (cf. build.rs). Absence
+# silencieusement tolérée pour ne pas casser le build sur les
+# machines sans icone générée.
+winres = "0.1"

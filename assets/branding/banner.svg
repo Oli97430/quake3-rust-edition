@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Bandeau "Quake 3 RUST EDITION" — palette du HUD in-game (anthracite +
+  accent cyan + crème). Format 1280×320 (ratio compatible README GitHub).
+  Pas d'image bitmap : tout est vectoriel, scalable infiniment, et tient
+  dans le repo en quelques Ko.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320"
+     preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <!-- Dégradé de fond : anthracite avec halo orange en bas-droite (la
+         lumière qui sort du canon de la rocket dans le HUD). -->
+    <radialGradient id="bg" cx="100%" cy="100%" r="100%">
+      <stop offset="0%"   stop-color="#3a1908" stop-opacity="0.85"/>
+      <stop offset="35%"  stop-color="#1a1216" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#04050b" stop-opacity="1"/>
+    </radialGradient>
+
+    <!-- Liseré accent cyan (couleur des panneaux HUD). -->
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#1d8fd8" stop-opacity="0"/>
+      <stop offset="50%"  stop-color="#26a8f0" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#1d8fd8" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Dégradé chaud pour "Q3" — jaune-orange Quake. -->
+    <linearGradient id="title-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#ffe28a"/>
+      <stop offset="55%" stop-color="#ffb24c"/>
+      <stop offset="100%" stop-color="#d96a1c"/>
+    </linearGradient>
+
+    <!-- Dégradé "RUST" — orange métal rouillé. -->
+    <linearGradient id="rust-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f29c4d"/>
+      <stop offset="55%"  stop-color="#c75a1a"/>
+      <stop offset="100%" stop-color="#7a2f0b"/>
+    </linearGradient>
+
+    <!-- Glow doux derrière le texte principal. -->
+    <filter id="glow" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur stdDeviation="6" />
+    </filter>
+  </defs>
+
+  <!-- Fond panel anthracite + halo. -->
+  <rect width="1280" height="320" fill="url(#bg)"/>
+
+  <!-- Accents horizontaux — top épais, bas fin atténué (pattern HUD). -->
+  <rect x="0" y="0"   width="1280" height="6"  fill="url(#accent)"/>
+  <rect x="0" y="316" width="1280" height="2"  fill="url(#accent)" opacity="0.5"/>
+
+  <!-- Glow derrière le titre. -->
+  <g filter="url(#glow)" opacity="0.6">
+    <text x="640" y="190" font-family="Impact, 'Arial Black', sans-serif"
+          font-size="155" font-weight="900" letter-spacing="6"
+          fill="#ff8a26" text-anchor="middle">Q3 RUST</text>
+  </g>
+
+  <!-- Titre principal "Q3 RUST" — nette, posée sur le glow. -->
+  <text x="640" y="190" font-family="Impact, 'Arial Black', sans-serif"
+        font-size="155" font-weight="900" letter-spacing="6"
+        fill="url(#title-fill)" text-anchor="middle"
+        stroke="#1a1216" stroke-width="3"
+        paint-order="stroke">Q3</text>
+  <text x="640" y="190" font-family="Impact, 'Arial Black', sans-serif"
+        font-size="155" font-weight="900" letter-spacing="6"
+        text-anchor="middle"
+        fill="url(#rust-fill)"
+        stroke="#1a1216" stroke-width="3"
+        paint-order="stroke"
+        dx="180">RUST</text>
+
+  <!-- Sous-titre EDITION en typo fine espacée. -->
+  <text x="640" y="245" font-family="'Trebuchet MS', sans-serif"
+        font-size="34" font-weight="500" letter-spacing="22"
+        fill="#cfe6ff" text-anchor="middle" opacity="0.85">
+    E   D   I   T   I   O   N
+  </text>
+
+  <!-- Tagline tout petit en bas — cyan sur le liseré. -->
+  <text x="640" y="295" font-family="monospace"
+        font-size="16" letter-spacing="3"
+        fill="#7ad0ff" text-anchor="middle" opacity="0.75">
+    id Tech 3 reimagined in Rust • wgpu • tokio • zero unsafe gameplay
+  </text>
+
+  <!-- Petits crochets décoratifs (style HUD bracket). -->
+  <g stroke="#26a8f0" stroke-width="3" fill="none" opacity="0.85">
+    <polyline points="60,80 30,80 30,240 60,240"/>
+    <polyline points="1220,80 1250,80 1250,240 1220,240"/>
+  </g>
+</svg>
