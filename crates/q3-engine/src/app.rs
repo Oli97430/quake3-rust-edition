@@ -7934,17 +7934,47 @@ impl ApplicationHandler for App {
             self.load_map(&map);
             // **Bots solo via `--bots N`** : drainé une fois ici, après
             // `load_map` qui a chargé `world` + `bot_rig`. Skill III par
-            // défaut, noms séquentiels « bot01..botNN » comme côté
-            // serveur. Avant v0.7 le flag était ignoré en solo → joueur
-            // sans adversaire malgré `--bots 4`.
+            // défaut, noms séquentiels « bot01..botNN ».
             if self.pending_local_bots > 0 {
                 let n = self.pending_local_bots;
                 self.pending_local_bots = 0;
+                // Force-load le rig joueur AVANT le 1er spawn_bot pour
+                // garantir un check explicite. Si ça échoue, on affiche
+                // un warn tonitruant pour orienter le diagnostic plutôt
+                // que de laisser spawn_bot bouncer N fois en silence.
+                self.ensure_player_rig_loaded();
+                if self.bot_rig.is_none() {
+                    warn!(
+                        "===========================================\n\
+                         BOTS DEMANDÉS ({n}) MAIS PAS DE PLAYER RIG\n\
+                         Le pak0.pk3 actif ne contient pas de modèle\n\
+                         joueur complet (lower.md3 + upper.md3 + head.md3)\n\
+                         dans models/players/<nom>/. Les bots seront\n\
+                         remplacés par des beams verticaux colorés en\n\
+                         attendant un asset complet.\n\
+                         ==========================================="
+                    );
+                }
+                let world_ok = self.world.as_ref().is_some();
+                let spawn_ok = self.world.as_ref().map_or(false, |w| {
+                    !w.spawn_points.is_empty() || w.player_start.is_some()
+                });
+                info!(
+                    "bot diagnostic: world_loaded={world_ok}, \
+                     spawn_points_or_player_start={spawn_ok}, \
+                     rig_loaded={}",
+                    self.bot_rig.is_some()
+                );
+                let before = self.bots.len();
                 for i in 0..n {
                     let name = format!("bot{:02}", i + 1);
                     self.spawn_bot(&name, Some(3));
                 }
-                info!("solo: {n} bot(s) locaux spawnés via --bots");
+                info!(
+                    "solo: --bots {n} demandés → {} bots effectivement \
+                     présents dans self.bots (avant: {before})",
+                    self.bots.len()
+                );
             }
             // Q3_SPAWN_BOTS=N : spawn N bots immédiatement après le chargement
             // de la map. Équivalent d'un `addbot` en console, utile pour les
@@ -9421,6 +9451,40 @@ impl ApplicationHandler for App {
                     // diagnostiquer une chute de fps liée au menu lui-même).
                     if self.show_perf_overlay {
                         draw_perf_overlay(r, &self.frame_times);
+                    }
+                    // **Bot diagnostic banner** — visible en permanence
+                    // dès qu'on a des bots, pour confirmer leur présence
+                    // et état. Disparaît quand 0 bot. Coût zéro hors
+                    // diag : un seul push_text 1× par frame.
+                    if !self.bots.is_empty() {
+                        let alive = self.bots.iter().filter(|b| !b.health.is_dead()).count();
+                        let rig_status = if self.bot_rig.is_some() {
+                            "OK"
+                        } else {
+                            "MISSING"
+                        };
+                        let banner = format!(
+                            "BOTS: {} alive / {} total | rig: {}",
+                            alive,
+                            self.bots.len(),
+                            rig_status
+                        );
+                        let bw = banner.len() as f32 * 8.0 * HUD_SCALE;
+                        let bx = (r.width() as f32 - bw) * 0.5;
+                        let by = 6.0;
+                        r.push_rect(
+                            bx - 8.0,
+                            by - 4.0,
+                            bw + 16.0,
+                            8.0 * HUD_SCALE + 8.0,
+                            [0.05, 0.05, 0.1, 0.7],
+                        );
+                        let col = if self.bot_rig.is_some() {
+                            COL_YELLOW
+                        } else {
+                            COL_RED
+                        };
+                        push_text_shadow(r, bx, by, HUD_SCALE, col, &banner);
                     }
                     // Roue de chat rapide (touche V). Rendue après le HUD
                     // mais avant le menu pour qu'elle disparaisse en
