@@ -184,6 +184,11 @@ pub struct App {
     /// LMB (next) / RMB (prev) ; SPACE retourne en free-fly.
     /// Démos `--play` et matches en cours utilisent le même chemin.
     follow_slot: Option<u8>,
+    /// **Lean** (M7) — valeur courante lissée ∈ [-1, 1]. Lerpée vers
+    /// la cible (input lean_axis) chaque frame. Le rendu applique un
+    /// offset latéral sur la caméra (4u/lean) + un roll de view (~6°)
+    /// pour signaler le penché.
+    lean_value: f32,
     /// Roue de chat rapide ouverte ? `V` toggle, `1..=8` envoie une
     /// phrase prédéfinie de [`CHAT_WHEEL_MESSAGES`] et referme. `Esc`
     /// referme aussi. Les messages partent par le pipeline standard
@@ -191,6 +196,11 @@ pub struct App {
     /// broadcast. `chat_wheel_opened_at` sert à animer l'ouverture.
     chat_wheel_open: bool,
     chat_wheel_opened_at: f32,
+    /// Bots locaux à spawner dès que la map est chargée. Set par
+    /// `App::new` depuis le `--bots N` CLI, drainé par `load_map`
+    /// après que `world` + `bot_rig` soient prêts. Ignoré en mode
+    /// `--host` (les bots y vont côté serveur).
+    pending_local_bots: u8,
     /// Santé du joueur. `is_dead()` déclenche la séquence de respawn.
     player_health: Health,
     /// Armor du joueur (0 à 200). Absorbe 2/3 des dégâts en Q3 ;
@@ -1852,6 +1862,17 @@ impl WeaponId {
     fn secondary_params(self) -> Option<WeaponParams> {
         let p = self.params();
         match self {
+            // **W1 — Gauntlet lunge** : range étendue à 96 u (vs 64 du
+            // primaire) et damage boosté à 75 (vs 50). Le boost
+            // simule le "lunge" avant : on tape plus loin et plus
+            // fort. Côté input, alt + gauntlet déclenche aussi un
+            // dash-forward (cf. fire_weapon).
+            Self::Gauntlet => Some(WeaponParams {
+                damage: 75,
+                range: 96.0,
+                cooldown: 0.5,
+                ..p
+            }),
             Self::Shotgun => Some(WeaponParams {
                 damage: 80,        // un slug de précision (vs 11×10 spread)
                 cooldown: 1.5,     // beaucoup plus long que SG primaire
@@ -2316,6 +2337,14 @@ struct Input {
     secondary_fire: bool,
     /// `true` tant que TAB est maintenu — affiche l'overlay scoreboard.
     scoreboard: bool,
+    /// **Lean** (M7) — peek hors d'un couvert sans bouger les pieds.
+    /// `lean_axis()` calcule un signe ∈ {-1, 0, +1} : -1 = lean gauche,
+    /// +1 = lean droit. Le moteur applique un offset latéral sur la
+    /// caméra + un roll d'angle pour la signature visuelle. KeyB pour
+    /// la gauche, KeyN pour la droite — choix anti-collision avec
+    /// AZERTY (Q déjà strafe-left). Utilisable au pad / joystick aussi.
+    lean_left_held: bool,
+    lean_right_held: bool,
     /// **Slide tactique** (M3) — armé à la frame où Ctrl passe de
     /// relâché → enfoncé pendant qu'on court vite. Consommé au prochain
     /// `MoveCmd::slide_pressed` puis remis à false.
@@ -2339,6 +2368,15 @@ impl Input {
             _ => 0.0,
         }
     }
+    /// Lean axis : -1 = lean gauche, +1 = lean droite, 0 = neutre /
+    /// les deux touches enfoncées (annulation).
+    fn lean_axis(&self) -> f32 {
+        match (self.lean_right_held, self.lean_left_held) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => 0.0,
+        }
+    }
     /// Idem mais gauche/droite — -1 = strafe gauche, +1 = strafe droite.
     fn side_axis(&self) -> f32 {
         match (self.right_down, self.left_down) {
@@ -2357,6 +2395,12 @@ impl App {
         requested_map: Option<String>,
         net_mode: crate::net::NetMode,
         vr_enabled: bool,
+        // Nombre de bots demandés via `--bots N`. Sémantique unifiée :
+        // en `--host` (serveur réseau) → spawn côté autoritatif. En
+        // solo / `--connect` → spawn local après chargement de la map
+        // (cf. `pending_local_bots` consommé dans `load_map`).
+        // Avant v0.7, ce paramètre était ignoré en solo, ce qui faisait
+        // que `--bots 4` en solo ne donnait aucun adversaire visible.
         server_bots: u8,
         spectate: bool,
         team: Option<String>,
@@ -2611,8 +2655,17 @@ impl App {
             is_spectator: false,
             local_team: q3_net::team::FREE,
             follow_slot: None,
+            lean_value: 0.0,
             chat_wheel_open: false,
             chat_wheel_opened_at: f32::NEG_INFINITY,
+            // Bots locaux : on n'inscrit que si on n'est PAS en mode
+            // serveur (le path serveur les spawn directement plus haut
+            // via `nr.add_server_bot`). Drainé après `load_map`.
+            pending_local_bots: if matches!(net_mode, crate::net::NetMode::Server { .. }) {
+                0
+            } else {
+                server_bots
+            },
             player_health: Health::full(),
             player_armor: 0,
             respawn_at: None,
@@ -3980,6 +4033,21 @@ impl App {
                 self.bot_rig = Some(PlayerRig { lower: l, upper: u, head: h });
                 break;
             }
+        }
+        if self.bot_rig.is_none() {
+            // Aucun model joueur trouvé dans le pak0 actif. Sans rig,
+            // `queue_bots` skip TOUS les bots (cf. l'`if let Some(rig)`
+            // côté render). Symptôme observé : bots présents dans la
+            // logique de jeu (frags, tirs, etc.) mais invisibles.
+            // Cause typique : pak0 partiel (démo Q3) ou flag --base
+            // qui pointe sur un dossier sans `models/players/`.
+            warn!(
+                "player rig: AUCUN model joueur trouvé — les bots seront \
+                 INVISIBLES. Vérifie ton baseq3/pak0.pk3 (chemin attendu \
+                 `models/players/<nom>/{{lower,upper,head}}.md3`). \
+                 Candidats testés : {}",
+                PLAYER_CANDIDATES.len()
+            );
         }
     }
 
@@ -5987,6 +6055,21 @@ impl App {
         let slot = weapon.slot() as usize;
         let _ = alt_active; // utilisé plus bas pour rocket lock-on / rail ricochet
 
+        // **W1 — Gauntlet lunge** : avant tout traitement de tir, on
+        // applique un dash-forward au joueur si alt-fire + gauntlet.
+        // Effet "swing en avant" qui ferme la distance d'un coup,
+        // signature des FPS gauntlet melee modernes.
+        if alt_active && weapon == WeaponId::Gauntlet {
+            let basis = self.player.view_angles.to_vectors();
+            let mut f = basis.forward;
+            f.z = 0.0;
+            if f.length_squared() > 0.001 {
+                let f = f.normalize();
+                self.player.velocity.x += f.x * 380.0;
+                self.player.velocity.y += f.y * 380.0;
+            }
+        }
+
         // Early-out si pas assez de munitions. On joue un "click empty"
         // bridé à 1 fois par 0.4 s pour éviter le spam log/audio.
         // Deux comportements en chaîne :
@@ -6211,6 +6294,9 @@ impl App {
         // Bullet holes persistants sur les murs (pos, normal) — posés
         // après la boucle pour les mêmes raisons de borrow que les sparks.
         let mut pending_wall_marks: Vec<(Vec3, Vec3)> = Vec::new();
+        // P5 — décales de sang derrière les cibles touchées. Traçables
+        // post-borrow comme les sparks.
+        let mut pending_blood_decals: Vec<(Vec3, Vec3)> = Vec::new();
 
         // Couleur des sparks selon l'arme (différencie MG blanc d'un RG rose).
         let spark_world_color: [f32; 4] = match weapon {
@@ -6286,6 +6372,19 @@ impl App {
                     // vers le tireur).
                     let hit_pt = eye + fwd * t_bot;
                     pending_sparks.push((hit_pt, -fwd, spark_flesh_color));
+                    // **P5 — Blood spray decal** : on trace AU-DELÀ de
+                    // la cible (16 u dans la direction du tir) pour
+                    // trouver le mur derrière, et y poser une décale
+                    // de sang qui rappelle l'impact corporel. Effet
+                    // cinéma — pas crucial gameplay, gros impact visuel.
+                    let beyond_start = hit_pt + fwd * 4.0;
+                    let beyond_end = beyond_start + fwd * 64.0;
+                    let beyond =
+                        world.collision.trace_ray(beyond_start, beyond_end, Contents::SOLID);
+                    if beyond.fraction < 1.0 {
+                        let blood_pt = beyond_start + fwd * (beyond.fraction * 64.0);
+                        pending_blood_decals.push((blood_pt, beyond.plane_normal));
+                    }
                 }
                 if taken > 0 && dead {
                     self.frags = self.frags.saturating_add(1);
@@ -6314,8 +6413,35 @@ impl App {
                 // camera-facing) — elle reste visible même quand le
                 // joueur se déplace autour de l'impact.
                 let hit_pt = eye + fwd * t_wall;
-                pending_sparks.push((hit_pt, world_trace.plane_normal, spark_world_color));
-                pending_wall_marks.push((hit_pt, world_trace.plane_normal));
+                // **P4 — Impacts différenciés par surface** : on lit les
+                // Contents du brush impacté pour adapter sparks et
+                // décales. Q3 surface_flags (METALSTEPS, FLESH, …) ne
+                // sont pas remontés par le trace v1, on retombe donc
+                // sur Contents (WATER/LAVA/SLIME) qui couvre 80 % du
+                // sentiment "matériau impacté".
+                let contents = world_trace.contents;
+                let (impact_color, impact_decal): ([f32; 4], Option<[f32; 4]>) =
+                    if contents.contains(Contents::WATER) {
+                        // Splash bleu, pas de décale (l'eau ne marque pas).
+                        ([0.55, 0.80, 1.0, 1.0], None)
+                    } else if contents.contains(Contents::LAVA) {
+                        // Lava : éclats orange-rouge bouillonnants, pas
+                        // de décale (les murs en lave ne se marquent
+                        // pas — la surface est en mouvement).
+                        ([1.0, 0.40, 0.10, 1.0], None)
+                    } else if contents.contains(Contents::SLIME) {
+                        // Slime : vert acide.
+                        ([0.55, 0.95, 0.30, 1.0], None)
+                    } else {
+                        // Surface "solide" générique : sparks de l'arme
+                        // (rail rose, LG bleu, MG/SG orange) + bullet
+                        // hole persistant.
+                        (spark_world_color, Some([0.05, 0.05, 0.06, 0.7]))
+                    };
+                pending_sparks.push((hit_pt, world_trace.plane_normal, impact_color));
+                if impact_decal.is_some() {
+                    pending_wall_marks.push((hit_pt, world_trace.plane_normal));
+                }
 
                 // **Rail ricochet** (W7) : si alt-fire actif sur railgun
                 // ET le tir a tapé un mur sans bot, on rebondit le rai
@@ -6526,6 +6652,21 @@ impl App {
         for (pos, normal) in pending_wall_marks {
             self.push_wall_mark(pos, normal, weapon);
         }
+        // P5 — décales de sang derrière les cibles touchées. Petite
+        // tache rouge sombre, alpha 80 %, vie longue (30 s) pour que
+        // les murs gardent leur historique de combat.
+        if let Some(r) = self.renderer.as_mut() {
+            for (pos, normal) in pending_blood_decals {
+                r.spawn_decal(
+                    pos,
+                    normal,
+                    14.0,
+                    [0.45, 0.05, 0.05, 0.8],
+                    self.time_sec,
+                    30.0,
+                );
+            }
+        }
         for pos in pending_gibs {
             self.push_death_gibs(pos);
             self.push_blood_splat(pos);
@@ -6601,6 +6742,10 @@ impl App {
         // mutable pendant `self.projectiles.retain_mut`).  Chaque entrée
         // porte (position monde, weapon) ; la weapon choisit la couleur.
         let mut pending_trails: Vec<(Vec3, WeaponId)> = Vec::new();
+        // P11 — anneau orbital plasma : positions de mini-sparks à
+        // spawner après la boucle (renderer-borrow). Couleur câblée
+        // bleu énergétique pour l'œil ; appliquée au flush.
+        let mut pending_orbital_sparks: Vec<Vec3> = Vec::new();
 
         self.projectiles.retain_mut(|p| {
             if self.time_sec >= p.expire_at {
@@ -6792,7 +6937,8 @@ impl App {
 
             p.origin = next;
             // Trail : seulement pour les projectiles qui laissent visuellement
-            // une traînée.  Plasma = bolt énergétique, pas de fumée.
+            // une traînée. Plasma a maintenant SON propre trail orbital
+            // (P11) — un anneau d'éclats qui spirale autour du bolt.
             // Les autres emprisonnent le tick de puff par `next_trail_at`,
             // ce qui rend la cadence indépendante du framerate.
             if matches!(
@@ -6801,12 +6947,47 @@ impl App {
             ) && self.time_sec >= p.next_trail_at
             {
                 pending_trails.push((p.origin, p.weapon));
-                // ~25 puffs/s : assez dense pour un trail continu, assez
-                // espacé pour ne pas saturer la Vec<Particle> (~2000 max).
                 p.next_trail_at = self.time_sec + PROJECTILE_TRAIL_INTERVAL;
+            }
+            // **P11 — Plasma orbital trail** : anneau de 4 sparks autour
+            // du bolt, phase fonction du temps absolu pour un effet
+            // hélicoïdal continu (les sparks reculent légèrement par
+            // rapport au projectile, donnant l'illusion d'orbite).
+            if matches!(p.weapon, WeaponId::Plasmagun)
+                && self.time_sec >= p.next_trail_at
+            {
+                let v = p.velocity;
+                let speed = v.length().max(1.0);
+                let axis = v / speed;
+                let helper = if axis.z.abs() < 0.9 { Vec3::Z } else { Vec3::Y };
+                let perp = axis.cross(helper).normalize();
+                let perp2 = axis.cross(perp).normalize();
+                let phase = self.time_sec * 12.0; // 12 rad/s = ~2 tours/sec
+                for k in 0..4 {
+                    let a = phase + k as f32 * std::f32::consts::FRAC_PI_2;
+                    let radius = 4.5;
+                    let dir = perp * a.cos() + perp2 * a.sin();
+                    let pos = p.origin - axis * 6.0 + dir * radius;
+                    pending_orbital_sparks.push(pos);
+                }
+                p.next_trail_at = self.time_sec + 0.04;
             }
             true
         });
+        // Flush des orbital sparks plasma (P11) — petits flares
+        // bleus très courts qui composent l'anneau autour du bolt.
+        for pos in pending_orbital_sparks {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.remove(0);
+            }
+            self.particles.push(Particle {
+                origin: pos,
+                velocity: Vec3::ZERO,
+                color: [0.55, 0.80, 1.0, 1.0],
+                expire_at: self.time_sec + 0.18,
+                lifetime: 0.18,
+            });
+        }
         // Flush des trails — self.renderer accessible maintenant que le
         // borrow sur self.projectiles est relâché.
         if let Some(r) = self.renderer.as_mut() {
@@ -7566,6 +7747,12 @@ impl App {
             KeyCode::ShiftLeft | KeyCode::ShiftRight => self.input.walk = pressed,
             // TAB maintenu : overlay scoreboard. Relâché → retour HUD normal.
             KeyCode::Tab => self.input.scoreboard = pressed,
+            // **Lean** (M7) — KeyB / KeyN pour peek gauche / droite.
+            // Évite les collisions avec ZQSD (AZERTY) et WASD (QWERTY).
+            // Maintenu = lean appliqué, relâché = retour neutre lerpé
+            // côté caméra (cf. apply_view_lean).
+            KeyCode::KeyB => self.input.lean_left_held = pressed,
+            KeyCode::KeyN => self.input.lean_right_held = pressed,
             // F3 : taunt joueur — ligne de chat + son kill confirm dans
             // la même veine que les bots.  Edge-triggered + cooldown
             // interne (`next_player_taunt_at`) pour éviter le spam audio
@@ -7733,6 +7920,20 @@ impl ApplicationHandler for App {
             // `--map` explicite en CLI : on charge direct, le menu reste
             // fermé. C'est le flow "je sais ce que je veux" pour le dev.
             self.load_map(&map);
+            // **Bots solo via `--bots N`** : drainé une fois ici, après
+            // `load_map` qui a chargé `world` + `bot_rig`. Skill III par
+            // défaut, noms séquentiels « bot01..botNN » comme côté
+            // serveur. Avant v0.7 le flag était ignoré en solo → joueur
+            // sans adversaire malgré `--bots 4`.
+            if self.pending_local_bots > 0 {
+                let n = self.pending_local_bots;
+                self.pending_local_bots = 0;
+                for i in 0..n {
+                    let name = format!("bot{:02}", i + 1);
+                    self.spawn_bot(&name, Some(3));
+                }
+                info!("solo: {n} bot(s) locaux spawnés via --bots");
+            }
             // Q3_SPAWN_BOTS=N : spawn N bots immédiatement après le chargement
             // de la map. Équivalent d'un `addbot` en console, utile pour les
             // tests CI où on veut un screenshot avec des adversaires visibles
@@ -8726,11 +8927,30 @@ impl ApplicationHandler for App {
                             dead_cam = Some((orbit, Angles::new(pitch, yaw, 0.0)));
                         }
                     }
+                    // **Lean** (M7) — lerp la valeur courante vers le
+                    // target d'input. Constante de temps ~80 ms pour
+                    // un mouvement vif mais pas snappy. La valeur est
+                    // dans [-1, 1], on la convertit en offset latéral
+                    // côté caméra.
+                    let lean_target = if self.player_health.is_dead() {
+                        0.0
+                    } else {
+                        self.input.lean_axis()
+                    };
+                    let lean_smooth = (1.0 - (-dt * 12.0).exp()).clamp(0.0, 1.0);
+                    self.lean_value =
+                        self.lean_value + (lean_target - self.lean_value) * lean_smooth;
                     if let Some((pos, _)) = dead_cam {
                         r.camera_mut().position = pos;
                     } else {
+                        let basis = self.player.view_angles.to_vectors();
+                        // Offset latéral 6u par unit de lean — assez pour
+                        // un peek visible sans téléporter le joueur. Le
+                        // hitbox du player ne bouge pas (juste la caméra).
+                        let lean_offset = basis.right * (self.lean_value * 6.0);
                         r.camera_mut().position = self.player.origin
-                            + Vec3::Z * (PLAYER_EYE_HEIGHT + bob_z + self.view_crouch_offset);
+                            + Vec3::Z * (PLAYER_EYE_HEIGHT + bob_z + self.view_crouch_offset)
+                            + lean_offset;
                     }
                     let mut cam_angles = if let Some((_, a)) = dead_cam {
                         a
@@ -8738,6 +8958,11 @@ impl ApplicationHandler for App {
                         self.player.view_angles
                     };
                     cam_angles.roll += bob_roll;
+                    // **Lean roll** (M7) — bascule visuelle de la caméra
+                    // proportionnelle à la valeur de lean (max 6° à
+                    // lean=1.0). Signe inverse du sens du lean, comme
+                    // un humain qui penche la tête sur le côté.
+                    cam_angles.roll -= self.lean_value * 6.0;
                     // Strafe-roll : formule Q3 `CL_KickRoll`. On projette
                     // la vélocité sur le vecteur "droite" des view_angles,
                     // le signe du produit scalaire donne la direction du
@@ -8831,9 +9056,59 @@ impl ApplicationHandler for App {
                                 r.push_beam(b.a, b.b, col);
                             }
                             BeamStyle::Lightning => {
-                                // Amplitude ~4u Q3, 14 segments : zigzag
-                                // visible mais qui reste centré sur l'axe.
+                                // **P10 Lightning upgrade** : faisceau
+                                // principal + 2-3 branches courtes qui
+                                // partent au tiers et au deux-tiers du
+                                // tracé. Effet "arc électrique qui
+                                // bifurque" — amplifie l'impression de
+                                // décharge brute. Branches plus courtes
+                                // (~30 % longueur) et plus fines.
                                 r.push_beam_lightning(b.a, b.b, col, 4.0, 14, lg_seed);
+                                // Halo pâle blanc autour du tracé pour
+                                // simuler l'ionisation lumineuse.
+                                let mut halo = [1.0, 1.0, 1.0, col[3] * 0.55];
+                                let _ = &mut halo;
+                                r.push_beam_lightning(
+                                    b.a, b.b, [1.0, 1.0, 1.0, col[3] * 0.55],
+                                    1.5, 14, lg_seed.wrapping_add(7),
+                                );
+                                // Branches secondaires : on prend 2
+                                // points le long du tracé (33 % et 66 %)
+                                // et on émet un mini-arc latéral.
+                                let dir = b.b - b.a;
+                                let len = dir.length().max(1.0);
+                                let axis = dir / len;
+                                // Vecteur perpendiculaire arbitraire à
+                                // axis pour les branches.
+                                let helper = if axis.z.abs() < 0.9 {
+                                    Vec3::Z
+                                } else {
+                                    Vec3::Y
+                                };
+                                let perp = axis.cross(helper).normalize();
+                                let perp2 = axis.cross(perp).normalize();
+                                for &(t, sign) in &[(0.33_f32, 1.0_f32), (0.66, -1.0)] {
+                                    let origin = b.a + dir * t;
+                                    // Mix perp + perp2 selon seed pour
+                                    // varier l'orientation des branches.
+                                    let mix_phase =
+                                        (lg_seed.wrapping_mul(31) as f32) * 0.001;
+                                    let branch_dir =
+                                        perp * mix_phase.cos() + perp2 * mix_phase.sin();
+                                    let branch_end =
+                                        origin + axis * (len * 0.15)
+                                            + branch_dir * (len * 0.20 * sign);
+                                    let mut branch_col = col;
+                                    branch_col[3] *= 0.45;
+                                    r.push_beam_lightning(
+                                        origin,
+                                        branch_end,
+                                        branch_col,
+                                        2.5,
+                                        7,
+                                        lg_seed.wrapping_add((t * 100.0) as u64),
+                                    );
+                                }
                             }
                             BeamStyle::Spiral => {
                                 // **Rail beam upgrade** (P9) : double
