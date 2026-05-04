@@ -35,6 +35,8 @@ pub enum GlbError {
     NoMesh,
     #[error("glb: primitive sans positions")]
     NoPositions,
+    #[error("glb: {0}")]
+    Other(String),
 }
 
 /// Vertex GPU layout (48 octets, std140 sur les drivers stricts).
@@ -122,6 +124,28 @@ impl GlbMesh {
     /// Parse un GLB depuis ses bytes en mémoire (extraction du
     /// chunk binary inclus dans le `.glb` standard).
     pub fn from_glb_bytes(bytes: &[u8]) -> Result<Self, GlbError> {
+        // **Détection Git LFS pointer** (v0.9.5++ safety) — si le
+        // fichier fait <1 KB et commence par `version https://git-lfs`,
+        // c'est un pointer LFS qui n'a pas été fetché.  On renvoie une
+        // erreur très explicite pour que l'utilisateur sache quoi
+        // faire (ça arrive après `git lfs migrate` sans `git lfs pull`).
+        if bytes.len() < 1024 && bytes.starts_with(b"version https://git-lfs") {
+            return Err(GlbError::Other(
+                "Fichier GLB est un pointer Git LFS non résolu — \
+                 lance `git lfs pull` à la racine du repo pour \
+                 télécharger les vrais binaires (~232 MB)".to_string(),
+            ));
+        }
+        // **Validation magic glTF** — un GLB valide commence par
+        // `glTF` (0x46546C67 little-endian).  Avant le parser
+        // gltf::import_slice, on vérifie pour donner un message clair
+        // si l'asset est tronqué ou corrompu.
+        if bytes.len() < 4 || &bytes[..4] != b"glTF" {
+            return Err(GlbError::Other(format!(
+                "Fichier non-GLB (magic = {:?} au lieu de \"glTF\")",
+                &bytes[..4.min(bytes.len())]
+            )));
+        }
         let (doc, buffers, _images) = gltf::import_slice(bytes)?;
         Self::from_document(&doc, &buffers)
     }
