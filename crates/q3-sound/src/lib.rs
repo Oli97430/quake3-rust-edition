@@ -159,10 +159,11 @@ impl SoundSystem {
 
     /// Charge un sample WAV ou OGG et retourne un handle stable.
     pub fn load(&self, name: impl Into<String>, bytes: Vec<u8>) -> Result<SoundHandle> {
+        let name: String = name.into();
         // On valide en essayant de décoder une fois.
         let cursor = Cursor::new(bytes.clone());
         Decoder::new(cursor)
-            .map_err(|e| Error::Parse(format!("audio: décodage de '{}' échoué: {}", name.into(), e)))?;
+            .map_err(|e| Error::Parse(format!("audio: décodage de '{}' échoué: {}", name, e)))?;
 
         let mut st = self.state.lock();
         let handle = SoundHandle(st.next_handle);
@@ -171,10 +172,29 @@ impl SoundSystem {
             handle,
             LoadedSound {
                 bytes: bytes.into(),
-                name: String::new(),
+                name,
             },
         );
         Ok(handle)
+    }
+
+    /// Libère un sample du cache.  À appeler explicitement sur les
+    /// transitions de map pour éviter l'accumulation des samples en RAM
+    /// (autrement le cache `sounds` grossissait sans bornes).
+    pub fn unload(&self, handle: SoundHandle) -> bool {
+        self.state.lock().sounds.remove(&handle).is_some()
+    }
+
+    /// Vide TOUT le cache de samples.  Utilisé sur changement de map
+    /// pour éviter la fuite d'OOM en LAN sessions longues.  Les sons
+    /// ré-utilisés ensuite seront ré-`load()` à la demande.
+    pub fn clear_cache(&self) {
+        let mut st = self.state.lock();
+        let count = st.sounds.len();
+        st.sounds.clear();
+        if count > 0 {
+            tracing::info!("audio: cache vidé ({count} samples libérés)");
+        }
     }
 
     pub fn set_listener(&self, listener: Listener) {
@@ -210,18 +230,38 @@ impl SoundSystem {
             None => return false,
         };
 
-        let Ok(decoder) = Decoder::new(Cursor::new(bytes.as_ref().to_vec())) else {
+        // **Optimisation alloc** (v0.9.5++ polish) — `bytes` est déjà
+        // un `Arc<[u8]>` cloné depuis le cache (line 199) ; on l'enveloppe
+        // directement dans un Cursor sans `to_vec()` qui allouait une
+        // copie complète à chaque tir (samples WAV peuvent être 100+ KB).
+        let Ok(decoder) = Decoder::new(Cursor::new(bytes)) else {
             warn!("audio: re-décodage échoué pour {:?}", sound);
             return false;
         };
-        let source: SamplesConverter<Decoder<Cursor<Vec<u8>>>, f32> = decoder.convert_samples();
+        let source = decoder.convert_samples::<f32>();
 
-        let (lx, ly, lz) = (st.listener.position.x, st.listener.position.y, st.listener.position.z);
+        // **Relative coords pour SpatialSink** (v0.9.5++ fix) — rodio
+        // applique sa propre atténuation interne basée sur la distance
+        // entre `emitter_pos` et les `*_ear` positions.  En passant les
+        // coords monde Q3 (souvent 10000+ unités), la distance internale
+        // était énorme → atténuation rodio écrasait le volume à ≈0.
+        // Solution : on translate tout dans le repère listener (listener
+        // à l'origine, emitter à la position relative).  La distance
+        // interne reflète alors la vraie distance perçue, et notre
+        // `volume` calculé en amont (atténuation Q3 + master) prime.
         let right = st.listener.right;
         let ear_sep = 0.1;
-        let left_ear = [lx - right.x * ear_sep, ly - right.y * ear_sep, lz - right.z * ear_sep];
-        let right_ear = [lx + right.x * ear_sep, ly + right.y * ear_sep, lz + right.z * ear_sep];
-        let emitter_pos = [emitter.position.x, emitter.position.y, emitter.position.z];
+        let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];
+        let right_ear = [right.x * ear_sep, right.y * ear_sep, right.z * ear_sep];
+        let rel = emitter.position - st.listener.position;
+        // On garde les unités Q3 mais autour de l'origine — rodio
+        // intern atten ~ 1/dist. Pour une émission proche (eye = 64u
+        // au-dessus du joueur) la distance reste 64, donc atten interne
+        // ~1/64. C'est encore trop fort.  On scale par 1/100 pour que
+        // les distances perçues soient en "mètres pseudo" (64u → 0.64m
+        // → atten interne ~1).
+        let scale = 0.01_f32;
+        let emitter_pos = [rel.x * scale, rel.y * scale, rel.z * scale];
 
         let sink = match SpatialSink::try_new(&self.handle, emitter_pos, left_ear, right_ear) {
             Ok(s) => s,
@@ -264,17 +304,14 @@ impl SoundSystem {
         let source: SamplesConverter<Decoder<Cursor<Vec<u8>>>, f32> =
             decoder.convert_samples();
 
-        // Positions initiales — seront rafraîchies à chaque tick.
-        let (lx, ly, lz) = (
-            st.listener.position.x,
-            st.listener.position.y,
-            st.listener.position.z,
-        );
+        // Positions initiales relatives (cf. note v0.9.5++ dans `play_3d`).
         let right = st.listener.right;
         let ear_sep = 0.1;
-        let left_ear = [lx - right.x * ear_sep, ly - right.y * ear_sep, lz - right.z * ear_sep];
-        let right_ear = [lx + right.x * ear_sep, ly + right.y * ear_sep, lz + right.z * ear_sep];
-        let emitter_pos = [emitter.position.x, emitter.position.y, emitter.position.z];
+        let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];
+        let right_ear = [right.x * ear_sep, right.y * ear_sep, right.z * ear_sep];
+        let rel = emitter.position - st.listener.position;
+        let scale = 0.01_f32;
+        let emitter_pos = [rel.x * scale, rel.y * scale, rel.z * scale];
 
         let sink =
             SpatialSink::try_new(&self.handle, emitter_pos, left_ear, right_ear).ok()?;
@@ -368,24 +405,19 @@ impl SoundSystem {
 
         // Snapshot des paramètres listener avant la boucle pour éviter un
         // double-borrow sur `st` (on lit `listener` / `master_volume` et
-        // on écrit dans `loops`).
+        // on écrit dans `loops`).  Coords relatives (cf. note `play_3d`).
         let pos = st.listener.position;
         let right = st.listener.right;
         let master = st.master_volume;
         let ear_sep = 0.1;
-        let left_ear = [
-            pos.x - right.x * ear_sep,
-            pos.y - right.y * ear_sep,
-            pos.z - right.z * ear_sep,
-        ];
-        let right_ear = [
-            pos.x + right.x * ear_sep,
-            pos.y + right.y * ear_sep,
-            pos.z + right.z * ear_sep,
-        ];
+        let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];
+        let right_ear = [right.x * ear_sep, right.y * ear_sep, right.z * ear_sep];
+        let scale = 0.01_f32;
         for l in st.loops.values() {
             l.sink.set_left_ear_position(left_ear);
             l.sink.set_right_ear_position(right_ear);
+            let rel = l.emitter.position - pos;
+            l.sink.set_emitter_position([rel.x * scale, rel.y * scale, rel.z * scale]);
             let dist = l.emitter.position.distance(pos);
             let atten = attenuation(dist, l.emitter.near_dist, l.emitter.far_dist);
             let v = (l.emitter.volume * atten * master).clamp(0.0, 1.0);

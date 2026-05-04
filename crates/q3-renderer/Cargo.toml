@@ -15,6 +15,7 @@ q3-shader = { workspace = true }
 q3-image = { workspace = true }
 q3-filesystem = { workspace = true }
 q3-model = { workspace = true }
+q3-terrain = { workspace = true }
 glam = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }

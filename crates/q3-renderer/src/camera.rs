@@ -43,6 +43,19 @@ pub struct CameraUniform {
     pub time_info: [f32; 4],
 }
 
+/// **Mode de scaling FOV** selon l'aspect ratio (v0.9.5++).
+///   - `HorPlus` : FOV vertical lock 4:3, horizontal s'élargit avec l'aspect
+///     (16:9 → ~106° hfov, 21:9 → ~120°, 32:9 → ~141°).  C'est le défaut
+///     historique Quake 3 et la convention de tous les arena shooters.
+///   - `VertMinus` : FOV horizontal lock à la valeur saisie, vertical se
+///     resserre sur les écrans larges.  Convention CS / Apex / Valorant —
+///     évite que les joueurs ultrawide aient un avantage périphérique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FovMode {
+    HorPlus,
+    VertMinus,
+}
+
 /// Caméra FPS style Quake.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -56,6 +69,12 @@ pub struct Camera {
     pub aspect: f32,
     pub z_near: f32,
     pub z_far: f32,
+    pub fov_mode: FovMode,
+    /// **TAA jitter** (v0.9.5++ #9) — offset sub-pixel appliqué à la
+    /// projection en NDC space.  Halton(2,3) varie chaque frame ; le
+    /// blend temporel dans le TAA resolve pass moyenne ces variations
+    /// = supersampling temporel sans coût rendu supplémentaire.
+    pub taa_jitter: [f32; 2],
 }
 
 impl Camera {
@@ -67,6 +86,8 @@ impl Camera {
             aspect,
             z_near: DEFAULT_Z_NEAR,
             z_far: DEFAULT_Z_FAR,
+            fov_mode: FovMode::HorPlus,
+            taa_jitter: [0.0, 0.0],
         }
     }
 
@@ -82,12 +103,29 @@ impl Camera {
         self.fov_h_at_4_3_deg = deg.clamp(60.0, 130.0);
     }
 
-    /// FOV vertical effectif en degrés. Dérivé : `vfov = 2·atan(tan(hfov/2) / (4/3))`.
-    /// Indépendant de l'aspect courant — c'est `proj_matrix` qui élargit
-    /// ensuite horizontalement selon `aspect`.
+    /// Mode de scaling du FOV selon l'aspect ratio.
+    pub fn set_fov_mode(&mut self, mode: FovMode) {
+        self.fov_mode = mode;
+    }
+
+    pub fn fov_mode(&self) -> FovMode {
+        self.fov_mode
+    }
+
+    /// FOV vertical effectif en degrés.  Le calcul dépend du mode :
+    ///   - **HorPlus** (défaut) : `vfov = 2·atan(tan(hfov/2) / (4/3))`.
+    ///     Indépendant de l'aspect courant — c'est `proj_matrix` qui
+    ///     élargit horizontalement selon `aspect`.
+    ///   - **VertMinus** : on conserve le hfov saisi à l'aspect réel et
+    ///     on dérive le vfov vers le bas.  Sur ultrawide ça réduit le
+    ///     champ vertical (image "letterbox" mentale).
     pub fn fov_y_deg(&self) -> f32 {
         let half_h = (self.fov_h_at_4_3_deg.to_radians() * 0.5).tan();
-        let half_v = half_h / FOV_REF_ASPECT;
+        let ref_aspect = match self.fov_mode {
+            FovMode::HorPlus   => FOV_REF_ASPECT,
+            FovMode::VertMinus => self.aspect.max(0.0001),
+        };
+        let half_v = half_h / ref_aspect;
         2.0 * half_v.atan().to_degrees()
     }
 
@@ -131,6 +169,29 @@ impl Camera {
     }
 
     pub fn proj_matrix(&self) -> Mat4 {
+        let proj = Mat4::perspective_rh(
+            self.fov_y_deg().to_radians(),
+            self.aspect.max(0.0001),
+            self.z_near,
+            self.z_far,
+        );
+        // TAA jitter — translation NDC sub-pixel (jitter en [-1,1] units).
+        // Quand jitter = [0,0], l'identité passe direct.
+        if self.taa_jitter[0] != 0.0 || self.taa_jitter[1] != 0.0 {
+            let jitter_mat = Mat4::from_translation(Vec3::new(
+                self.taa_jitter[0],
+                self.taa_jitter[1],
+                0.0,
+            ));
+            jitter_mat * proj
+        } else {
+            proj
+        }
+    }
+
+    /// Matrice projection SANS le jitter TAA — utilisée pour reprojeter
+    /// les positions de la frame précédente dans le TAA resolve.
+    pub fn proj_matrix_unjittered(&self) -> Mat4 {
         Mat4::perspective_rh(
             self.fov_y_deg().to_radians(),
             self.aspect.max(0.0001),
@@ -141,6 +202,11 @@ impl Camera {
 
     pub fn view_proj(&self) -> Mat4 {
         self.proj_matrix() * self.view_matrix()
+    }
+
+    /// View×Proj sans jitter — utilisé pour la reprojection TAA.
+    pub fn view_proj_unjittered(&self) -> Mat4 {
+        self.proj_matrix_unjittered() * self.view_matrix()
     }
 
     /// Matrice view privée de sa translation — ne garde que la rotation

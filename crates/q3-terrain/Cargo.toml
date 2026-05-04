@@ -1,0 +1,19 @@
+[package]
+name = "q3-terrain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Heightmap terrain large-échelle (BR / sandbox), hors-BSP. Carte Réunion 1/10."
+
+[dependencies]
+q3-math = { workspace = true }
+q3-common = { workspace = true }
+q3-collision = { workspace = true }
+bytemuck = { workspace = true }
+byteorder = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"

@@ -7,6 +7,7 @@
 mod app;
 mod hud_helpers;
 mod logo;
+mod map_dl;
 mod menu;
 mod net;
 mod vr;
@@ -68,10 +69,16 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     max_clients: u8,
 
-    /// Nombre de bots à spawn côté serveur au démarrage. Utiles pour
-    /// remplir un --host de partie de test sans avoir 4 instances
-    /// client connectées. Ignoré hors mode `--host`.
-    #[arg(long, default_value_t = 0)]
+    /// Nombre de bots à spawn au démarrage.
+    ///
+    /// * En `--host` (serveur réseau) : ils tournent côté autoritatif.
+    /// * En solo / `--connect` : ils sont locaux, drainés par
+    ///   `load_map` une fois la map chargée.
+    ///
+    /// **Défaut = 3** pour qu'un lancement nu (`q3.exe` double-cliqué
+    /// ou via raccourci sans argument) ait quand même de la vie en jeu.
+    /// Mettre `--bots 0` pour vraiment jouer seul.
+    #[arg(long, default_value_t = 3)]
     bots: u8,
 
     /// Active le chemin VR (OpenXR). Scaffold actuellement — en absence

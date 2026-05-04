@@ -12,6 +12,7 @@ q3-math = { workspace = true }
 q3-common = { workspace = true }
 q3-bsp = { workspace = true }
 q3-collision = { workspace = true }
+q3-terrain = { workspace = true }
 tracing = { workspace = true }
 hashbrown = { workspace = true }
 smallvec = { workspace = true }

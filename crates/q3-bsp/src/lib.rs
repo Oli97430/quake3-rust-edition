@@ -4,6 +4,14 @@
 //! `qfiles.h` d'id Software. Les 17 lumps sont tous lus en zero-copy quand
 //! c'est possible (via `bytemuck::cast_slice`).
 //!
+//! # Endianness
+//!
+//! Les fichiers BSP Quake 3 sont **little-endian** (Q3 est sorti sur x86 en
+//! 1999).  Le parseur utilise `bytemuck::cast_slice` qui hérite de
+//! l'endianness host → on assert au compile-time que la cible est LE.
+//! Sur une cible BE théorique (aarch64 BE, PPC) la lecture serait
+//! corrompue silencieusement sans cette garde.
+//!
 //! # Usage
 //!
 //! ```no_run
@@ -15,6 +23,11 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::all)]
+
+const _: () = assert!(
+    cfg!(target_endian = "little"),
+    "q3-bsp: target host doit être little-endian (Q3 BSP = LE)"
+);
 
 pub mod lumps;
 pub mod patch;

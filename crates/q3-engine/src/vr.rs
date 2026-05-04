@@ -39,6 +39,12 @@
 //! runtime OpenXR détecté — auquel cas on retombe sur le rendu mono
 //! classique sans rien casser.
 
+// Scaffolding VR — l'intégration OpenXR runtime arrivera dans une
+// release dédiée. Tous les types/fields en `dead_code` ici sont
+// l'API publique qui sera consommée à ce moment-là. On évite de
+// les retirer pour ne pas re-bricoler la struct deux fois.
+#![allow(dead_code)]
+
 use q3_math::{Mat4, Vec3};
 
 /// Mode d'affichage du renderer.  `Mono` = un seul viewport ; `Stereo`

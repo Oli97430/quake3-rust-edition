@@ -4,6 +4,12 @@
 //! plusieurs *surfaces*, chacune avec son propre shader. Utilisé pour les
 //! joueurs, armes, items et décors animés.
 //!
+//! # Endianness
+//!
+//! Les fichiers MD3 sont **little-endian** (Q3 est sorti sur x86).  Le
+//! parseur utilise `bytemuck::cast_slice` qui hérite de l'endianness host
+//! — on assert compile-time que la cible est LE.
+//!
 //! # Structure d'un fichier MD3
 //!
 //! ```text
@@ -30,7 +36,14 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::all)]
 
+const _: () = assert!(
+    cfg!(target_endian = "little"),
+    "q3-model: target host doit être little-endian (Q3 MD3 = LE)"
+);
+
 pub mod raw;
+pub mod glb;
+pub use glb::{GlbMesh, GlbVertex, GlbError};
 
 use bytemuck::try_cast_slice;
 use q3_common::{Error, Result};
@@ -348,14 +361,22 @@ fn cstr(bytes: &[u8]) -> &str {
     std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
-/// Décode une normale MD3 (lat/lon packés en `u16`, big-endian style :
-/// `zenith` en octet bas, `azimuth` en octet haut).
+/// Décode une normale MD3 packée en `u16` (format spec Q3) :
+/// * **`lat`** (octet bas, byte 0) ∈ [0, 255] → angle zenith ∈ [0, π].
+///   `lat = 0` → +Z (haut), `lat = 128` ≈ horizon, `lat = 255` ≈ -Z.
+/// * **`lng`** (octet haut, byte 1) ∈ [0, 255] → azimuth ∈ [0, 2π].
+///
+/// Reconstruction sphérique : `(cos(lng)·sin(lat), sin(lng)·sin(lat), cos(lat))`.
+///
+/// Avant v0.9.5++ on traitait les deux comme [0, 2π] ce qui distordait les
+/// normales (`lat=0` ne donnait pas `+Z` strict ; les valeurs ~horizon
+/// étaient projetées sur le mauvais hémisphère).
 fn decode_normal(packed: u16) -> Vec3 {
-    let lat = (packed & 0xFF) as f32 * (core::f32::consts::TAU / 255.0);
+    let lat = (packed & 0xFF) as f32 * (core::f32::consts::PI / 255.0);
     let lng = ((packed >> 8) & 0xFF) as f32 * (core::f32::consts::TAU / 255.0);
     let (sl, cl) = lat.sin_cos();
     let (sg, cg) = lng.sin_cos();
-    Vec3::new(cl * sg, sl * sg, cg)
+    Vec3::new(cg * sl, sg * sl, cl)
 }
 
 #[cfg(test)]
@@ -367,6 +388,22 @@ mod tests {
         // packed = 0 → zenith pure (+Z dans Q3).
         let n = decode_normal(0);
         assert!((n - Vec3::Z).length() < 1e-3, "n = {:?}", n);
+    }
+
+    #[test]
+    fn decode_normal_horizon_ranges() {
+        // lat ≈ π/2 (octet 128) → vecteur ~horizontal, |z| petit, longueur 1.
+        let n = decode_normal(128);
+        assert!(n.z.abs() < 0.05, "horizon |z| = {}", n.z);
+        assert!((n.length() - 1.0).abs() < 1e-3, "len = {}", n.length());
+    }
+
+    #[test]
+    fn decode_normal_unit_length_for_random_packings() {
+        for &packed in &[0u16, 0xFFFFu16, 0x4080, 0x80C0, 0x1234] {
+            let n = decode_normal(packed);
+            assert!((n.length() - 1.0).abs() < 1e-3, "packed=0x{:04x} len={}", packed, n.length());
+        }
     }
 
     #[test]

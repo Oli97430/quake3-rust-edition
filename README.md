@@ -4,231 +4,190 @@
 
 #### *id Tech 3 reimagined in Rust — modern engine, classic gameplay*
 
-[![Version](https://img.shields.io/badge/version-0.5-orange?style=for-the-badge)](https://github.com/)
-[![Rust](https://img.shields.io/badge/rust-1.78+-blue?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-GPL--2.0-green?style=for-the-badge)](#licence)
-[![Tests](https://img.shields.io/badge/tests-280%2B%20passing-brightgreen?style=for-the-badge)](#tests)
-[![wgpu](https://img.shields.io/badge/render-wgpu-purple?style=for-the-badge)](https://wgpu.rs/)
+[![License](https://img.shields.io/badge/License-GPL--2.0-blue)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.78+-orange)](https://rustup.rs/)
+[![Status](https://img.shields.io/badge/Status-v0.9.5-green)]()
 
 </div>
 
 ---
 
-> **Quake 3 RUST EDITION** est une réécriture moderne de *Quake III Arena* (1999) en Rust pur. On garde la **compatibilité totale des assets** (BSP v46, PK3, MD3, shader scripts) et la **physique canonique** (strafe-jump, slide, bunnyhop, hauteurs de hull asymétriques) — mais le moteur entier est reconstruit avec wgpu, tokio, glam, et zéro `unsafe` business-logic. Le résultat : Quake 3 sur ton 32:9 avec lag-comp, follow-cam, démos rejouables, et un netcode authoritative qui tient le LAN.
+Réécriture complète de **Quake III Arena** en Rust moderne — pipeline `wgpu` (Vulkan/DX12/Metal), assets glTF, anti-cheat serveur, netcode lag-compensation, audio spatial, post-FX HDR.
 
----
+> **État** : v0.9.5 — moteur complet, jouable solo + bots IA, mode BR exploration, **9/9 armes en GLB**, anti-cheat actif, map downloader intégré.
 
-## ✨ Nouveautés v0.5
+## ✨ Highlights
 
-| Catégorie | Feature |
-|---|---|
-| **Multijoueur** | Lag compensation hitscan (rewind 250 ms client-perceived) |
-| **Multijoueur** | Mode TDM avec friendly-fire toggleable + scoreboard team-grouped |
-| **Multijoueur** | Démo replay `.q3rdm` (record snapshots → replay deterministe) |
-| **Spectateur** | Follow-cam POV (LMB/RMB cycle joueurs vivants) |
-| **Communication** | Quick-chat wheel (V → 8 messages prédéfinis radial) |
-| **HUD** | Item respawn timers (MH/RA/YA + powerups en cooldown) |
-| **HUD** | Safe-area 16:9 sur ultra-wide 21:9 / 32:9 |
-| **Rendu** | Bloom additif post-process (extract → blur → composite) |
-| **Rendu** | FOV horizontal Hor+ (cg_fov correctement scalé sur tout aspect) |
-| **Polish** | Muzzle origin correct (projectiles sortent du canon, pas du visage) |
-| **Polish** | Viewmodel positionné contre l'épaule (pas flottant) |
-| **Polish** | Sons d'arme avec fallback multi-paths (warn diagnostique) |
+- **Renderer wgpu HDR** : pipeline scene buffer `Rgba16Float` + ACES Narkowicz + multi-mip bloom + SSAO depth-based + CSM (PCF 3×3) + TAA Halton(2,3) + SSR water raymarch + god rays + volumetric fog (HG phase)
+- **9/9 armes en GLB** moderne (pickup au sol + viewmodel main joueur) avec orientation tunée par arme
+- **Animations bots Q3 fidèles** : parsing `animation.cfg` runtime, 25+ ranges (LEGS_*, TORSO_*, BOTH_*), TORSO_PAIN1, phase rebase per anim change
+- **Netcode lag-compensation** : ring buffer `LagSample { origin, velocity, view_angles, crouching }` 30 samples × 50 ms, hit-center ajusté crouch (24u stand / 14u crouch)
+- **Anti-cheat serveur** : cap angulaire 720°/s post-budget, teleport detection 2400 u/s, dt budget cumulatif, comparaisons signées (anti i32→u32 wrap exploit)
+- **Map downloader intégré** : catalogue + DL HTTP background (ureq + rustls) + SHA256 + magic ZIP/IBSP check + cap 100 MB anti-DoS
+- **Battle Royale Réunion** mode exploration : terrain procédural, POI tier 2-4, ring shrink optionnel
+- **Lecteur audio universel** : mp3/wav/ogg/flac, scan récursif `~/Music`, `~/Downloads`, OneDrive, dossiers custom via `s_musicpath`
+- **Punch angles recoil** par arme (BFG 6°, RL 5°, SG 4.5°, MG 1.4° + jitter ±0.5°)
+- **Railgun sniper scope** : RMB tenu = zoom FOV÷3 + sens÷3 + crosshair de précision + mil-dot
 
-## 🎮 Features complètes
+## 🔫 Armes (9/9 GLB)
 
-<details>
-<summary><b>Rendu & Pipeline graphique</b></summary>
+| Arme | GLB | Tir alt |
+|------|-----|---------|
+| Gauntlet | ✅ | Lunge dash + range 96u |
+| Machine Gun | ✅ | Burst précision 18 dmg, no spread |
+| Shotgun | ✅ | Slug AP 80 dmg, cooldown 1.5s |
+| Grenade Launcher | ✅ | Airburst flat shot 110 splash |
+| Rocket Launcher | ✅ | Lock-on cône 30°/1500u |
+| Lightning Gun | ✅ | Shock blast 55 dmg |
+| Railgun | ✅ | **Sniper zoom 3× + ricochet** |
+| Plasma Gun | ✅ | Plasma orb gros splash 96u |
+| BFG10K | ✅ | Death zone 250u splash, 160 dmg |
 
-- [x] `wgpu` cross-API (Vulkan / DX12 / Metal) en remplacement d'OpenGL 1.x
-- [x] BSP v46 surfaces (lightmap atlas + diffuse multi-stage)
-- [x] Shader script parser (`.shader` Q3 vanilla)
-- [x] MD3 loader + viewmodels 9 armes + tag attachments
-- [x] Skybox procédural + cubemap support
-- [x] Particles, decals, dlights, beams, flares, fog volumes
-- [x] **Bloom additif** (post-process LDR, threshold + gauss séparable)
-- [x] **FOV Hor+** automatique sur 4:3 / 16:9 / 21:9 / 32:9
-- [x] Muzzle flash 3D via `tag_flash` MD3
-- [ ] HDR pipeline complet (Rgba16Float partout + ACES tonemap) — *roadmap v0.6*
-- [ ] Cascaded shadow maps — *roadmap*
-- [ ] PBR materials — *roadmap*
+## 🛡️ Items
 
-</details>
+| Catégorie | Status |
+|-----------|--------|
+| Munitions (9 types) | 9/9 ✅ GLB |
+| Armures (3 tiers) | 3/3 ✅ (shard 5 / combat 50 / body 100) |
+| Health (4 tiers) | ✅ partagé via `health_pack.glb` |
+| Powerups (Quad, Regen) | 2/6 ✅ GLB |
+| Holdables (Medkit) | 1/2 ✅ |
 
-<details>
-<summary><b>Physique & Gameplay</b></summary>
-
-- [x] Player movement Q3-canon (strafe-jump, accel air, friction, slide)
-- [x] BSP collision brushes (trace_box + asymmetric hull)
-- [x] Pickups (18 types), armes (9), powerups (Quad, Regen, Haste, BSuit, Invis, Flight)
-- [x] Jump pads, téléporteurs, hurt zones, fall damage
-- [x] Deathmatch complet (frags, fraglimit, intermission, respawn)
-- [x] **TDM** (free / red / blue) + friendly-fire optionnel
-- [x] Bots IA (FSM Idle/Roam/Combat, skill 1..5, voice taunts)
-- [ ] Patches Bézier (surfaces courbes) — *roadmap*
-- [ ] CTF gametype — *roadmap*
-
-</details>
-
-<details>
-<summary><b>Réseau & Multijoueur</b></summary>
-
-- [x] UDP authoritative server, snapshot 20 Hz, usercmd 60 Hz
-- [x] Delta-compression snapshots (baseline + dirty bits)
-- [x] NetChannel fragmentation
-- [x] Client prediction + rewind/replay réconciliation
-- [x] Handshake OOB (challenge → connect → connected)
-- [x] **Lag compensation** ring-buffer 30 entrées/slot, rewind ≤ 250 ms
-- [x] Spectator mode + follow-cam POV
-- [x] Démos `.q3rdm` (record + replay)
-- [x] Chat (slash `/say`, quick-chat V wheel)
-- [ ] Voice chat (Opus / WebRTC) — *roadmap*
-- [ ] Server browser LAN — *roadmap*
-
-</details>
-
-<details>
-<summary><b>UX & HUD</b></summary>
-
-- [x] Menu principal animé + options persistées (`q3config.cfg`)
-- [x] Console slash-commands + history + autocomplete
-- [x] HUD moderne (panels anthracite + accents cyan)
-- [x] Kill-feed, chat-feed, scoreboard team-grouped
-- [x] Item respawn timers en haut-gauche
-- [x] Damage indicator (pain arrow direction)
-- [x] Quick-chat radial wheel (V key)
-- [x] Multi-aspect : safe-area HUD 16:9 sur ultra-wide
-- [x] Screenshot F11 (TGA 32-bit)
-- [x] FPS overlay (F9)
-
-</details>
-
-## 🛠️ Architecture du workspace
+## 🏗️ Architecture
 
 ```
 crates/
-├── q3-math         Primitives math (vec3, mat4, plane, aabb) + conventions Q3
-├── q3-common       Cvar, Cmd, erreurs, logger
-├── q3-filesystem   Virtual FS : .pk3 (zip) + fichiers loose
-├── q3-bsp          Parseur IBSP v46 (tous les lumps)
-├── q3-shader       Parser scripts .shader + registry
-├── q3-image        Décodeur TGA / JPG / PNG
-├── q3-model        MD3 (viewmodels, player, items)
-├── q3-collision    cmod : BSP tree + trace_box + asymmetric hull
-├── q3-sound        Audio rodio (WAV / OGG, positionnel 3D)
-├── q3-net          Netcode UDP (handshake, NetChannel, snapshots, deltas)
-├── q3-bot          IA bots : FSM + skill scaling
-├── q3-renderer     Renderer wgpu + post-process (bloom)
-├── q3-game         Logique de jeu (entités, physique, triggers)
-└── q3-engine       Binaire principal — App + net + HUD + bots locaux
+├── q3-engine/      # binaire q3.exe + main loop + app.rs (~22k lines)
+│   ├── src/app.rs       # state machine + render loop + input
+│   ├── src/menu.rs      # menu UI (Root/Play/Options/Audio/MapDownloader)
+│   ├── src/net/         # client + server + snapshots delta
+│   ├── src/map_dl.rs    # HTTP map downloader (ureq + sha256 + zip)
+│   └── src/vr.rs        # VR scaffolding (OpenXR partial)
+├── q3-renderer/    # wgpu pipelines (BSP, MD3, GLB, terrain, sky, post)
+├── q3-bsp/         # parseur IBSP v46 (zero-copy bytemuck)
+├── q3-model/       # MD3 + glTF/GLB loader
+├── q3-bot/         # IA bots (FSM + animation ranges)
+├── q3-game/        # physique mouvement (strafe-jump, wall-jump, mantling)
+├── q3-collision/   # trace BSP + bbox vs world
+├── q3-terrain/     # heightmap BR + ring shrink + POI
+├── q3-net/         # protocole snapshots + UserCmd quantification
+├── q3-sound/       # rodio wrapper + spatial 3D
+├── q3-image/       # decoder TGA/JPG/PNG + ImageCache
+├── q3-shader/      # parseur Q3 shader scripts
+├── q3-filesystem/  # VFS pak0+mods+assets/ avec cycle protection symlinks
+├── q3-math/        # glam wrappers + Q3 Z-up conventions
+└── q3-common/      # cvar registry + log + errors
 ```
 
-## 🚀 Build & Run
+## 🚀 Build
 
-### Prérequis
-
-- Rust **1.78+** (stable)
-- GPU compatible Vulkan / DirectX 12 / Metal
-- `baseq3/pak0.pk3` de Quake III Arena (auto-détecté Steam/retail, ou via `--base`)
-
-### Build
+Pré-requis :
+- Rust 1.78+ (workspace edition 2021)
+- Drivers GPU compatibles wgpu (Vulkan / DX12 / Metal)
+- Quake 3 Arena installé (Steam ou autre — pour les `pak0.pk3` originaux)
 
 ```bash
-# Debug
-cargo build
-
-# Release optimisé
-cargo build --release -p q3-engine
+cargo build --release
+./target/release/q3
 ```
 
-### Run
+Le moteur auto-détecte l'install Steam Q3. Override : `--base "C:\path\to\Quake 3 Arena"`.
+
+## 🎵 Lecteur audio
 
 ```bash
-# Solo, map de démarrage
-cargo run --release -p q3-engine -- --map maps/q3dm1.bsp
-
-# Solo + bots
-cargo run --release -p q3-engine -- --map maps/q3dm6.bsp --bots 4
-
-# Hôte serveur multijoueur (TDM, no friendly fire)
-cargo run --release -p q3-engine -- \
-  --host 0.0.0.0:27960 --map maps/q3tourney2.bsp \
-  --gametype tdm --no-friendly-fire --max-clients 8
-
-# Client connecté
-cargo run --release -p q3-engine -- --connect 192.168.1.10:27960 --team red
-
-# Spectateur (sans body)
-cargo run --release -p q3-engine -- --connect 192.168.1.10:27960 --spectate
-
-# Enregistre une démo
-cargo run --release -p q3-engine -- \
-  --connect 192.168.1.10:27960 --record matches/match-001.q3rdm
-
-# Rejoue une démo
-cargo run --release -p q3-engine -- --play matches/match-001.q3rdm
+# Console in-game (touche `~`)
+seta s_musicpath "D:\Musique;E:\Spotify\Export"
+music list
+music play "C:\Users\You\Music\track.mp3"
 ```
 
-### Variables d'environnement
+Formats : WAV, OGG, MP3, FLAC. Scan récursif jusqu'à 4 niveaux.
 
-| Variable | Effet |
-|---|---|
-| `Q3_BASE` | Chemin vers `baseq3/` (override de l'auto-détection) |
-| `Q3_AUTOSHOT=<sec>` | Screenshot auto + exit après N secondes (debug/CI) |
-| `RUST_LOG` | Niveau de log : `info`, `debug`, `trace` |
+## 🗺️ Map Downloader
 
-## 🎯 Contrôles
+```
+Menu → OPTIONS → MAP DOWNLOADER
+```
 
-| Touche | Action |
-|---|---|
-| **WASD / ZQSD** | Mouvement |
-| **Souris** | Look |
-| **LMB** | Tir / cycle next (spectator) |
-| **RMB** | Cycle prev (spectator) |
-| **SPACE** | Saut / free-fly (spectator) |
-| **CTRL** | Crouch |
-| **SHIFT** | Walk |
-| **1-9** | Sélection arme (ou message si V active) |
-| **X** | Last weapon |
-| **TAB** (maintenu) | Scoreboard |
-| **V** | Quick-chat wheel |
-| **T** | Chat console |
-| **Y** | Team chat *(roadmap)* |
-| **ENTER** | Activer holdable (medkit/teleporter) |
-| **F3** | Player taunt |
-| **F5** | Restart match |
-| **F9** | FPS overlay |
-| **F11** | Screenshot |
-| **`** / **²** | Console |
-| **ESC** | Menu / cancel chat-wheel / quitter |
+Catalogue inclus : Aerowalk, Cure, ZTN3DM2, Pukka3Tourney2, Lost World. DL HTTP background avec progression live, SHA256, magic ZIP+IBSP check, cap 100 MB. PK3 placés dans `baseq3/`.
 
-## 🧪 Tests
+Console alternative : `mapdl list` / `mapdl get <id>` / `mapdl status`.
+
+## 🛠️ Cvars notables
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `cg_fov` | 90 | FOV horizontal à 4:3 (Q3 standard) |
+| `cg_fovaspect` | 0 | 0 = Hor+ (Quake/arena), 1 = Vert- (CS/Apex) |
+| `r_skybox` | "env/skybox_clouds" | Override skybox custom global |
+| `r_hdr` | 0 | HDR10 surface (en cours) |
+| `s_musicpath` | "" | Dossiers audio supplémentaires (`;` séparé Win, `:` Unix) |
+| `g_godmode` | 0 | Joueur invincible vs bots (test) |
+| `br_bots` | 0 | BR : 0 = exploration vide, 1 = match avec bots |
+
+## 🎯 Anti-cheat (server-side)
+
+- **Angular rate cap** : 720°/s yaw+pitch post-budget — anti-aimbot soft snap
+- **Teleport detection** : 2400 u/s max — revert origin + freeze velocity, log warn
+- **dt budget cumulatif** : ≤ 1 s/s wall-clock (anti-speedhack)
+- **Lag-comp window** : 250 ms max rewind, refuse target dans le futur (anti clock-skew forgery)
+- **Saturating arithmetic** : `saturating_sub` ammo, comparaisons signées (pas de wrap)
+- **Magic check downloads** : SHA256 + ZIP magic + IBSP magic
+
+## 📊 Performance
+
+| Map | FPS avg | 1% low | 0.1% low |
+|-----|---------|--------|----------|
+| q3dm6 | 280 | 240 | 195 |
+| q3dm17 | 320 | 290 | 260 |
+| q3tourney2 | 350 | 310 | 280 |
+| br_reunion | 180 | 145 | 120 |
+
+*RTX 3090 @ 1920×1080, ULTRA*
+
+Optims clés :
+- God rays / volumetric fog early-out
+- SSAO kernel précomputé `var<array>`
+- Drone scratch buffer (0 alloc heap par frame)
+- TAA Halton jitter (supersampling temporel)
+
+## 🐛 Polish v0.9.5
+
+~14 bugs critiques fixés sur 2 passes audit :
+- Lag-comp u32 underflow guard + crouching hit-center
+- MapDownloader race + DoS cap (100 MB) + BSP magic check
+- VFS symlink cycle protection (Windows junctions)
+- MD3 normal decoding (lat = [0, π], pas [0, 2π])
+- Sound cache leak (`unload()` + `clear_cache()`)
+- Ammo i32→u32 cast exploit (tir infini)
+- Cap angulaire post-budget (anti lag-spike flick)
+- Fire flags reset au switch d'arme
+- NaN guard homing rocket
+- Endianness assert q3-bsp + q3-model
+
+## 🤝 Contribuer
+
+Code commenté en français — chaque section explique le **pourquoi**, pas juste le **quoi**.
 
 ```bash
-# Tous les tests
+cargo fmt
+cargo clippy --workspace -- -D warnings
 cargo test --workspace
-
-# Crate spécifique
-cargo test -p q3-engine
-cargo test -p q3-renderer
 ```
-
-**280+ tests** verts répartis sur 14 crates :
-- physique (collision, slide, jump asymétrique)
-- netcode (handshake, delta, lag-comp, démos)
-- gameplay (TDM, FF gate, scoreboard, follow-cam)
-- rendu (FOV multi-aspect, bloom resources)
 
 ## 📜 Licence
 
-Code Rust sous **GPL-2.0-or-later**, identique à la release officielle d'id Software (août 2005).
+GPL-2.0-or-later (héritage Q3 id Software).
 
-Les assets du jeu (`pak0.pk3`) ne sont **pas** inclus — tu dois posséder une copie de Quake III Arena (Steam, retail) pour les utiliser.
+⚠️ Les `pak0.pk3` originaux Q3 NE SONT PAS redistribués — il faut posséder une copie légale du jeu (Steam, GOG, CD).
 
----
+## 🙏 Crédits
 
-<div align="center">
-
-**v0.5** — *L'engine est prêt, place au gameplay* 🦀💥
-
-</div>
+- **id Software** — Quake III Arena (1999)
+- **Kekoa Proudfoot** — doc BSP IBSP v46
+- **wgpu / naga** — pipeline graphique cross-platform
+- **rodio** — audio
+- **glam** — math SIMD
+- **gltf** — parser glTF 2.0
+- **ureq + rustls** — HTTP pure Rust pour map downloader

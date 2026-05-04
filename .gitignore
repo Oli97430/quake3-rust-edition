@@ -6,3 +6,14 @@ Cargo.lock.bak
 .vscode/
 .idea/
 *.log
+
+# Build artifacts intermédiaires (méthodes extraites pour debug)
+/build_artifacts/
+
+# Musique utilisateur (chacun a la sienne — pas dans le repo)
+/assets/music/*.mp3
+/assets/music/*.wav
+/assets/music/*.ogg
+
+# q3config user (résolution / sensibilité / cvars perso)
+/q3config.cfg

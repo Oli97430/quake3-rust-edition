@@ -34,8 +34,8 @@ pub mod client;
 pub mod demo;
 pub mod server;
 
-pub use client::{ClientStage, ClientState, LocalInput, PredictionInputs, USERCMD_HZ};
-pub use server::{GameType, ServerSlot, ServerState, SNAPSHOT_HZ};
+pub use client::{ClientStage, ClientState, LocalInput, PredictionInputs};
+pub use server::{GameType, ServerState};
 
 use q3_game::World;
 use std::net::SocketAddr;

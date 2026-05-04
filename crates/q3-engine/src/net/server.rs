@@ -403,13 +403,29 @@ pub struct ServerSlot {
     /// Équipe TDM : 0=free/FFA, 1=red, 2=blue. Issu de `\team\<n>`
     /// userinfo. Propagé dans `PlayerState.team` à chaque snapshot.
     team: u8,
-    /// Historique de positions pour la **lag compensation** des hitscans.
-    /// Chaque entrée = `(server_time_ms, origin)`. Push à chaque tick
-    /// après pmove. Cap à `LAG_COMP_HISTORY_LEN` ≈ 1.5 s à 20 Hz, plus
-    /// que les ~250 ms maximum qu'on autorise à rewind. Stocker juste
-    /// l'origin suffit : le hitbox est sphérique (`PLAYER_HIT_RADIUS`),
-    /// la rotation n'affecte pas le test ray-sphere.
-    pub position_history: std::collections::VecDeque<(u32, Vec3)>,
+    /// Historique d'état joueur pour la **lag compensation** des
+    /// hitscans et projectiles.  Chaque entrée = `LagSample {
+    /// time_ms, origin, velocity, view_angles, crouching }`.  Push à
+    /// chaque tick après pmove.  Cap à [`LAG_COMP_HISTORY_LEN`] ≈ 1.5 s
+    /// à 20 Hz.  v0.9.5++ étendu vs v1 (qui stockait juste origin) —
+    /// permet (a) ajustement hitbox sur joueurs accroupis, (b) rewind
+    /// d'angle pour hitbox future par-bone, (c) muzzle origin
+    /// rewindée pour projectiles.
+    pub position_history: std::collections::VecDeque<LagSample>,
+}
+
+/// Snapshot d'état joueur pour lag compensation.  Tout ce qui peut
+/// changer le résultat d'un raytest hit-vs-target doit être stocké ici
+/// (origin pour position, view_angles pour direction de tir,
+/// crouching pour décalage hitbox center).  Voir
+/// [`ServerSlot::position_history`].
+#[derive(Debug, Clone, Copy)]
+pub struct LagSample {
+    pub time_ms: u32,
+    pub origin: Vec3,
+    pub velocity: Vec3,
+    pub view_angles: Angles,
+    pub crouching: bool,
 }
 
 /// Fenêtre maximum de rewind (millisecondes) pour la lag compensation.
@@ -472,7 +488,7 @@ impl ServerSlot {
         }
     }
 
-    /// Push la position courante dans l'historique de lag compensation,
+    /// Push l'état joueur courant dans l'historique de lag compensation,
     /// avec son `server_time_ms`. Capé à [`LAG_COMP_HISTORY_LEN`] : la
     /// plus vieille entrée est éjectée par la nouvelle. Appelé une fois
     /// par tick après pmove.
@@ -480,47 +496,97 @@ impl ServerSlot {
         if self.position_history.len() == LAG_COMP_HISTORY_LEN {
             self.position_history.pop_front();
         }
-        self.position_history
-            .push_back((server_time_ms, self.player.origin));
+        self.position_history.push_back(LagSample {
+            time_ms: server_time_ms,
+            origin: self.player.origin,
+            velocity: self.player.velocity,
+            view_angles: self.player.view_angles,
+            crouching: self.player.crouching,
+        });
     }
 
-    /// Position interpolée à `target_server_time_ms`. Si la cible est
-    /// plus vieille que la fenêtre [`LAG_COMP_MAX_REWIND_MS`] vs
-    /// `current_server_time_ms`, on retombe sur la position courante
-    /// (pas de lag-comp = comportement legacy = anti-cheat).
+    /// État joueur (LagSample) interpolé à `target_server_time_ms`. Si
+    /// la cible est plus vieille que [`LAG_COMP_MAX_REWIND_MS`] vs
+    /// `current_server_time_ms`, on retombe sur l'état courant
+    /// (= comportement legacy = anti-cheat anti-forgery d'ack ancien).
+    pub fn lag_compensated_sample(
+        &self,
+        target_server_time_ms: u32,
+        current_server_time_ms: u32,
+    ) -> LagSample {
+        let fallback = LagSample {
+            time_ms: current_server_time_ms,
+            origin: self.player.origin,
+            velocity: self.player.velocity,
+            view_angles: self.player.view_angles,
+            crouching: self.player.crouching,
+        };
+        // **Anti-cheat / clock-skew guard** (v0.9.5++ polish) — refuse
+        // un `target` dans le futur (forgery par un client malveillant
+        // ou skew d'horloge serveur).  Sans ce check, `(target - s.time)`
+        // sur u32 fait un underflow → `f` énorme → interpolation envoie
+        // un projectile fantôme à des coords absurdes.
+        if target_server_time_ms > current_server_time_ms {
+            return fallback;
+        }
+        let elapsed_since = current_server_time_ms - target_server_time_ms;
+        if elapsed_since > LAG_COMP_MAX_REWIND_MS || self.position_history.is_empty() {
+            return fallback;
+        }
+        let mut older: Option<LagSample> = None;
+        let mut newer: Option<LagSample> = None;
+        for &s in self.position_history.iter().rev() {
+            if s.time_ms <= target_server_time_ms {
+                older = Some(s);
+                break;
+            }
+            newer = Some(s);
+        }
+        match (older, newer) {
+            (Some(s0), Some(s1)) if s1.time_ms > s0.time_ms => {
+                let span = (s1.time_ms - s0.time_ms) as f32;
+                let f = ((target_server_time_ms - s0.time_ms) as f32 / span)
+                    .clamp(0.0, 1.0);
+                LagSample {
+                    time_ms: target_server_time_ms,
+                    origin: s0.origin + (s1.origin - s0.origin) * f,
+                    velocity: s0.velocity + (s1.velocity - s0.velocity) * f,
+                    view_angles: s0.view_angles, // pas de slerp, on prend la borne basse
+                    crouching: s0.crouching,
+                }
+            }
+            (Some(s0), _) => s0,
+            (None, Some(s1)) => s1,
+            (None, None) => fallback,
+        }
+    }
+
+    /// Compatibilité v1 — retourne juste l'origin rewindée.  Préféré pour
+    /// le code existant qui ne fait pas attention à la crouch box.
     pub fn lag_compensated_position(
         &self,
         target_server_time_ms: u32,
         current_server_time_ms: u32,
     ) -> Vec3 {
-        // Garde-fou rewind max — couvre RTT élevé + buffer interp,
-        // bloque les forgeries d'ack très anciens.
-        let elapsed_since = current_server_time_ms.saturating_sub(target_server_time_ms);
-        if elapsed_since > LAG_COMP_MAX_REWIND_MS || self.position_history.is_empty() {
-            return self.player.origin;
-        }
-        // Cherche le sample qui encadre `target`. L'historique est
-        // chronologique : on parcourt à l'envers pour trouver la 1re
-        // entrée ≤ target, son successeur immédiat est l'autre borne.
-        let mut older: Option<(u32, Vec3)> = None;
-        let mut newer: Option<(u32, Vec3)> = None;
-        for &(t, p) in self.position_history.iter().rev() {
-            if t <= target_server_time_ms {
-                older = Some((t, p));
-                break;
-            }
-            newer = Some((t, p));
-        }
-        match (older, newer) {
-            (Some((t0, p0)), Some((t1, p1))) if t1 > t0 => {
-                let span = (t1 - t0) as f32;
-                let f = ((target_server_time_ms - t0) as f32 / span).clamp(0.0, 1.0);
-                p0 + (p1 - p0) * f
-            }
-            (Some((_, p0)), _) => p0,
-            (None, Some((_, p1))) => p1,
-            (None, None) => self.player.origin,
-        }
+        self.lag_compensated_sample(target_server_time_ms, current_server_time_ms)
+            .origin
+    }
+
+    /// Centre de hitbox rewindé — origin ajustée verticalement selon
+    /// l'état accroupi du moment, pour matcher la hitbox sphérique
+    /// `PLAYER_HIT_RADIUS` qui est centrée mid-body, pas aux pieds.
+    /// Quand un joueur s'accroupit, le centre descend de quelques unités.
+    pub fn lag_compensated_hit_center(
+        &self,
+        target_server_time_ms: u32,
+        current_server_time_ms: u32,
+    ) -> Vec3 {
+        let s = self.lag_compensated_sample(target_server_time_ms, current_server_time_ms);
+        // Hitbox sphérique centrée à mi-hauteur du body :
+        //   stand : ~24u au-dessus des pieds
+        //   crouch : ~14u au-dessus (le body plus court).
+        let z_off = if s.crouching { 14.0 } else { 24.0 };
+        Vec3::new(s.origin.x, s.origin.y, s.origin.z + z_off)
     }
 
     fn to_player_state(&self) -> PlayerState {
@@ -2610,15 +2676,19 @@ impl ServerState {
                 if s.health <= 0 {
                     return None;
                 }
-                // Position rewindée (legacy = origin courante si rewind
-                // hors fenêtre / pas de target). Hitbox : sphère centrée
-                // 24 unités au-dessus du sol (Q3 standard).
-                let pos = if target_server_time_ms > 0 {
-                    s.lag_compensated_position(target_server_time_ms, current)
+                // **Position rewindée + ajustement crouch** (v0.9.5++ fix) —
+                // utilise `lag_compensated_hit_center()` qui décale le
+                // centre hitbox à 14u si le joueur s'accroupissait au
+                // moment du tir, 24u sinon.  Avant : on rewindait
+                // l'origin mais on appliquait toujours +24u → on tirait
+                // dans le vide à hauteur tête au-dessus d'un crouché.
+                let center_pos = if target_server_time_ms > 0 {
+                    s.lag_compensated_hit_center(target_server_time_ms, current)
                 } else {
-                    s.player.origin
+                    let z_off = if s.player.crouching { 14.0 } else { 24.0 };
+                    s.player.origin + Vec3::Z * z_off
                 };
-                Some((*a, s.slot_id, pos + Vec3::Z * 24.0))
+                Some((*a, s.slot_id, center_pos))
             })
             .collect::<Vec<_>>()
         {
@@ -3070,25 +3140,43 @@ struct HitscanRequest {
     target_server_time_ms: u32,
 }
 
+/// Cap de vitesse angulaire (degrés / seconde) pour les yaw/pitch
+/// reportés par le client.  720°/s = 2 tours/s en yaw, ~plus que la
+/// vitesse maximale plausible avec une souris haute sensitivité même
+/// pendant un flick.  Au-delà, on suspecte un aimbot qui snap à un
+/// adversaire et on clamp la rotation pour annuler le snap "magique".
+const MAX_ANGULAR_RATE_DEG_PER_SEC: f32 = 720.0;
+
+/// Cap de téléportation (unités Q3 / seconde).  Le mouvement le plus
+/// rapide possible en Q3 sans cheat est ~600 u/s en strafe-jump
+/// (avec haste : ~780).  On donne 3× cette marge pour absorber le
+/// rocket jump (~900 u/s instantané) + tolérance numérique : 2400 u/s.
+/// Au-delà, on suspecte un teleport hack et on remet le joueur à sa
+/// position précédente.
+const MAX_TELEPORT_SPEED: f32 = 2400.0;
+
 fn apply_one_usercmd(
     slot: &mut ServerSlot,
     cmd: UserCmd,
     collision: &CollisionWorld,
     params: PhysicsParams,
 ) {
-    // Mise à jour des angles de visée — directement depuis le client,
-    // c'est lui le maître de sa propre caméra. Un anti-cheat mature
-    // contraindrait les vitesses angulaires ; pour v1 on fait confiance.
-    slot.player.view_angles = Angles {
+    // **Mise à jour angles** avec cap de vitesse angulaire (anti-aimbot
+    // soft).  Un client honnête fait au pire ~720°/s en flick souris ;
+    // au-delà on clamp la delta pour absorber les snaps suspects sans
+    // kicker le joueur (déni de service trop facile sinon).
+    let new_angles = Angles {
         pitch: UserCmd::dequantize_angle(cmd.view_pitch),
         yaw: UserCmd::dequantize_angle(cmd.view_yaw),
         roll: UserCmd::dequantize_angle(cmd.view_roll),
     };
-
     // Spectator : free-fly noclip. Pas de collision BSP, pas de gravité,
     // vitesse fixe (pas d'accélération progressive — comportement caméra,
     // pas physique). Up/down via jump/crouch.
     if slot.spectator {
+        // Spectator : applique les angles bruts sans clamp angulaire
+        // (pas de gameplay → pas d'enjeu anti-cheat).
+        slot.player.view_angles = new_angles;
         apply_spectator_move(slot, cmd);
         return;
     }
@@ -3114,6 +3202,27 @@ fn apply_one_usercmd(
     };
     let dt = dt_ms as f32 / 1000.0;
 
+    // **Anti-cheat angular cap** (v0.9.5++ fix) — appliqué APRÈS la
+    // consommation du budget anti-cheat dt.  Avant on utilisait
+    // `dt_pre` (raw, sans budget) ce qui ouvrait une fenêtre où un
+    // client en lag-spike pouvait flick uncapped pendant que son
+    // physique était figé.  Maintenant `max_step` reflète le vrai
+    // dt physique effectif.
+    let max_step = MAX_ANGULAR_RATE_DEG_PER_SEC * dt.max(0.001);
+    let dyaw = q3_math::angle_subtract(new_angles.yaw, slot.player.view_angles.yaw);
+    let dpitch = new_angles.pitch - slot.player.view_angles.pitch;
+    let clamped_yaw = q3_math::normalize_180(
+        slot.player.view_angles.yaw + dyaw.clamp(-max_step, max_step),
+    );
+    let clamped_pitch = (slot.player.view_angles.pitch
+        + dpitch.clamp(-max_step, max_step))
+        .clamp(-89.0, 89.0);
+    slot.player.view_angles = Angles {
+        pitch: clamped_pitch,
+        yaw: clamped_yaw,
+        roll: new_angles.roll,
+    };
+
     let move_cmd = MoveCmd {
         forward: UserCmd::dequantize_axis(cmd.forward),
         side: UserCmd::dequantize_axis(cmd.side),
@@ -3130,7 +3239,28 @@ fn apply_one_usercmd(
         dash_pressed: false,
         delta_time: dt,
     };
+    let prev_origin = slot.player.origin;
     slot.player.tick_collide(move_cmd, params, collision);
+    // **Anti-cheat teleport detection** — si le pmove a déplacé le
+    // joueur de plus que `MAX_TELEPORT_SPEED * dt`, on suspecte un
+    // input forgé (UserCmd avec axes anormalement gros) ou un bug
+    // physique exploitable.  On annule le déplacement et logue.
+    let displaced = (slot.player.origin - prev_origin).length();
+    let max_displace = MAX_TELEPORT_SPEED * dt.max(0.001);
+    if displaced > max_displace {
+        tracing::warn!(
+            slot = slot.slot_id,
+            displaced_u = displaced,
+            max_u = max_displace,
+            dt_ms = dt_ms,
+            "anti-cheat: teleport détecté (displaced {} > max {}), revert",
+            displaced, max_displace
+        );
+        slot.player.origin = prev_origin;
+        // Gel velocity verticale pour éviter que le revert + gravité
+        // produise un punch sur la frame suivante.
+        slot.player.velocity = Vec3::ZERO;
+    }
 }
 
 /// Direction d'un pellet shotgun. Combine la direction « forward » du

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.9.2"
+version = "0.9.3-dev"
 edition = "2021"
 rust-version = "1.78"
 license = "GPL-2.0-or-later"
@@ -43,7 +43,12 @@ bitflags = "2.6"
 serde = { version = "1", features = ["derive"] }
 
 # sound
-rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis"] }
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis", "mp3"] }
+
+# HTTP client pour le map download manager (blocking, simple, pas tokio).
+# rustls = TLS pure-Rust, pas de dépendance OpenSSL.
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+sha2 = "0.10"
 
 # networking
 tokio = { version = "1.40", features = ["full"] }
@@ -54,6 +59,10 @@ image = { version = "0.25", default-features = false, features = ["tga", "jpeg",
 
 # bitmap font for console/HUD text
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+
+# glTF 2.0 / GLB binary format — pour les meshes modernes (drones, props).
+# Default-features désactivées pour ne pas tirer image/extras.
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "KHR_lights_punctual"] }
 
 # inner workspace crates
 q3-math = { path = "crates/q3-math" }
@@ -69,6 +78,7 @@ q3-bot = { path = "crates/q3-bot" }
 q3-image = { path = "crates/q3-image" }
 q3-renderer = { path = "crates/q3-renderer" }
 q3-game = { path = "crates/q3-game" }
+q3-terrain = { path = "crates/q3-terrain" }
 
 [profile.dev]
 opt-level = 1

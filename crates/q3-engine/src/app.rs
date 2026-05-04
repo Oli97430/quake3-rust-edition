@@ -57,6 +57,17 @@ enum PendingAction {
     UseHoldable,
     /// Équivalent `give<holdable>` pour les tests (pas de pickup requis).
     GiveHoldable(HoldableKind),
+    /// **Music player** (v0.9.5+) — joue un fichier audio local en
+    /// loop comme musique de fond.  Path absolu ou relatif au CWD.
+    /// Formats supportés : ceux décodés par rodio (WAV, OGG, MP3 si
+    /// la feature est activée — actuellement WAV/OGG seulement).
+    MusicPlay(std::path::PathBuf),
+    /// Stoppe la musique de fond.
+    MusicStop,
+    /// **Map download manager** sous-commandes (v0.9.5++).
+    MapDlList,
+    MapDlGet(String),
+    MapDlStatus,
 }
 
 pub struct App {
@@ -68,6 +79,119 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     world: Option<World>,
+    /// **Battle Royale** (v0.9.5) — terrain heightmap chargé via les
+    /// maps `br_*`.  Mutuellement exclusif avec `world` : une carte BR
+    /// n'a pas de BSP, ses traces vont vers `Terrain::trace_ray` et son
+    /// rendu sera assuré par un pipeline terrain dédié (pas encore
+    /// branché côté GPU — étape suivante de l'intégration).
+    terrain: Option<Arc<q3_terrain::Terrain>>,
+    /// Ring shrink BR — `Some` quand une carte BR est active. Tickée
+    /// chaque frame dans `update`, applique des dégâts hors-zone au
+    /// joueur et aux bots.
+    br_ring: Option<q3_terrain::br::RingShrink>,
+    /// **Drones survol BR** (v0.9.5) — vaisseaux GLB qui orbitent au-
+    /// dessus de la zone de combat. Cosmétique pure (pas de damage,
+    /// pas d'IA). Spawné à load_terrain_map.
+    drones: Vec<Drone>,
+    /// **Rochers de décor BR** (v0.9.5) — props GLB disséminés sur
+    /// le terrain pour casser la monotonie. Position+yaw+scale fixés
+    /// au load, pas d'animation. Cosmétique pure.
+    rocks: Vec<RockProp>,
+    /// **Ammo crate GLB** scale auto-calculé au load à partir de
+    /// `mesh.radius()` pour matcher la taille des MD3 pickup standard
+    /// (~25u). `None` = asset pas chargé → fallback MD3.
+    ammo_crate_scale: Option<f32>,
+    /// **Quad pickup GLB** — idem ammo_crate mais target ~40u (le
+    /// Quad MD3 d'origine fait ~50u, on prend une taille proche).
+    quad_pickup_scale: Option<f32>,
+    /// **Health pack GLB** — remplace les MD3 d'item_health* par une
+    /// trousse de soin moderne.  Target ~22u (cohérent avec la taille
+    /// d'un MD3 health bobble Q3).  `None` = asset pas chargé →
+    /// fallback MD3.
+    health_pack_scale: Option<f32>,
+    /// **Railgun pickup GLB** — remplace le MD3 du railgun posé au sol.
+    /// Target ~30u (taille d'un weapon pickup Q3 standard).  Utilisé
+    /// à la fois pour le pickup au sol ET le viewmodel 1ère personne
+    /// (orientation baseline, muzzle flash via offset hardcoded).
+    railgun_pickup_scale: Option<f32>,
+    /// **Grenade ammo box GLB** — remplace le MD3 d'ammo grenade
+    /// (item_grenades).  Target ~25u, cohérent avec ammo_crate (MG).
+    grenade_ammo_scale: Option<f32>,
+    /// **Rocket ammo box GLB** — remplace le MD3 d'ammo rocket
+    /// (item_rockets).  Target ~25u, cohérent avec les autres ammo
+    /// crates.  Concerne aussi le pickup d'arme `weapon_rocketlauncher`
+    /// qui inclut ses munitions de départ.
+    rocket_ammo_scale: Option<f32>,
+    /// **Cell ammo box GLB** — cellules énergétiques pour le Plasma Gun
+    /// (item_cells).  Target ~25u.  Concerne aussi le pickup d'arme
+    /// `weapon_plasmagun` qui inclut ses munitions de départ.
+    cell_ammo_scale: Option<f32>,
+    /// **LG battery ammo box GLB** — batteries pour le Lightning Gun
+    /// (item_lightning).  Target ~25u.  Concerne aussi le pickup
+    /// d'arme `weapon_lightning` qui inclut ses munitions de départ.
+    lg_ammo_scale: Option<f32>,
+    /// **Big armor (Red Armor) GLB** — remplace le MD3 d'item_armor_body
+    /// (100 armor).  Target ~30u (taille canonique d'un body armor Q3).
+    big_armor_scale: Option<f32>,
+    /// **Plasma gun pickup GLB** — remplace le MD3 du Plasma Gun posé
+    /// au sol (style fusil d'assaut moderne).  Utilisé à la fois pour
+    /// le pickup au sol ET le viewmodel 1ère personne.  Distinct de
+    /// `cell_ammo` (les boîtes de cellules ammo gardent leur look).
+    plasma_pickup_scale: Option<f32>,
+    /// **Railgun ammo (slugs) GLB** — boîte de slugs pour le Railgun
+    /// (item_slugs).  Distinct de `railgun_pickup` (l'arme elle-même).
+    railgun_ammo_scale: Option<f32>,
+    /// **Regeneration powerup GLB** — remplace le MD3 d'item_regen.
+    /// Distinct du `quad_pickup` (lui-même remplacé).  Target ~30u.
+    regen_pickup_scale: Option<f32>,
+    /// **Machine Gun pickup GLB** — remplace le MD3 du MG posé au sol
+    /// ET le viewmodel 1ère personne (rotation 180° X comme plasma).
+    /// Target ~30u (weapon pickup Q3 standard).
+    machinegun_pickup_scale: Option<f32>,
+    /// **BFG10K pickup GLB** — remplace le MD3 du BFG posé au sol ET
+    /// le viewmodel 1ère personne.  Target ~32u (un peu plus gros que
+    /// les autres weapon pickups, le BFG est imposant).
+    bfg_pickup_scale: Option<f32>,
+    /// **Lightning Gun pickup GLB** — remplace le MD3 du LG posé au sol
+    /// ET le viewmodel 1ère personne.  Distinct des batteries LG ammo
+    /// (qui restent sur `lg_ammo`).  Target ~30u.
+    lightninggun_pickup_scale: Option<f32>,
+    /// **Shotgun pickup GLB** — remplace le MD3 du SG posé au sol ET
+    /// le viewmodel 1ère personne.  Target ~30u.
+    shotgun_pickup_scale: Option<f32>,
+    /// **Grenade Launcher pickup GLB** — remplace le MD3 du GL au sol
+    /// ET le viewmodel 1ère personne.  Distinct de `grenade_ammo`
+    /// (boîte de munitions).  Target ~30u.
+    grenadelauncher_pickup_scale: Option<f32>,
+    /// **Gauntlet pickup GLB** — remplace le MD3 du Gauntlet au sol
+    /// ET le viewmodel 1ère personne.  Pas d'ammo box associée.
+    /// Target ~30u.
+    gauntlet_pickup_scale: Option<f32>,
+    /// **Shotgun shells (calibre 12) GLB** — boîte de cartouches SG
+    /// (item_shells).  Distinct du `shotgun_pickup` (l'arme).
+    /// Target ~25u (cohérent avec autres ammo crates).
+    shotgun_ammo_scale: Option<f32>,
+    /// **BFG ammo GLB** — boîte de munitions BFG (item_bfg).  Distinct
+    /// du `bfg_pickup` (l'arme).  Target ~25u.
+    bfg_ammo_scale: Option<f32>,
+    /// **Rocket Launcher pickup GLB** — remplace le MD3 du RL au sol
+    /// ET le viewmodel 1ère personne.  Distinct de `rocket_ammo`
+    /// (boîte de munitions).  Target ~30u.
+    rocketlauncher_pickup_scale: Option<f32>,
+    /// **Combat Armor (yellow, 50) GLB** — remplace le MD3
+    /// d'item_armor_combat.  Distinct de `big_armor` (Body 100 red).
+    /// Target ~28u.
+    combat_armor_scale: Option<f32>,
+    /// **Medkit holdable GLB** — remplace le MD3 du medkit (trousse en
+    /// stock, holdable_medkit).  Target ~22u.
+    medkit_scale: Option<f32>,
+    /// **Armor Shard (5) GLB** — remplace le MD3 d'item_armor_shard.
+    /// Target ~18u (petit shard).
+    armor_shard_scale: Option<f32>,
+    /// **GLB prop lights cache** (v0.9.5++) — par prop name, la liste
+    /// de lights KHR_lights_punctual extraites du mesh.  Vide pour
+    /// les assets sans lights définies.
+    prop_lights: hashbrown::HashMap<String, Vec<q3_model::glb::GlbLight>>,
     player: PlayerMove,
     params: PhysicsParams,
 
@@ -121,6 +245,13 @@ pub struct App {
     /// de FPS que quand le dev le demande pour ne pas distraire un
     /// joueur lambda.
     show_perf_overlay: bool,
+    /// **Stats live overlay** (V3f) — toggle F8. Affiche K/D,
+    /// accuracy par arme, time alive, frags/min en bas-droite. Off
+    /// par défaut.
+    show_stats_overlay: bool,
+    /// Timestamp de la dernière fois que le joueur est mort, pour
+    /// calculer "time alive" depuis le dernier respawn.
+    last_respawn_time: f32,
     /// Ring buffer des dernières valeurs de `dt` (en secondes), indexé
     /// par `frame_time_head`.  Longueur [`FRAME_TIME_BUF`] : 120 slots
     /// ≈ 2 s à 60 fps, assez pour lire un pic isolé sans lisser en
@@ -261,6 +392,10 @@ pub struct App {
     /// lieu — évite d'annoncer plusieurs fois "FIRST BLOOD".  Reset par
     /// `restart_match` et au load d'une map.
     first_blood_announced: bool,
+    /// **Rapid-fire SFX throttle** (v0.9.5++) — timestamp du dernier
+    /// SFX de tir joué. Limite la cadence audio sur PG/LG pour ne pas
+    /// saturer les 64 canaux du SoundSystem en rapid-fire.
+    last_fire_sfx_at: f32,
     /// Compteur global de tirs effectués par le joueur ce match (un tir
     /// = un appel à `fire_weapon` qui a vraiment dépensé des munitions ;
     /// le Gauntlet compte aussi à condition d'avoir fait swing).  Remis
@@ -286,8 +421,24 @@ pub struct App {
     /// cadences élevées ne laissent pas le kick saturer indéfiniment).
     /// Consommé en offset du viewmodel dans `queue_viewmodel`.
     view_kick: f32,
+    /// **Punch angles** (v0.9.5++) — offset visuel ajouté aux angles de
+    /// caméra pour le rendu uniquement (pas pour l'aim).  À chaque tir
+    /// l'arme « kicke » la vue : pitch up + petit jitter de yaw selon
+    /// l'arme.  Décroît exponentiellement vers zéro.  En degrés.
+    view_kick_pitch: f32,
+    view_kick_yaw: f32,
+    /// **Map download manager** (v0.9.5++) — catalogue + DL HTTP des
+    /// `.pk3` community vers `baseq3/`.  Console : `mapdl list` /
+    /// `mapdl get <id>` / `mapdl status`.
+    map_dl: crate::map_dl::MapDownloader,
     /// Fin du hit-marker HUD (petite croix quand un tir a touché un bot).
     hit_marker_until: f32,
+    /// Fin du kill-marker HUD : grand X rouge vif autour du réticule
+    /// quand la dernière volée a tué la cible. Distinct du hit-marker
+    /// (4 segments diagonaux gris/rouge sombre) pour donner un feedback
+    /// visuel net « kill confirm » même sans regarder le scoreboard.
+    /// Set à `time_sec + KILL_MARKER_DURATION_SEC` quand `any_kill`.
+    kill_marker_until: f32,
     /// Fin du flash d'armure : set à `now + ARMOR_FLASH_SEC` à chaque
     /// fois que l'armure absorbe une fraction de dégâts > 0.  Dessiné
     /// comme un liseré cyan pulsant autour de l'écran, distinct du
@@ -300,6 +451,30 @@ pub struct App {
     /// le flash armure et légèrement plus long (350 ms) pour que le
     /// coup soit senti même pendant un swap d'arme ou un strafe rapide.
     pain_flash_until: f32,
+    /// Fin du flash powerup : set à `now + POWERUP_FLASH_SEC` quand un
+    /// powerup est acquis (Quad, Haste, etc.).  Dessiné comme un voile
+    /// full-screen teinté de la couleur du powerup, alpha en fade-out
+    /// rapide pour évoquer une "sublimation" — feedback visuel fort
+    /// que l'effet est désormais actif.
+    powerup_flash_until: f32,
+    /// Couleur RGBA du flash powerup courant (alpha de base, modulé
+    /// par le fade-out dans `draw_hud`).  Réécrit à chaque pickup.
+    powerup_flash_color: [f32; 4],
+    /// **Atmospheric lightning** (BR uniquement) — fin du flash courant
+    /// d'éclair (overlay HUD blanc bleuté).  > now → flash en cours.
+    lightning_flash_until: f32,
+    /// Prochain instant programmé pour déclencher un nouvel éclair.
+    /// Tiré entre `LIGHTNING_INTERVAL_MIN/MAX` après chaque flash.
+    /// `f32::INFINITY` = lightning désactivé (mode non-BR ou non-init).
+    next_lightning_at: f32,
+    /// Fenêtre du FOV punch — kick d'élargissement horizontal du champ
+    /// de vision quand le joueur enregistre un hit.  L'ouverture FOV
+    /// donne une sensation de "boost adrenaline" sur frag, distincte
+    /// du view-kick (recul caméra) qui agit sur les angles.
+    fov_punch_until: f32,
+    /// Amplitude du punch courant en degrés (additif au cg_fov).
+    /// Hit confirmé = `FOV_PUNCH_HIT`, frag létal = `FOV_PUNCH_FRAG`.
+    fov_punch_strength: f32,
     /// Cumul de dégâts infligés au dernier adversaire sur la fenêtre
     /// récente.  Reset si > `DMG_BURST_WINDOW` s'est écoulé sans hit,
     /// affiché en chiffre jaune juste sous le crosshair — équivalent
@@ -355,6 +530,18 @@ pub struct App {
     /// horizontale tant que le joueur est au sol. Utilisé pour osciller la
     /// caméra en Z (bob vertical) + un léger roll latéral façon Q3.
     bob_phase: f32,
+    /// **Viewmodel sway** (v0.9.5++) — yaw/pitch précédents pour calculer
+    /// le delta angulaire frame-to-frame.  Le viewmodel "lag" derrière
+    /// la caméra proportionnellement au delta → impression de poids
+    /// physique de l'arme.  Lissé par `viewmodel_sway` (eased).
+    viewmodel_prev_yaw: f32,
+    viewmodel_prev_pitch: f32,
+    /// État du sway easé sur 2 axes (yaw, pitch).  Décroît exponentiellement
+    /// vers 0 chaque frame ; impulse à chaque rotation caméra.
+    viewmodel_sway: [f32; 2],
+    /// Instant où le joueur a re-touché le sol après une phase
+    /// airborne — déclenche le jump-kick (gun dip puis spring).
+    player_last_land_at: f32,
     /// Fin de chaque powerup indexé par `PowerupKind::index()`, ou `None`
     /// si inactif. Tableau plutôt que champs séparés pour que l'ajout d'un
     /// powerup futur (Battle Suit, Flight…) se fasse via une seule variante
@@ -455,9 +642,25 @@ pub struct App {
     sfx_fire: Vec<(WeaponId, SoundHandle)>,
     sfx_pain_player: Option<SoundHandle>,
     sfx_pain_bot: Option<SoundHandle>,
+    /// **Death sound** distinct du pain. Joué UNE FOIS sur le hit
+    /// fatal — le pain (cooldownisé) reste pour les hits non-létaux.
+    /// Q3 vanilla : `sound/player/death1.wav`.
+    sfx_death_bot: Option<SoundHandle>,
     /// SFX génériques Q3 de cueillette d'arme / de munitions.
     sfx_weapon_pickup: Option<SoundHandle>,
     sfx_ammo_pickup: Option<SoundHandle>,
+    /// Sons dédiés pickups health/armor (Q3 vanilla `sound/items/*`).
+    /// Avant v0.9.4 on recyclait sfx_pain_bot — moche, peu lisible.
+    sfx_health_pickup: Option<SoundHandle>,
+    sfx_armor_pickup: Option<SoundHandle>,
+    sfx_megahealth_pickup: Option<SoundHandle>,
+    /// Impact plasma sur surface (sizzle "pshhh"). Q3 :
+    /// `sound/weapons/plasma/plasmx1a.wav`.
+    sfx_plasma_impact: Option<SoundHandle>,
+    /// Impact rocket. Q3 : `sound/weapons/rocket/rocklx1a.wav`.
+    sfx_rocket_impact: Option<SoundHandle>,
+    /// Impact grenade explosion. Q3 : `sound/weapons/grenade/grenlx1a.wav`.
+    sfx_grenade_impact: Option<SoundHandle>,
     /// Click sec joué quand le joueur appuie sur tir sans munitions.
     /// Convention Q3 : `sound/weapons/noammo.wav`. Si absent on reste
     /// silencieux (mieux qu'un faux son générique).
@@ -729,6 +932,41 @@ const FRAME_TIME_BUF: usize = 120;
 /// distincts.
 const DMG_BURST_WINDOW: f32 = 1.2;
 
+/// Durée d'affichage du grand X de kill-confirm sur le réticule.  Plus
+/// long que le hit-marker (0.18 s) pour être bien lisible — le joueur
+/// doit pouvoir voir le X même s'il était en train de transitionner
+/// vers une autre cible. 0.45 s ≈ 27 frames @ 60 fps, juste assez pour
+/// un fade visible sans masquer durablement le réticule.
+const KILL_MARKER_DURATION_SEC: f32 = 0.45;
+
+/// Durée du flash plein écran lors d'un pickup de powerup. 0.55 s assez
+/// long pour être senti périphériquement (fade rapide les ~150 dernières
+/// ms) mais court pour ne pas masquer l'environnement post-pickup —
+/// le joueur veut continuer à jouer, pas regarder un fade-out.
+const POWERUP_FLASH_SEC: f32 = 0.55;
+
+/// Durée du flash visuel d'un éclair atmosphérique (overlay blanc-bleu
+/// full-screen).  120 ms ≈ frame d'éclair canonique sur les vrais
+/// orages — assez bref pour ne pas masquer le combat, assez long pour
+/// que l'œil le capte.  Le fade exponentiel (ratio³) le fait paraître
+/// "intense puis fini" instantanément.
+const LIGHTNING_FLASH_SEC: f32 = 0.12;
+/// Intervalle min/max entre deux éclairs (s). Tirage uniforme dans
+/// [MIN, MAX] à chaque flash. Max élevé pour que l'effet reste un
+/// événement, pas un strobe constant.
+const LIGHTNING_INTERVAL_MIN: f32 = 12.0;
+const LIGHTNING_INTERVAL_MAX: f32 = 35.0;
+
+/// Durée du FOV punch sur hit confirmé.  180 ms ≈ 11 frames @ 60 fps —
+/// le joueur ressent l'expansion sans qu'elle persiste assez pour
+/// gêner la mire sur le tir suivant.
+const FOV_PUNCH_DURATION: f32 = 0.18;
+/// Amplitude max du FOV punch en degrés (additif au cg_fov de base).
+/// 3° à 90° de FOV = +3 % de champ horizontal — perceptible mais pas
+/// disorientant.  Sur frag létal on monte à 5° via `FOV_PUNCH_FRAG`.
+const FOV_PUNCH_HIT: f32 = 3.0;
+const FOV_PUNCH_FRAG: f32 = 5.0;
+
 /// Durée totale d'affichage d'un popup de médaille, en secondes.  Le
 /// sample audio fait ~1 s ; on laisse le texte ~2 s pour que le joueur
 /// ait le temps de le lire sans revenir sur ce qu'il était en train
@@ -901,6 +1139,13 @@ enum ChatTrigger {
     /// probabilité nettement plus basse (on ne veut pas une ligne à
     /// chaque respawn sur kill-stream).
     Respawn,
+    /// Le bot vient d'acquérir une cible visible (engagement frais).
+    /// Style « radio combat » — court, sec.
+    Spotted,
+    /// Le bot a entendu un bruit (tir/footstep) sans LOS — il enquête.
+    Heard,
+    /// HP bas (<25) — taunt d'esquive / appel à l'aide.
+    LowHp,
 }
 
 /// Lignes « le bot t'a tué » — style trash talk, courtes, génériques,
@@ -951,6 +1196,44 @@ const CHAT_LINES_RESPAWN: &[&str] = &[
     "Round two.",
     "Let's go.",
     "Here we go.",
+];
+
+/// Radio chatter « contact ! » — bot vient de spotter le joueur.
+/// Style sec, court, militaire.  Donne l'illusion d'une équipe qui
+/// communique, même si chaque bot est solo en interne.
+const CHAT_LINES_SPOTTED: &[&str] = &[
+    "Contact!",
+    "I see him.",
+    "Got eyes on.",
+    "Tally!",
+    "Spotted, engaging.",
+    "Target acquired.",
+    "Visual.",
+    "There you are.",
+    "Found him.",
+];
+
+/// Radio chatter « j'entends quelque chose » — bot a perçu un tir
+/// hors-LOS.  Style « j'enquête ».
+const CHAT_LINES_HEARD: &[&str] = &[
+    "Heard something.",
+    "Movement nearby.",
+    "Where are you?",
+    "Footsteps...",
+    "Was that a shot?",
+    "Listening.",
+    "Hold your fire — checking.",
+];
+
+/// HP bas — bot retraite ou appelle au support (sans coordination
+/// réelle, c'est purement cosmétique). Lignes courtes.
+const CHAT_LINES_LOW_HP: &[&str] = &[
+    "Need health!",
+    "I'm hit, falling back.",
+    "Low health, backing off.",
+    "Critical!",
+    "Cover me.",
+    "Pulling back.",
 ];
 
 /// Lignes de taunt **joueur** (touche F3) — style assumé trash-talk
@@ -1013,6 +1296,9 @@ impl ChatTrigger {
             Self::KillInsult => CHAT_LINES_KILL_INSULT,
             Self::Death => CHAT_LINES_DEATH,
             Self::Respawn => CHAT_LINES_RESPAWN,
+            Self::Spotted => CHAT_LINES_SPOTTED,
+            Self::Heard => CHAT_LINES_HEARD,
+            Self::LowHp => CHAT_LINES_LOW_HP,
         }
     }
 
@@ -1023,6 +1309,11 @@ impl ChatTrigger {
             Self::KillInsult => 1.0,
             Self::Death => 0.85,
             Self::Respawn => 0.35,
+            // Spotted = courant mais cool — 50%. Heard = rare (ne pas
+            // confirmer une planque). LowHp = signal d'aide marqué.
+            Self::Spotted => 0.50,
+            Self::Heard => 0.30,
+            Self::LowHp => 0.70,
         }
     }
 }
@@ -1071,6 +1362,7 @@ struct FloatingDamage {
     /// vertical).
     origin: Vec3,
     /// Montant affiché — typiquement 5..150. 0 est filtré avant push.
+    /// Ignoré quand `is_frag = true` (on affiche "+1 FRAG" à la place).
     damage: i32,
     /// `true` = dégât subi par le joueur (rouge), `false` = dégât infligé
     /// à un bot (jaune).
@@ -1079,6 +1371,10 @@ struct FloatingDamage {
     expire_at: f32,
     /// Durée totale initiale (s). Sert au calcul du fade alpha + drift.
     lifetime: f32,
+    /// `true` = c'est un frag-confirm.  Le rendu affiche "+1 FRAG" en gros
+    /// caractères orange-rouge au lieu du nombre, et la durée de vie est
+    /// plus longue pour que le joueur ait le temps de savourer.
+    is_frag: bool,
 }
 
 /// Durée de vie d'un chiffre de dégât avant purge.
@@ -1448,14 +1744,21 @@ impl PowerupKind {
     /// les effets qui méritent d'être "sentis" en vision périphérique.
     fn fullscreen_tint(self) -> Option<[f32; 3]> {
         match self {
-            Self::QuadDamage => Some([0.25, 0.4, 1.0]),
-            Self::Haste => Some([1.0, 0.55, 0.15]),
+            // **Quad Damage** : tint plein-écran SUPPRIMÉ (v0.9.5++
+            // user request) — feedback visuel jugé trop intrusif.
+            // Le SFX d'activation + le chrono powerup HUD suffisent.
+            Self::QuadDamage => None,
+            // **Haste** : tint plein-écran SUPPRIMÉ (v0.9.5++ user
+            // request idem Quad).  La vitesse boostée est déjà bien
+            // perceptible via le mouvement / la cadence de tir.
+            Self::Haste => None,
             // Regen : pas de tint. Le rendu du joueur se soignant est
             // déjà communiqué par la barre HP qui remonte + le badge.
             Self::Regeneration => None,
-            // Battle Suit : légère teinte jaunâtre, évoque le casque /
-            // visière du suit Q3.
-            Self::BattleSuit => Some([0.95, 0.9, 0.35]),
+            // **Battle Suit** : tint plein-écran SUPPRIMÉ (v0.9.5++ user
+            // request idem Quad/Haste).  L'immunité environnementale est
+            // perçue par l'absence de pain audio / dégât HP.
+            Self::BattleSuit => None,
             // Invis : pas de tint — on ne veut pas que la vision du joueur
             // soit dégradée pendant qu'il est avantage. Le feedback passe
             // par le rendu des bras (atténué en vue 1re pers).
@@ -1800,6 +2103,27 @@ impl WeaponId {
         }
     }
 
+    /// **Recoil camera kick** par arme — `(pitch_deg, yaw_jitter_deg)`.
+    /// Le pitch est ajouté positivement (canon vers le haut), le yaw
+    /// est aléatoire dans `±yaw_jitter_deg` (pour donner un côté
+    /// "rafale qui balade le réticule").  Profil distinct du
+    /// `view_kick` (qui agit sur l'offset spatial du viewmodel) :
+    /// celui-ci tape les angles de vue pour le rendu uniquement,
+    /// l'aim réel n'est pas affecté.
+    fn recoil_kick(self) -> (f32, f32) {
+        match self {
+            Self::Gauntlet        => (0.0, 0.0),   // mêlée, pas de recul
+            Self::Machinegun      => (1.4, 0.5),   // rafale — petit pitch + jitter horizontal
+            Self::Shotgun         => (4.5, 0.0),   // gros punch vertical
+            Self::Grenadelauncher => (3.2, 0.0),   // recul marqué
+            Self::Rocketlauncher  => (5.0, 0.0),   // énorme, l'arme saute
+            Self::Lightninggun    => (0.4, 0.2),   // beam continu, tremblement minime
+            Self::Railgun         => (3.8, 0.0),   // sec et fort
+            Self::Plasmagun       => (0.6, 0.3),   // pulsation légère
+            Self::Bfg             => (6.0, 0.0),   // monstrueux
+        }
+    }
+
     /// Path VFS conventionnel du SFX de tir.
     /// Liste de chemins candidats pour le son de tir, dans l'ordre de
     /// priorité. Le 1er existant dans le VFS est utilisé. Plusieurs
@@ -1822,16 +2146,45 @@ impl WeaponId {
                 "sound/weapons/shotgun/sshotf1b.wav",
             ],
             Self::Grenadelauncher => &[
+                // Vanilla Q3 canon
                 "sound/weapons/grenade/grenlf1a.wav",
+                // Variantes connues sur pak0 partiels / mods
+                "sound/weapons/grenade/grenlf1.wav",
+                "sound/weapons/grenade/glaunch1.wav",
+                "sound/weapons/grenade/gl_fire.wav",
+                "sound/weapons/grenade/grenadef1.wav",
+                "sound/weapons/grenadef1a.wav",
+                // **Fallback sonore** : si AUCUN sample grenade n'existe
+                // dans les paks de l'utilisateur, on cascade vers rocket
+                // (les deux armes sont des launchers projectile, le
+                // « thunk-fwoosh » est suffisamment proche pour ne pas
+                // casser l'identification arme).  Et si rocket aussi
+                // absent → shotgun (toujours présent sur les paks).
+                "sound/weapons/rocket/rocklf1a.wav",
+                "sound/weapons/rocket/rocklf1.wav",
+                "sound/weapons/shotgun/sshotf1b.wav",
+                "sound/weapons/shotgun/sshotf1.wav",
             ],
             Self::Rocketlauncher => &[
+                // Vanilla Q3 canon
                 "sound/weapons/rocket/rocklf1a.wav",
-                // Variantes connues : certains demos/pk3 partiels n'ont
-                // pas le `a` final, ou utilisent `rocketf1` au lieu de
-                // `rocklf1`. On essaie large pour qu'au moins un matche.
                 "sound/weapons/rocket/rocklf1.wav",
+                // Variantes connues sur paks partiels / mods
                 "sound/weapons/rocket/rocketf1.wav",
+                "sound/weapons/rocket/rocketf1a.wav",
                 "sound/weapons/rocket/rl_fire.wav",
+                "sound/weapons/rocket/rocket_fire.wav",
+                "sound/weapons/rocket/rocket.wav",
+                "sound/weapons/rocket/rl1.wav",
+                "sound/weapons/rocket/rocket1.wav",
+                "sound/weapons/rocketlf1a.wav",
+                "sound/weapons/rocketlf1.wav",
+                // **Fallback sonore** : sample SHOTGUN — punchy/explosif,
+                // évoque bien un tir de rocket si aucun sample dédié.
+                // Le shotgun a fait ses preuves comme « toujours présent »
+                // sur les paks utilisateur (jamais signalé silencieux).
+                "sound/weapons/shotgun/sshotf1b.wav",
+                "sound/weapons/shotgun/sshotf1.wav",
             ],
             Self::Lightninggun => &[
                 "sound/weapons/lightning/lg_fire.wav",
@@ -1841,7 +2194,15 @@ impl WeaponId {
                 "sound/weapons/railgun/railgf1a.wav",
             ],
             Self::Plasmagun => &[
+                // Q3 vanilla : `hyprbf1a.wav` est le « hyperblaster fire »
+                // — c'est bien le SFX du plasmagun.  `lasfly.wav` est la
+                // boucle continue (laser fly) en fallback.  On essaie
+                // aussi `plasx1.wav` / `plasmaf1.wav` qui existent dans
+                // certains paks tiers / mods.
                 "sound/weapons/plasma/hyprbf1a.wav",
+                "sound/weapons/plasma/plasmaf1.wav",
+                "sound/weapons/plasma/plasx1.wav",
+                "sound/weapons/plasma/plasma_fire.wav",
                 "sound/weapons/plasma/lasfly.wav",
             ],
             Self::Bfg => &[
@@ -1890,8 +2251,71 @@ impl WeaponId {
                 cooldown: p.cooldown * 1.5, // lock-on a un coût rythmique
                 ..p
             }),
-            // Pas d'alt défini → primaire utilisé.
-            _ => None,
+            // **W2 — Machinegun burst précision** : tap-fire single shot
+            // sans dispersion + dégât boosté. Coût : 3 munitions, cadence
+            // longue. Récompense le tir posé sur cible distante (sniping
+            // léger). Le primaire reste l'arme « volume de feu ».
+            Self::Machinegun => Some(WeaponParams {
+                damage: 18,
+                cooldown: 0.35,
+                spread_deg: 0.0,
+                ammo_cost: 3,
+                ..p
+            }),
+            // **W4 — Grenade airburst** : grenade sans rebond, plus rapide,
+            // splash élargi. Trajectoire tendue qui explose au premier
+            // contact mur/sol — tir direct, pas un piège au sol. Le
+            // `bounce=false` est appliqué au spawn (cf. fire_weapon).
+            Self::Grenadelauncher => Some(WeaponParams {
+                kind: WeaponKind::Projectile {
+                    speed: 1100.0,         // vs 700 primaire — flat shot
+                    splash_radius: 200.0,  // vs 150 — zone élargie
+                    splash_damage: 110,
+                },
+                damage: 110,
+                cooldown: 1.0,             // un peu plus long
+                ..p
+            }),
+            // **W6 — Lightning shock blast** : décharge unique haute
+            // tension, courte portée mais gros dégât burst. Cooldown
+            // long pour empêcher le DPS continu d'être supérieur au
+            // primaire. Coût : 5 cellules pour un tap.
+            Self::Lightninggun => Some(WeaponParams {
+                damage: 55,
+                cooldown: 0.8,
+                range: 1024.0,             // vs 768 — un peu plus long
+                ammo_cost: 5,
+                ..p
+            }),
+            // **W8 — Plasma orb** : un gros plasma lent à splash large.
+            // Spawn unique vs rafale primaire — "lobbe" tactique pour
+            // contrôler un couloir. Speed/splash overridés via le `kind`.
+            Self::Plasmagun => Some(WeaponParams {
+                kind: WeaponKind::Projectile {
+                    speed: 700.0,          // vs 2000 primaire
+                    splash_radius: 96.0,   // vs 20 — vraie zone
+                    splash_damage: 60,
+                },
+                damage: 50,
+                cooldown: 0.6,             // vs 0.1 — vraiment moins spammable
+                ammo_cost: 8,              // 8× le coût primaire
+                ..p
+            }),
+            // **W9 — BFG death zone** : projectile plus lent, splash
+            // énorme, dégât splash gigantesque. Une « bombe » Q3 qui
+            // demande de prédire le mouvement adverse — slow ball big
+            // boom. Cooldown long pour ne pas en abuser.
+            Self::Bfg => Some(WeaponParams {
+                kind: WeaponKind::Projectile {
+                    speed: 1100.0,         // vs 2000 primaire
+                    splash_radius: 250.0,  // vs 120 — zone monstrueuse
+                    splash_damage: 160,
+                },
+                damage: 120,
+                cooldown: 0.6,             // vs 0.2 — pas spammable
+                ammo_cost: 3,              // 3× plus cher
+                ..p
+            }),
         }
     }
 
@@ -2038,6 +2462,11 @@ struct PlayerRig {
     lower: Arc<Md3Gpu>,
     upper: Arc<Md3Gpu>,
     head: Arc<Md3Gpu>,
+    /// Ranges parsées depuis `animation.cfg` du modèle joueur.  Source
+    /// CANONIQUE des animations Q3 : chaque modèle peut avoir ses propres
+    /// offsets (sarge ≠ keel ≠ orbb).  Si le fichier est absent, on
+    /// fallback sur les offsets canoniques (constants `bot_anims::*`).
+    anims: hashbrown::HashMap<&'static str, AnimRange>,
 }
 
 /// Pilote d'un bot : IA (`Bot`) + corps (`PlayerMove`) + couleur de MD3.
@@ -2086,6 +2515,12 @@ struct BotDriver {
     /// Dernière fois où le bot a encaissé un dégât.  Déclenche l'anim
     /// `TORSO_PAIN` / `LEGS_PAIN` pendant une courte fenêtre (~200 ms).
     last_damage_at: f32,
+    /// **Anti-spam pain SFX** — timestamp du dernier "ouch" joué.
+    /// Le shotgun envoie 11 pellets en 1 tick → sans cooldown on
+    /// joue 11 plays de pain simultanés ⇒ son saturé. De même un
+    /// splash rocket touche plusieurs bots simultanément. Cooldown
+    /// par-bot de [`PAIN_SFX_COOLDOWN`] secondes.
+    last_pain_sfx_at: f32,
     /// Instant où le bot a quitté le sol (décollage).  On l'utilise
     /// pour détecter le « saut déclenché » vs « vient de marcher dans
     /// le vide » — utile pour ne jouer `LEGS_JUMP` que sur la première
@@ -2103,6 +2538,48 @@ struct BotDriver {
     /// État d'animation actuellement joué (mis à jour dans `queue_bots`).
     #[allow(dead_code)]
     anim_state: BotAnimState,
+    /// **Sound awareness** (v0.9.5) — dernière position du joueur
+    /// entendue (tir, footstep proche).  Le bot va enquêter cette
+    /// position s'il n'a pas de LOS direct.  None = pas d'évènement
+    /// auditif récent.
+    last_heard_pos: Option<Vec3>,
+    /// Timestamp du dernier évènement sonore perçu — l'awareness
+    /// expire après [`BOT_HEARING_MEMORY_SEC`] sans nouveau bruit.
+    last_heard_at: f32,
+    /// **Personnalité bot** (v0.9.5) — biais de comportement persistant
+    /// par bot.  Affecte la distance d'engagement préférée et la propension
+    /// à fuir/charger sous le feu.
+    personality: BotPersonality,
+    /// **Squad chatter cooldown** — empêche un bot de spammer la radio.
+    /// Chaque bot ne parle qu'une fois toutes les `CHATTER_COOLDOWN_SEC`.
+    last_chatter_at: f32,
+    /// **Animation v0.9.5++** — instant où la mort a été enregistrée.
+    /// Permet de jouer BOTH_DEATH1 (1.2 s à 25 fps) puis BOTH_DEAD1 freeze.
+    /// `None` = bot vivant.
+    death_started_at: Option<f32>,
+    /// Variante de mort assignée au respawn — 0/1/2 → DEATH1/2/3.
+    /// Hash du nom + deaths pour stable mais varié.
+    death_variant: u8,
+    /// Yaw précédent — utilisé pour détecter le LEGS_TURN (yaw change
+    /// rapide alors que le bot est stationnaire).
+    prev_yaw: f32,
+    /// Instant du dernier yaw delta significatif — déclenche LEGS_TURN
+    /// pendant ~200 ms.
+    last_turn_at: f32,
+    /// Instant du dernier taunt (TORSO_GESTURE).  None = pas de taunt actif.
+    /// Le taunt dure ~2.7 s (40 frames à 15 fps).
+    gesture_started_at: Option<f32>,
+    /// Identifiant (= `range.start`) de la `lower_range` jouée à la
+    /// dernière frame, et instant du dernier changement.  Permet de
+    /// rebaser `phase = time - lower_anim_started_at` quand la range
+    /// change → l'anim redémarre à frame 0 au lieu de téléporter au
+    /// milieu du cycle (v0.9.5++ fix).  `start = usize::MAX` = jamais
+    /// initialisé encore.
+    lower_anim_start: usize,
+    lower_anim_started_at: f32,
+    /// Idem pour upper (TORSO_*).
+    upper_anim_start: usize,
+    upper_anim_started_at: f32,
 }
 
 /// États d'animation du bot, pilotés par la combinaison vitesse /
@@ -2155,11 +2632,39 @@ impl AnimRange {
     /// Frame courante + voisin + lerp pour un instant donné, ancré sur
     /// `phase` (temps local à l'animation, 0.0 = début).  Retourne
     /// `(fa, fb, lerp)` clampés à `nf` du mesh.
+    ///
+    /// **v0.9.5++ fix** : si la range hardcoded dépasse `nf` (modèle
+    /// avec moins de frames que le canonical sarge 308), on scale-down
+    /// proportionnellement.  Avant, des frames out-of-range étaient
+    /// clampées à `nf-1` → animation FIGÉE sur 1 seule frame.
     fn sample(&self, phase: f32, nf: usize) -> (usize, usize, f32) {
         if self.end <= self.start || nf == 0 {
             return (0, 0, 0.0);
         }
-        let span = self.end - self.start;
+        // **Auto-rescale si range hors-plage** — le canonical Q3 sarge
+        // utilise 308 frames par mesh.  Si notre mesh en a moins, on
+        // scale pour rester proportionnel.  Garantit que les anims
+        // bougent même sur des modèles tronqués / customs.
+        let canonical_total = 308_usize;
+        let (start, end) = if self.end > nf && nf > 1 {
+            let scale = nf as f32 / canonical_total as f32;
+            let s = ((self.start as f32 * scale) as usize).min(nf - 2);
+            let e = ((self.end as f32 * scale) as usize).max(s + 1).min(nf - 1);
+            (s, e)
+        } else {
+            (self.start, self.end)
+        };
+        let span = end - start;
+        if span == 0 {
+            // **Bug fix v0.9.5++** — avant on retournait `(0, 0, 0.0)`
+            // ce qui forçait le MD3 frame 0 (T-pose) au lieu de la frame
+            // canonique de la range.  Pour BOTH_DEAD1 (start:29 end:30
+            // span:1 mais après clamp nf<31 → span peut tomber à 0) ça
+            // remettait le cadavre en T-pose.  On retourne la frame de
+            // start clampée aux bornes du mesh.
+            let f = start.min(nf.saturating_sub(1));
+            return (f, f, 0.0);
+        }
         let t = phase * self.fps;
         let (a_rel, b_rel, lerp) = if self.looping {
             let cyc = t.rem_euclid(span as f32);
@@ -2172,10 +2677,88 @@ impl AnimRange {
             let b = (a + 1).min(span - 1);
             (a, b, t.fract().min(1.0))
         };
-        let fa = (self.start + a_rel).min(nf.saturating_sub(1));
-        let fb = (self.start + b_rel).min(nf.saturating_sub(1));
+        let fa = (start + a_rel).min(nf.saturating_sub(1));
+        let fb = (start + b_rel).min(nf.saturating_sub(1));
         (fa, fb, lerp)
     }
+}
+
+/// **animation.cfg parser** — lit le fichier canonique Q3 d'un player
+/// model et retourne une HashMap `nom → AnimRange`.  Format Q3 :
+/// ```text
+/// sex m
+/// fixedlegs
+/// fixedtorso
+/// // first num loop fps
+/// 0   30 0  25      // BOTH_DEATH1
+/// 29  1  0  25      // BOTH_DEAD1
+/// ...
+/// ```
+/// Lignes vides + `//` + headers (sex/fixedlegs/etc.) ignorés.
+/// L'ordre des 25 lignes data correspond à la liste ANIM_NAMES.
+///
+/// Spécificité Q3 (cf. `cgame/cg_players.c`) : pour les `LEGS_*`,
+/// on doit soustraire `TORSO_GESTURE.firstFrame` car le mesh `lower.md3`
+/// ne contient PAS les frames TORSO.  Adjustement appliqué ici.
+fn parse_animation_cfg(content: &str) -> hashbrown::HashMap<&'static str, AnimRange> {
+    const ANIM_NAMES: [&str; 25] = [
+        "BOTH_DEATH1", "BOTH_DEAD1", "BOTH_DEATH2", "BOTH_DEAD2", "BOTH_DEATH3", "BOTH_DEAD3",
+        "TORSO_GESTURE", "TORSO_ATTACK", "TORSO_ATTACK2", "TORSO_DROP", "TORSO_RAISE",
+        "TORSO_STAND", "TORSO_STAND2",
+        "LEGS_WALKCR", "LEGS_WALK", "LEGS_RUN", "LEGS_BACK", "LEGS_SWIM",
+        "LEGS_JUMP", "LEGS_LAND", "LEGS_JUMPB", "LEGS_LANDB",
+        "LEGS_IDLE", "LEGS_IDLECR", "LEGS_TURN",
+    ];
+    let mut data_lines: Vec<(i32, i32, i32, f32)> = Vec::with_capacity(25);
+    for raw in content.lines() {
+        let line = raw.split("//").next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip headers : non-numeric first token.
+        let first_tok = line.split_whitespace().next().unwrap_or("");
+        if !first_tok.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let first = parts[0].parse::<i32>().unwrap_or(0);
+        let num = parts[1].parse::<i32>().unwrap_or(0);
+        let loop_frames = parts[2].parse::<i32>().unwrap_or(0);
+        let fps = parts[3].parse::<f32>().unwrap_or(15.0).max(1.0);
+        data_lines.push((first, num, loop_frames, fps));
+    }
+    let mut out = hashbrown::HashMap::new();
+    if data_lines.len() < 13 {
+        // Pas assez de lignes pour TORSO_GESTURE → on abandonne.
+        warn!("animation.cfg: seulement {} lignes data trouvées (besoin ≥ 13)", data_lines.len());
+        return out;
+    }
+    // TORSO_GESTURE = index 6 dans ANIM_NAMES.  Sa firstFrame sert
+    // d'offset pour shifter les LEGS_* (qui commencent à index 13).
+    let torso_gesture_first = data_lines[6].0;
+    for (i, name) in ANIM_NAMES.iter().enumerate() {
+        if i >= data_lines.len() {
+            break;
+        }
+        let (mut first, num, loop_frames, fps) = data_lines[i];
+        // **Q3 LEGS adjustment** : lower.md3 contient BOTH (0-89)
+        // puis LEGS directement à la suite — sans le TORSO bloc.
+        // Donc on doit shifter LEGS_* de -torso_gesture_first.
+        if i >= 13 {
+            first -= torso_gesture_first;
+        }
+        let start = first.max(0) as usize;
+        let span = num.max(1) as usize;
+        let end = start + span;
+        let looping = loop_frames > 0;
+        out.insert(*name, AnimRange { start, end, fps, looping });
+    }
+    info!("animation.cfg: {} anims parsées (TORSO_GESTURE.first = {})",
+          out.len(), torso_gesture_first);
+    out
 }
 
 /// Table des plages Q3 standard pour le squelette `player` (offsets de
@@ -2187,15 +2770,39 @@ mod bot_anims {
     use super::AnimRange;
 
     // Offsets historiques animation.cfg (Q3 id player sarge) — unités en frames.
+    // Ranges pour le **upper** (`models/players/sarge/upper.md3`).
     pub const BOTH_DEATH1: AnimRange = AnimRange { start: 0, end: 30, fps: 25.0, looping: false };
-    pub const TORSO_GESTURE: AnimRange = AnimRange { start: 90, end: 130, fps: 15.0, looping: true };
-    pub const TORSO_ATTACK: AnimRange = AnimRange { start: 130, end: 145, fps: 15.0, looping: false };
-    pub const TORSO_STAND: AnimRange = AnimRange { start: 171, end: 176, fps: 20.0, looping: true };
-    pub const LEGS_WALK: AnimRange = AnimRange { start: 193, end: 213, fps: 20.0, looping: true };
-    pub const LEGS_RUN: AnimRange = AnimRange { start: 213, end: 226, fps: 20.0, looping: true };
-    pub const LEGS_JUMP: AnimRange = AnimRange { start: 248, end: 254, fps: 20.0, looping: false };
-    pub const LEGS_LAND: AnimRange = AnimRange { start: 254, end: 258, fps: 20.0, looping: false };
-    pub const LEGS_IDLE: AnimRange = AnimRange { start: 268, end: 291, fps: 15.0, looping: true };
+    pub const BOTH_DEAD1:  AnimRange = AnimRange { start: 29, end: 30, fps: 1.0,  looping: true };  // freeze last frame
+    pub const BOTH_DEATH2: AnimRange = AnimRange { start: 30, end: 60, fps: 25.0, looping: false };
+    pub const BOTH_DEAD2:  AnimRange = AnimRange { start: 59, end: 60, fps: 1.0,  looping: true };
+    pub const BOTH_DEATH3: AnimRange = AnimRange { start: 60, end: 90, fps: 25.0, looping: false };
+    pub const BOTH_DEAD3:  AnimRange = AnimRange { start: 89, end: 90, fps: 1.0,  looping: true };
+    pub const TORSO_GESTURE: AnimRange = AnimRange { start: 90, end: 130, fps: 15.0, looping: false };
+    pub const TORSO_ATTACK:  AnimRange = AnimRange { start: 130, end: 145, fps: 15.0, looping: false };
+    pub const TORSO_ATTACK2: AnimRange = AnimRange { start: 145, end: 157, fps: 15.0, looping: false }; // gauntlet swing
+    pub const TORSO_DROP:    AnimRange = AnimRange { start: 157, end: 162, fps: 15.0, looping: false };
+    pub const TORSO_RAISE:   AnimRange = AnimRange { start: 162, end: 168, fps: 15.0, looping: false };
+    pub const TORSO_STAND:   AnimRange = AnimRange { start: 171, end: 176, fps: 20.0, looping: true };
+    pub const TORSO_STAND2:  AnimRange = AnimRange { start: 176, end: 181, fps: 20.0, looping: true };
+    /// **Q3 sarge n'a pas de TORSO_PAIN** dédié → on émule en jouant
+    /// quelques frames de TORSO_GESTURE clampées au début (effet
+    /// "tressaut" 200 ms).  Si l'animation.cfg fournit une range
+    /// `TORSO_PAIN1` officielle, le parser l'utilisera à la place via
+    /// le lookup `anim("TORSO_PAIN1", ...)`.  Plage courte = 5 frames.
+    pub const TORSO_PAIN1:   AnimRange = AnimRange { start: 168, end: 171, fps: 12.0, looping: false };
+    // Ranges pour le **lower** (`models/players/sarge/lower.md3`).
+    pub const LEGS_WALKCR:   AnimRange = AnimRange { start: 178, end: 193, fps: 20.0, looping: true };
+    pub const LEGS_WALK:     AnimRange = AnimRange { start: 193, end: 213, fps: 20.0, looping: true };
+    pub const LEGS_RUN:      AnimRange = AnimRange { start: 213, end: 226, fps: 20.0, looping: true };
+    pub const LEGS_BACK:     AnimRange = AnimRange { start: 226, end: 236, fps: 20.0, looping: true };
+    pub const LEGS_SWIM:     AnimRange = AnimRange { start: 236, end: 246, fps: 20.0, looping: true };
+    pub const LEGS_JUMP:     AnimRange = AnimRange { start: 248, end: 254, fps: 20.0, looping: false };
+    pub const LEGS_LAND:     AnimRange = AnimRange { start: 254, end: 258, fps: 20.0, looping: false };
+    pub const LEGS_JUMPB:    AnimRange = AnimRange { start: 258, end: 264, fps: 20.0, looping: false };
+    pub const LEGS_LANDB:    AnimRange = AnimRange { start: 264, end: 268, fps: 20.0, looping: false };
+    pub const LEGS_IDLE:     AnimRange = AnimRange { start: 268, end: 291, fps: 15.0, looping: true };
+    pub const LEGS_IDLECR:   AnimRange = AnimRange { start: 291, end: 308, fps: 15.0, looping: true };
+    pub const LEGS_TURN:     AnimRange = AnimRange { start: 308, end: 313, fps: 15.0, looping: true };
 }
 
 /// Paramètres de combat — tunés pour être lisibles à l'œil.
@@ -2238,6 +2845,62 @@ const RESPAWN_INVUL_SEC: f32 = 2.0;
 const BOT_HIT_RADIUS: f32 = 28.0;
 /// Hauteur du centre de la sphère (un peu au-dessus du milieu du torse).
 const BOT_CENTER_HEIGHT: f32 = 36.0;
+/// Cooldown anti-spam du SFX pain par bot (secondes). Sans ça un SG
+/// 11-pellets joue 11 plays simultanés, et un splash rocket multi-bot
+/// fait pareil. 0.18s = juste assez pour qu'un seul play soit audible
+/// sur une volée mais qu'un nouveau hit après pause re-déclenche le
+/// pain.
+const PAIN_SFX_COOLDOWN: f32 = 0.18;
+
+/// **Sound awareness** (v0.9.5) — rayon (unités) dans lequel un tir
+/// joueur est entendu par les bots. Au-delà, le bruit s'atténue trop
+/// pour déclencher une investigation.
+const BOT_HEARING_RADIUS: f32 = 1800.0;
+/// Mémoire d'évènement sonore — un bot oublie un bruit après cette
+/// durée s'il n'en perçoit pas de nouveau.
+const BOT_HEARING_MEMORY_SEC: f32 = 6.0;
+/// Cooldown chatter par bot — sans ça la radio sature à chaque kill
+/// et chaque contact visuel.
+const CHATTER_COOLDOWN_SEC: f32 = 4.0;
+
+/// Personnalité bot — biais de comportement persistant.  N'affecte pas
+/// la skill (qui contrôle l'aim/réaction) mais le **style** : un Sniper
+/// préfère le railgun à longue distance, un Rusher charge avec SG/RL,
+/// un Camper temporise sur les pickups.
+///
+/// Wrapper local autour de [`q3_bot::BotPersonality`] pour ajouter une
+/// distribution déterministe par index + un tag debug.  Le bot consomme
+/// directement `q3_bot::BotPersonality` via `Bot::set_personality`.
+type BotPersonality = q3_bot::BotPersonality;
+
+fn bot_personality_from_index(idx: usize) -> BotPersonality {
+    match idx % 4 {
+        0 => BotPersonality::Rusher,
+        1 => BotPersonality::Sniper,
+        2 => BotPersonality::Camper,
+        _ => BotPersonality::Balanced,
+    }
+}
+
+#[allow(dead_code)]
+fn bot_personality_tag(p: BotPersonality) -> &'static str {
+    match p {
+        BotPersonality::Rusher => "rush",
+        BotPersonality::Sniper => "snipe",
+        BotPersonality::Camper => "camp",
+        BotPersonality::Balanced => "bal",
+    }
+}
+
+/// **Headshot zone** — tout impact dont la position Z dépasse cette
+/// hauteur (relative à `body.origin`) compte comme un headshot. Q3
+/// vanilla ne distingue pas la tête, mais c'est la signature des FPS
+/// modernes. Le hit_radius reste une sphère unique (pas de hitbox
+/// per-bone) — on autorise donc les "headshots" sur le bord supérieur
+/// de la sphère, ce qui ressent juste comme un viser haut.
+const HEADSHOT_Z_THRESHOLD: f32 = 48.0;
+/// Multiplicateur de dégâts pour un headshot.
+const HEADSHOT_DMG_MULT: f32 = 1.5;
 /// HP par défaut d'un bot au spawn.
 const BOT_DEFAULT_HP: i32 = 100;
 /// Portée de contact pour ramasser un item (rayon XY + delta Z).
@@ -2449,9 +3112,85 @@ impl App {
             });
         }
         {
+            // **Music player commands** (v0.9.5+) — `music play <path>`
+            // charge un fichier audio local en loop. `music stop`
+            // l'arrête. `music list` affiche les fichiers du dossier
+            // `music/` utilisateur (cf. `user_music_dir`).
+            let p = pending.clone();
+            cmds.add("music", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("music: usage `music play <path>` | `music stop` | `music list`");
+                    return;
+                }
+                match args.argv(1) {
+                    "play" => {
+                        if args.count() < 3 {
+                            info!("music: usage `music play <path>`");
+                            return;
+                        }
+                        let raw = args.argv(2);
+                        // Concat pour gérer les paths avec espaces.
+                        let path_str = if args.count() > 3 {
+                            (2..args.count())
+                                .map(|i| args.argv(i))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        } else {
+                            raw.to_string()
+                        };
+                        p.lock().push(PendingAction::MusicPlay(path_str.into()));
+                    }
+                    "stop" => {
+                        p.lock().push(PendingAction::MusicStop);
+                    }
+                    "list" => {
+                        // Liste synchrone — log direct sans passer par
+                        // pending. Pour la console seule.
+                        for path in list_music_files() {
+                            info!("music: {}", path.display());
+                        }
+                    }
+                    other => {
+                        info!("music: sous-commande inconnue `{other}`");
+                    }
+                }
+            });
+        }
+        {
             let p = pending.clone();
             cmds.add("clearbots", move |_args: &Args| {
                 p.lock().push(PendingAction::ClearBots);
+            });
+        }
+        {
+            // **mapdl** — download manager intégré.  Sous-commandes :
+            //   `mapdl list`             liste le catalogue
+            //   `mapdl get <id>`         lance un DL en arrière-plan
+            //   `mapdl status`           snapshot du job courant
+            let p = pending.clone();
+            cmds.add("mapdl", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("mapdl: usage `mapdl list` | `mapdl get <id>` | `mapdl status`");
+                    return;
+                }
+                match args.argv(1) {
+                    "list" => {
+                        p.lock().push(PendingAction::MapDlList);
+                    }
+                    "get" => {
+                        if args.count() < 3 {
+                            info!("mapdl: usage `mapdl get <id>` (utilise `mapdl list`)");
+                            return;
+                        }
+                        p.lock().push(PendingAction::MapDlGet(args.argv(2).to_string()));
+                    }
+                    "status" => {
+                        p.lock().push(PendingAction::MapDlStatus);
+                    }
+                    other => {
+                        info!("mapdl: sous-commande inconnue `{other}`");
+                    }
+                }
             });
         }
         {
@@ -2549,8 +3288,68 @@ impl App {
         cvars.register("cl_forwardspeed", "400", CvarFlags::ARCHIVE);
         cvars.register("cl_sidespeed", "350", CvarFlags::ARCHIVE);
         cvars.register("r_gamma", "1.0", CvarFlags::ARCHIVE);
+        // **Player cosmetic tint** (v0.9.5++) — couleur appliquée au
+        // viewmodel de l'arme + halo dlight quand le joueur sprinte.
+        // Format : "r,g,b" en floats 0..1 (ex. "1.0,0.4,0.4" = rouge).
+        // Default : blanc (pas de tint).
+        cvars.register("cg_playertint", "1.0,1.0,1.0", CvarFlags::ARCHIVE);
         cvars.register("s_volume", "0.8", CvarFlags::ARCHIVE);
+        cvars.register("s_sfxvolume", "1.0", CvarFlags::ARCHIVE);
         cvars.register("s_musicvolume", "0.25", CvarFlags::ARCHIVE);
+        // **Dossiers supplémentaires** où chercher des fichiers audio.
+        // Liste séparée par `;` (Windows convention) ou `:` (Unix).
+        // Permet à l'utilisateur d'ajouter ses dossiers Spotify-export,
+        // SSD secondaire, etc.  Scanné récursivement (max 4 niveaux).
+        cvars.register("s_musicpath", "", CvarFlags::ARCHIVE);
+        // **FOV scaling mode** (v0.9.5++ #8) :
+        //   `0` = Hor+ (défaut Quake/arena, FOV élargit horizontalement
+        //          avec l'aspect — recommandé pour la plupart des joueurs).
+        //   `1` = Vert- (Counter-Strike / Apex style, FOV horizontal lock,
+        //          vertical réduit sur ultrawide pour pas d'avantage périph).
+        cvars.register("cg_fovaspect", "0", CvarFlags::ARCHIVE);
+        // **HDR display output** (v0.9.5++ #8) — nécessite un écran HDR10
+        // compatible.  `0` = sRGB classique, `1` = HDR10 (PQ tonemap).
+        // Note : la pipeline interne reste HDR (Rgba16Float scene buffer)
+        // dans tous les cas ; cette cvar contrôle uniquement le format
+        // de la surface présentée.  Bascule effective au prochain
+        // changement de résolution / fullscreen toggle.
+        cvars.register("r_hdr", "0", CvarFlags::ARCHIVE);
+        // **Skybox override** (v0.9.5++) — chemin VFS de base
+        // (sans `_rt/_lf/...` suffixes) pour forcer une skybox custom
+        // sur toutes les maps.  Les fichiers attendus sont
+        // `<value>_{rt,lf,up,dn,ft,bk}.tga`.  Vide = utilise le sky
+        // shader défini dans le BSP de la map (comportement Q3 standard).
+        // Nouvelle valeur appliquée au prochain `map <name>`.
+        cvars.register("r_skybox", "env/skybox_clouds", CvarFlags::ARCHIVE);
+        // **Godmode** (v0.9.5++ test) — `1` = le joueur ne prend aucun
+        // dégât bots/projectiles bots/dégât environnemental (lave, drown,
+        // splash). Pratique pour tester gameplay/visuels sans mourir.
+        // Pas archivé (réinitialisé au boot).
+        cvars.register("g_godmode", "0", CvarFlags::empty());
+        // **Battle Royale bots** (v0.9.5++) — `0` = carte BR vide
+        // (mode exploration, défaut).  `1` = spawn `pending_local_bots`
+        // au chargement de la map terrain.  Permet de tester le terrain
+        // sans IA gameplay.
+        cvars.register("br_bots", "0", CvarFlags::ARCHIVE);
+        // Mouse smoothing low-pass — 0 = aucun, 0.9 = très lissé.  Lerp
+        // appliqué côté input dans `App::on_mouse_motion`.
+        cvars.register("m_smoothing", "0.0", CvarFlags::ARCHIVE);
+        // Bloom HDR — 1=on, 0=off, lu par `Renderer` chaque frame.
+        cvars.register("r_bloom", "1", CvarFlags::ARCHIVE);
+        // Vsync — toggle au prochain redémarrage. Le swapchain `Mailbox`
+        // (vsync off) impose une recreation chez wgpu, on ne le fait pas
+        // à chaud pour ne pas avoir à gérer les frames en vol.
+        cvars.register("r_vsync", "1", CvarFlags::ARCHIVE);
+        // **Video settings persistence** (v0.9.5) — taille fenêtre +
+        // mode plein écran sont sauvegardés dans q3config.cfg via le
+        // flag ARCHIVE.  Restaurés au boot avant la création de la
+        // fenêtre (cf. `App::resumed`).
+        cvars.register("r_width", "1920", CvarFlags::ARCHIVE);
+        cvars.register("r_height", "1080", CvarFlags::ARCHIVE);
+        // Fullscreen par défaut (v0.9.5++) — borderless sur moniteur primaire.
+        // L'utilisateur peut basculer en fenêtré via le menu Vidéo, et
+        // la valeur est persistée dans `q3config.cfg` via le flag ARCHIVE.
+        cvars.register("r_fullscreen", "1", CvarFlags::ARCHIVE);
         // Difficulté des bots — 1..5 (I..V). III = défaut équilibré.
         // Consommé par `spawn_bot` sauf override via `addbot <name> <n>`.
         cvars.register("bot_skill", "3", CvarFlags::ARCHIVE);
@@ -2594,17 +3393,50 @@ impl App {
         // éviter un scan à chaque frame. Le menu s'ouvre d'emblée si
         // aucune `--map` n'a été demandée en CLI — c'est le comportement
         // Q3 historique (écran de sélection plutôt qu'un fond vide).
-        let map_list: Vec<String> = vfs
+        let mut map_list: Vec<String> = vfs
             .list_suffix(".bsp")
             .into_iter()
             .filter(|p| p.starts_with("maps/"))
+            // **Q3DM0 + Q3DM12 + Q3DM19 supprimées** (v0.9.5++ user
+            // request) — exclues du menu.  Filtrage case-insensitive
+            // pour attraper q3dm0.bsp / Q3DM12.BSP / etc.  Note : on
+            // utilise une regex stricte (`q3dm0.bsp`) sur Q3DM0 pour
+            // ne pas accidentellement matcher q3dm01..q3dm09 si jamais.
+            .filter(|p| {
+                let lc = p.to_ascii_lowercase();
+                if lc.contains("q3dm12") || lc.contains("q3dm19") {
+                    return false;
+                }
+                // Match strict q3dm0.bsp (pas q3dm0X)
+                if lc.ends_with("/q3dm0.bsp") || lc == "maps/q3dm0.bsp" {
+                    return false;
+                }
+                true
+            })
             .collect();
+        // **Battle Royale Réunion** (v0.9.5++ ré-intégrée) — la carte
+        // utilise un terrain procédural (pas de BSP), donc elle n'est
+        // pas découverte par `vfs.list_suffix(".bsp")`.  On l'ajoute
+        // manuellement.  Le `load_map` route automatiquement les
+        // `br_*` vers `load_terrain_map`.  Bots gated par cvar
+        // `br_bots` (défaut 0 → réunion vide).
+        let br_entry = "maps/br_reunion.bsp".to_string();
+        if !map_list.iter().any(|m| m == &br_entry) {
+            map_list.push(br_entry);
+        }
+        map_list.sort();
         let mut menu = crate::menu::Menu::new(map_list, /* in_game */ false);
+        // Seed le catalogue du downloader pour la page menu MapDownloader.
+        let catalog: Vec<(String, String)> = crate::map_dl::MapDownloader::default_catalog()
+            .iter()
+            .map(|e| (e.id.to_string(), format!("{} — {}", e.name, e.author.unwrap_or("?"))))
+            .collect();
+        menu.set_mapdl_catalog(catalog);
         if requested_map.is_none() {
             menu.open_root();
         }
 
-        Self {
+        let this = Self {
             vfs,
             init_width: width,
             init_height: height,
@@ -2612,6 +3444,35 @@ impl App {
             window: None,
             renderer: None,
             world: None,
+            terrain: None,
+            br_ring: None,
+            drones: Vec::new(),
+            rocks: Vec::new(),
+            ammo_crate_scale: None,
+            quad_pickup_scale: None,
+            health_pack_scale: None,
+            railgun_pickup_scale: None,
+            grenade_ammo_scale: None,
+            rocket_ammo_scale: None,
+            cell_ammo_scale: None,
+            lg_ammo_scale: None,
+            big_armor_scale: None,
+            plasma_pickup_scale: None,
+            railgun_ammo_scale: None,
+            regen_pickup_scale: None,
+            machinegun_pickup_scale: None,
+            bfg_pickup_scale: None,
+            lightninggun_pickup_scale: None,
+            shotgun_pickup_scale: None,
+            grenadelauncher_pickup_scale: None,
+            gauntlet_pickup_scale: None,
+            shotgun_ammo_scale: None,
+            bfg_ammo_scale: None,
+            rocketlauncher_pickup_scale: None,
+            combat_armor_scale: None,
+            medkit_scale: None,
+            armor_shard_scale: None,
+            prop_lights: hashbrown::HashMap::new(),
             player: PlayerMove::new(Vec3::ZERO),
             params: PhysicsParams::default(),
             console,
@@ -2635,6 +3496,8 @@ impl App {
             last_weapon: WeaponId::Machinegun,
             weapon_switch_at: f32::NEG_INFINITY,
             show_perf_overlay: false,
+            show_stats_overlay: false,
+            last_respawn_time: 0.0,
             frame_times: [0.0; FRAME_TIME_BUF],
             frame_time_head: 0,
             ammo: {
@@ -2680,15 +3543,29 @@ impl App {
             match_start_at: 0.0,
             warmup_until: 0.0,
             first_blood_announced: false,
+            last_fire_sfx_at: f32::NEG_INFINITY,
             total_shots: 0,
             total_hits: 0,
             time_warnings_fired: 0,
             next_player_fire_at: 0.0,
             muzzle_flash_until: 0.0,
             view_kick: 0.0,
+            view_kick_pitch: 0.0,
+            view_kick_yaw: 0.0,
+            map_dl: crate::map_dl::MapDownloader::new(
+                std::path::PathBuf::from("baseq3"),
+            ),
+            // (Le menu sera seedé après construction — voir set_mapdl_catalog)
             hit_marker_until: 0.0,
+            kill_marker_until: 0.0,
             armor_flash_until: 0.0,
             pain_flash_until: 0.0,
+            powerup_flash_until: 0.0,
+            powerup_flash_color: [0.0; 4],
+            lightning_flash_until: 0.0,
+            next_lightning_at: f32::INFINITY,
+            fov_punch_until: 0.0,
+            fov_punch_strength: 0.0,
             recent_dmg_total: 0,
             recent_dmg_last_at: 0.0,
             next_heartbeat_at: 0.0,
@@ -2704,6 +3581,10 @@ impl App {
             time_sec: 0.0,
             auto_shot_taken: false,
             bob_phase: 0.0,
+            viewmodel_prev_yaw: 0.0,
+            viewmodel_prev_pitch: 0.0,
+            viewmodel_sway: [0.0, 0.0],
+            player_last_land_at: f32::NEG_INFINITY,
             powerup_until: [None; PowerupKind::COUNT],
             powerup_warned: [false; PowerupKind::COUNT],
             held_item: None,
@@ -2733,8 +3614,15 @@ impl App {
             sfx_fire: Vec::new(),
             sfx_pain_player: None,
             sfx_pain_bot: None,
+            sfx_death_bot: None,
             sfx_weapon_pickup: None,
             sfx_ammo_pickup: None,
+            sfx_health_pickup: None,
+            sfx_armor_pickup: None,
+            sfx_megahealth_pickup: None,
+            sfx_plasma_impact: None,
+            sfx_rocket_impact: None,
+            sfx_grenade_impact: None,
             sfx_no_ammo: None,
             sfx_weapon_switch: None,
             sfx_rocket_explode: None,
@@ -2790,7 +3678,8 @@ impl App {
                 nr
             },
             vr: crate::vr::VrRuntime::init(vr_enabled),
-        }
+        };
+        this
     }
 
     /// Active / désactive la capture du curseur.
@@ -2836,17 +3725,112 @@ impl App {
             }
             MenuAction::LoadMap(path) => {
                 self.load_map(&path);
-                if self.world.is_some() {
+                if self.world.is_some() || self.terrain.is_some() {
                     self.menu.close();
                     self.menu.set_in_game(true);
                     self.set_mouse_capture(true);
                 }
             }
             MenuAction::Quit => event_loop.exit(),
+            MenuAction::ApplyResolution { width, height } => {
+                if let Some(window) = self.window.as_ref() {
+                    let _ = window.request_inner_size(
+                        winit::dpi::PhysicalSize::new(width, height),
+                    );
+                    // **Persistance v0.9.5++** — écrit dans les cvars
+                    // ARCHIVE pour que `q3config.cfg` les sauvegarde
+                    // au exit() (sinon la résolution était perdue
+                    // entre 2 lancements).
+                    let _ = self.cvars.set("r_width", &format!("{width}"));
+                    let _ = self.cvars.set("r_height", &format!("{height}"));
+                    info!("menu: résolution → {}×{} (persisté)", width, height);
+                }
+            }
+            MenuAction::ToggleFullscreen => {
+                if let Some(window) = self.window.as_ref() {
+                    use winit::window::Fullscreen;
+                    let new_fs = !self.menu.fullscreen;
+                    if new_fs {
+                        let monitor = window.current_monitor();
+                        window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+                    } else {
+                        window.set_fullscreen(None);
+                    }
+                    self.menu.set_fullscreen(new_fs);
+                    // **Persistance v0.9.5++** — écrit dans `r_fullscreen`
+                    // pour que le réglage soit conservé entre 2 launches.
+                    let _ = self.cvars.set(
+                        "r_fullscreen",
+                        if new_fs { "1" } else { "0" },
+                    );
+                    info!("menu: fullscreen → {} (persisté)", new_fs);
+                }
+            }
+            MenuAction::ToggleVsync => {
+                self.menu.vsync = !self.menu.vsync;
+                let _ = self.cvars.set(
+                    "r_vsync",
+                    if self.menu.vsync { "1" } else { "0" },
+                );
+                info!("menu: vsync → {} (effet au prochain redémarrage)", self.menu.vsync);
+            }
+            MenuAction::PlayMusicFile(path) => {
+                self.handle_music_play(&path);
+                self.menu.set_music_now_playing(Some(path));
+            }
+            MenuAction::StopMusic => {
+                if let Some(snd) = self.sound.as_ref() {
+                    snd.stop_music();
+                }
+                self.menu.set_music_now_playing(None);
+                info!("menu: music stopped");
+            }
+            MenuAction::DownloadMap(id) => {
+                let started = self.map_dl.start(&id);
+                if started {
+                    self.menu.set_mapdl_status(format!("downloading {}", id));
+                } else {
+                    self.menu.set_mapdl_status(
+                        "queue full or invalid id".into(),
+                    );
+                }
+            }
         }
     }
 
     fn load_map(&mut self, path: &str) {
+        // **Battle Royale terrain** (v0.9.5) — toute map nommée
+        // `maps/br_*` est routée vers le pipeline terrain (heightmap +
+        // ring) au lieu du BSP.  `path` peut arriver sous forme
+        // `maps/br_reunion.bsp` (depuis le menu) ou `br_reunion` (depuis
+        // la console) ; on détecte les deux.
+        let stripped = path
+            .strip_prefix("maps/")
+            .unwrap_or(path)
+            .strip_suffix(".bsp")
+            .unwrap_or_else(|| path.strip_prefix("maps/").unwrap_or(path));
+        if stripped.starts_with("br_") {
+            self.load_terrain_map(stripped);
+            return;
+        }
+
+        // **Reset état BR** (v0.9.5+) — quand on bascule d'une carte
+        // BR vers une carte BSP (ex. via menu), il faut clear le
+        // terrain + ring + drones, sinon `check_match_end` BR voit
+        // 1 entité vivante et déclare immédiatement "VICTORY",
+        // bloquant le gameplay.
+        self.terrain = None;
+        self.br_ring = None;
+        // Désarme aussi l'atmosphère BR au cas où on quitte un BR pour
+        // un BSP : empêche le tick_atmosphere de tirer un éclair sur
+        // un BSP indoor (tick_atmosphere gate aussi via terrain.is_none
+        // mais on évite le state stale).
+        self.next_lightning_at = f32::INFINITY;
+        self.lightning_flash_until = 0.0;
+        self.drones.clear();
+        self.rocks.clear();
+        self.match_winner = None;
+
         let bytes = match self.vfs.read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -2874,7 +3858,11 @@ impl App {
             // Skybox : cherche le premier shader BSP marqué `skyparms` dans
             // le registre et tente de charger sa cubemap. Faute de cubemap,
             // on retombe gracieusement sur le ciel procédural.
-            resolve_and_load_sky(r, &self.vfs, &bsp);
+            // Cvar `r_skybox` permet de forcer une skybox custom
+            // pour toutes les maps (override le sky shader BSP).
+            let skybox_override = self.cvars.get_string("r_skybox")
+                .filter(|s| !s.trim().is_empty());
+            resolve_and_load_sky(r, &self.vfs, &bsp, skybox_override.as_deref());
         }
         let world = World::from_bsp(bsp);
         if let Some(spawn) = world.player_start {
@@ -2925,6 +3913,1676 @@ impl App {
             }
         }
 
+        self.load_common_sfx();
+        // Reset du timer "dernier frag" pour qu'un kill en début de
+        // nouvelle map ne déclenche pas un Excellent hérité de la map
+        // précédente. NEG_INFINITY → `time_sec - last_frag_at > 2.0s`
+        // garanti pour le 1er frag.
+        self.last_frag_at = f32::NEG_INFINITY;
+        // Et pareil pour le combo Railgun : une nouvelle map remet le
+        // tracker à zéro, on ne veut pas qu'un hit RG de la map
+        // précédente valide un Impressive sur le premier hit d'après.
+        self.rg_last_hit = false;
+
+        // Pickups : pour chaque entité avec un MD3 conventionnel, on
+        // charge le mesh et on stocke (mesh, origin, angles). Les erreurs
+        // individuelles sont loggées sans bloquer le chargement — les PK3
+        // de démo n'ont pas forcément tous les weapons2/…
+        self.pickups.clear();
+        if let Some(r) = self.renderer.as_mut() {
+            let mut loaded = 0usize;
+            let mut missing = 0usize;
+            for (i, ent) in world.entities.iter().enumerate() {
+                let Some(path) = ent.kind.pickup_model_path() else {
+                    continue;
+                };
+                match r.load_md3(&self.vfs, path) {
+                    Ok(mesh) => {
+                        let (kind, respawn_cooldown) = PickupKind::from_entity(&ent.kind);
+                        self.pickups.push(PickupGpu {
+                            mesh,
+                            origin: ent.origin,
+                            angles: ent.angles,
+                            kind,
+                            respawn_cooldown,
+                            respawn_at: None,
+                            entity_index: i as u16,
+                        });
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        missing += 1;
+                        warn!("md3 '{path}' KO: {e}");
+                    }
+                }
+            }
+            info!("pickups: {} chargés, {} manquants", loaded, missing);
+
+        }
+        // **Asset weapons / projectiles** — sortis du `if let Some(r)`
+        // pour pouvoir les invoquer aussi depuis `load_terrain_map`
+        // (pas de BSP mais besoin des mêmes meshes).
+        self.load_weapon_assets();
+        // **Ammo crate GLB** — partagé entre BSP et BR.
+        self.load_ammo_crate_asset();
+        // **Quad pickup GLB** — remplace l'icone MD3 du Quad Damage.
+        self.load_quad_pickup_asset();
+        // **Health pack GLB** — trousse de soin moderne pour items
+        // item_health*. Partagé entre BSP et BR.
+        self.load_health_pack_asset();
+        // **Railgun pickup GLB** — modèle moderne pour le railgun
+        // au sol ET viewmodel 1ère personne.
+        self.load_railgun_pickup_asset();
+        // **Grenade ammo box GLB** — boîte de munitions grenades.
+        self.load_grenade_ammo_asset();
+        // **Rocket ammo box GLB** — boîte de munitions roquettes.
+        self.load_rocket_ammo_asset();
+        // **Cell ammo box GLB** — cellules énergétiques (plasma).
+        self.load_cell_ammo_asset();
+        self.load_lg_ammo_asset();
+        self.load_big_armor_asset();
+        self.load_plasma_pickup_asset();
+        self.load_railgun_ammo_asset();
+        self.load_regen_pickup_asset();
+        self.load_machinegun_pickup_asset();
+        self.load_bfg_pickup_asset();
+        self.load_lightninggun_pickup_asset();
+        self.load_shotgun_pickup_asset();
+        self.load_grenadelauncher_pickup_asset();
+        self.load_gauntlet_pickup_asset();
+        self.load_shotgun_ammo_asset();
+        self.load_bfg_ammo_asset();
+        self.load_rocketlauncher_pickup_asset();
+        self.load_combat_armor_asset();
+        self.load_medkit_asset();
+        self.load_armor_shard_asset();
+
+        // Nouvelle map → on remet à zéro les projectiles / explosions de
+        // l'ancienne instance pour éviter des frames fantômes.
+        self.projectiles.clear();
+        self.explosions.clear();
+        self.particles.clear();
+        // Nouveau match : on repart à zéro sur les frags + état d'intermission.
+        self.frags = 0;
+        self.deaths = 0;
+        self.match_winner = None;
+        self.warmup_until = self.time_sec + WARMUP_DURATION;
+        self.first_blood_announced = false;
+        self.total_shots = 0;
+        self.total_hits = 0;
+        self.time_warnings_fired = 0;
+        // On décale virtuellement le départ du chrono à la fin du warmup
+        // pour que `time_remaining` reste borné à `TIME_LIMIT_SECONDS`
+        // pendant le compte à rebours.
+        self.match_start_at = self.warmup_until;
+
+        // Nouvelle map → on purge les bots de la précédente (ils avaient des
+        // waypoints et une physique liés à l'ancien monde).
+        self.bots.clear();
+
+        // Jump pads + téléporteurs — reconstruction complète à chaque map.
+        // Résolution des `target → target_position / misc_teleporter_dest`
+        // via `World::find_by_targetname`, qu'on a déjà.
+        self.jump_pads.clear();
+        self.teleporters.clear();
+        self.hurt_zones.clear();
+        // Stoppe les ambient speakers de la map précédente AVANT d'en
+        // lancer de nouveaux — sinon chaque map change laisserait
+        // fuiter un ou plusieurs `SpatialSink` toujours vivants,
+        // mixant deux ambiances à la fois.
+        if let Some(snd) = self.sound.as_ref() {
+            for h in self.ambient_speakers.drain(..) {
+                snd.stop_loop(h);
+            }
+        } else {
+            self.ambient_speakers.clear();
+        }
+        self.on_jumppad_idx = None;
+        self.on_teleport_idx = None;
+        let gravity = self.params.gravity.max(1.0);
+        for ent in &world.entities {
+            match ent.kind {
+                EntityKind::TriggerPush => {
+                    let Some(target_name) = ent.target.as_deref() else {
+                        warn!("trigger_push #{:?} sans `target` — ignoré", ent.id);
+                        continue;
+                    };
+                    let Some(dst) = world.find_by_targetname(target_name).next() else {
+                        warn!(
+                            "trigger_push #{:?}: cible '{}' introuvable",
+                            ent.id, target_name
+                        );
+                        continue;
+                    };
+                    let bounds = ent.bounds;
+                    let origin = (bounds.mins + bounds.maxs) * 0.5;
+                    // AimAtTarget de g_trigger.c :
+                    //   height = dest.z - origin.z
+                    //   time   = sqrt(height / (0.5 * gravity))
+                    //   horiz  = (dest - origin).xy, puis scale pour qu'on
+                    //            atterrisse sur la cible au moment `time`.
+                    //   result.z = time * gravity (valeur absolue du "up kick")
+                    let height = dst.origin.z - origin.z;
+                    if height <= 0.0 {
+                        warn!(
+                            "trigger_push #{:?}: cible non au-dessus (h={:.1}), ignoré",
+                            ent.id, height
+                        );
+                        continue;
+                    }
+                    let time = (height / (0.5 * gravity)).sqrt();
+                    if !time.is_finite() || time <= 0.0 {
+                        continue;
+                    }
+                    let mut dir = dst.origin - origin;
+                    dir.z = 0.0;
+                    let dist = dir.length();
+                    let mut v = if dist > 1e-3 {
+                        (dir / dist) * (dist / time)
+                    } else {
+                        Vec3::ZERO
+                    };
+                    v.z = time * gravity;
+                    self.jump_pads.push(JumpPad {
+                        bounds,
+                        center: origin,
+                        launch_velocity: v,
+                    });
+                }
+                EntityKind::TriggerHurt => {
+                    let bounds = ent.bounds;
+                    let damage = extra_i32(ent, "dmg").unwrap_or(5).max(1);
+                    let spawnflags = extra_i32(ent, "spawnflags").unwrap_or(0);
+                    // Spawnflags Q3 — cf. g_trigger.c :
+                    //   bit 0 = START_OFF, bit 1 = SILENT,
+                    //   bit 2 = NO_PROTECTION, bit 4 = SLOW.
+                    // START_OFF n'est pas supporté (on n'a pas de targetname
+                    // dispatcher — tout part enabled). C'est OK pour q3dm*.
+                    let slow = (spawnflags & 16) != 0;
+                    let no_protection = (spawnflags & 4) != 0;
+                    let interval = if slow { 1.0 } else { 0.1 };
+                    // Label kill-feed : on devine lave / void / standard
+                    // depuis la hauteur de la zone (les void drops sont
+                    // typiquement de très larges zones tout en bas de map).
+                    // Approximation, mais plus parlant qu'un tag "HURT"
+                    // générique. Damage ≥ 100 = instant kill (void typique).
+                    let label: &'static str = if damage >= 100 {
+                        "VOID"
+                    } else if no_protection {
+                        "LAVA"
+                    } else {
+                        "HURT"
+                    };
+                    self.hurt_zones.push(HurtZone {
+                        bounds,
+                        damage,
+                        interval,
+                        next_at: 0.0,
+                        no_protection,
+                        label,
+                    });
+                }
+                EntityKind::TriggerTeleport => {
+                    let Some(target_name) = ent.target.as_deref() else {
+                        warn!("trigger_teleport #{:?} sans `target` — ignoré", ent.id);
+                        continue;
+                    };
+                    let Some(dst) = world.find_by_targetname(target_name).next() else {
+                        warn!(
+                            "trigger_teleport #{:?}: cible '{}' introuvable",
+                            ent.id, target_name
+                        );
+                        continue;
+                    };
+                    let bounds = ent.bounds;
+                    let src_center = (bounds.mins + bounds.maxs) * 0.5;
+                    self.teleporters.push(Teleporter {
+                        bounds,
+                        src_center,
+                        dst_origin: dst.origin,
+                        dst_angles: dst.angles,
+                    });
+                }
+                // `func_plat` (ascenseurs) : non implémenté — requiert un
+                // système de *brush mover* dynamique dans `q3-collision`
+                // (pour qu'un joueur puisse monter dessus pendant que le
+                // brush translate) + un pipeline de transform par
+                // sous-modèle dans `q3-renderer` (pour dessiner la chose
+                // animée). Les q3dm1-13 de base n'utilisent pas ce
+                // classname, donc on se contente de le logger pour ne pas
+                // flooder de warnings sur les maps qui en contiennent
+                // (q3tourney*, maps custom…).
+                EntityKind::FuncPlat => {
+                    debug!(
+                        "func_plat #{:?} détecté — non implémenté, traité comme non-bloquant",
+                        ent.id
+                    );
+                }
+                _ => {
+                    // target_speaker : on les traite dans une passe
+                    // séparée ci-dessous pour éviter de dupliquer le
+                    // code de chargement audio sur chaque bras du match.
+                    if is_target_speaker(ent) {
+                        self.spawn_target_speaker(ent);
+                    }
+                }
+            }
+        }
+        info!(
+            "world: {} jump pad(s), {} téléporteur(s), {} hurt zone(s), {} speaker(s) loopés",
+            self.jump_pads.len(),
+            self.teleporters.len(),
+            self.hurt_zones.len(),
+            self.ambient_speakers.len()
+        );
+
+        self.world = Some(world);
+
+        // Drain pending_local_bots (centralisé) — couvre toutes les
+        // voies de chargement (CLI `--map`, console `/map`, menu Play).
+        // Avant v0.9.3 chaque path drainait à part ou pas du tout, ce
+        // qui faisait des bots invisibles via le menu. Centralisé ici,
+        // c'est le seul site responsable du spawn initial.
+        if self.pending_local_bots > 0 {
+            let n = self.pending_local_bots;
+            self.pending_local_bots = 0;
+            self.ensure_player_rig_loaded();
+            for i in 0..n {
+                let bot_name = format!("bot{:02}", i + 1);
+                self.spawn_bot(&bot_name, Some(3));
+            }
+            info!(
+                "spawn initial : {} bot(s) demandés, {} effectivement présents",
+                n,
+                self.bots.len()
+            );
+        }
+    }
+
+    /// **Battle Royale terrain loader** (v0.9.5) — pendant de
+    /// `load_map` pour les cartes BR.
+    ///
+    /// `name` est le nom court sans préfixe `maps/` ni suffixe `.bsp`
+    /// (ex `br_reunion`). On cherche les assets `assets/maps/<name>.r16`
+    /// + `.splat.png` + `.terrain.json`.  Si les fichiers ne sont pas
+    /// présents (cas où l'utilisateur n'a pas encore lancé le pipeline
+    /// Python `tools/dem_to_terrain.py`), on **synthétise** un terrain
+    /// de test à partir du preset `TerrainMeta::reunion_default()` —
+    /// c'est plat (heightmap de 0) mais ça permet d'instancier le BR
+    /// (ring shrink, POIs, spawns) pour valider la stack haut niveau.
+    fn load_terrain_map(&mut self, name: &str) {
+        use q3_terrain::{br::RingShrink, br::reunion_br_phases, Terrain, TerrainMeta};
+
+        // Tentative de chargement disque ; sinon fallback synthétique.
+        let base_path = format!("assets/maps/{name}");
+        let terrain = match Terrain::load_from_files(&base_path) {
+            Ok(t) => {
+                info!(
+                    "BR: terrain `{}` chargé depuis disque ({}×{} samples)",
+                    name, t.width, t.height
+                );
+                t
+            }
+            Err(e) => {
+                warn!(
+                    "BR: load_from_files('{}') échec : {} — fallback terrain synthétique \
+                     (lance tools/dem_to_terrain.py pour produire les assets réels)",
+                    base_path, e
+                );
+                synthesize_reunion_fallback()
+            }
+        };
+        let _ = TerrainMeta::reunion_default; // utilisé par le fallback
+
+        let pois = terrain.pois().to_vec();
+        let ring = RingShrink::new(reunion_br_phases(), &pois);
+        info!(
+            "BR: ring initialisé — phase 0, {} POI sur la carte",
+            pois.len()
+        );
+
+        // Spawn joueur sur un POI tier ≥ 3 random (utilise la même
+        // logique stable que le ring : hash du temps actuel mod len).
+        let candidates: Vec<&q3_terrain::Poi> =
+            pois.iter().filter(|p| p.tier >= 3).collect();
+        let spawn_xy = if candidates.is_empty() {
+            (terrain.center().x, terrain.center().y)
+        } else {
+            let idx = (self.time_sec.to_bits() as usize) % candidates.len();
+            (candidates[idx].x, candidates[idx].y)
+        };
+        let spawn_z = terrain.height_at(spawn_xy.0, spawn_xy.1) + 80.0;
+        let spawn = Vec3::new(spawn_xy.0, spawn_xy.1, spawn_z);
+
+        // **Orient toward center** (v0.9.5) — sur un POI côtier (ex.
+        // Saint-Denis au nord), regarder l'horizon = océan vide. On
+        // calcule un yaw qui pointe vers le centre de l'île pour que
+        // le joueur voie immédiatement le relief / les autres POI.
+        let center = terrain.center();
+        let to_center = Vec3::new(center.x - spawn.x, center.y - spawn.y, 0.0);
+        let spawn_yaw = if to_center.length_squared() > 1.0 {
+            to_center.y.atan2(to_center.x).to_degrees()
+        } else {
+            0.0
+        };
+        info!(
+            "BR: spawn joueur à {:?} (yaw {:.0}° → centre)",
+            spawn, spawn_yaw
+        );
+
+        // Reset état joueur (équivalent du load_map BSP) — on ne route
+        // PAS vers `World::from_bsp` puisqu'il n'y a pas de BSP.
+        self.player = PlayerMove::new(spawn);
+        self.player.view_angles =
+            q3_math::Angles { pitch: 0.0, yaw: spawn_yaw, roll: 0.0 };
+        self.player_invul_until = self.time_sec + RESPAWN_INVUL_SEC;
+        self.last_damage_until = 0.0;
+        self.shake_intensity = 0.0;
+        self.shake_until = 0.0;
+        self.armor_flash_until = 0.0;
+        self.pain_flash_until = 0.0;
+        if let Some(r) = self.renderer.as_mut() {
+            r.camera_mut().position =
+                self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+            r.camera_mut().angles = self.player.view_angles;
+        }
+
+        // **Asset weapons** (v0.9.5) — viewmodels + projectile meshes.
+        // Sans ça, les pickups d'arme BR ne montrent pas de viewmodel
+        // quand le joueur les ramasse → bug "arme invisible".
+        self.load_weapon_assets();
+
+        // **SFX communs** (v0.9.5+) — fire/pain/pickup/feedback/etc.
+        // Sans ça le mode BR était silencieux (SFX chargés seulement
+        // dans le path BSP de load_map).
+        self.load_common_sfx();
+
+        // **Drones GLB** désactivés (utilisateur préfère sans).
+        // **Ammo crate GLB** — remplace le MD3 du pickup d'ammo MG par
+        // un mesh stylisé. Asset disque optionnel.
+        self.load_ammo_crate_asset();
+        // **Quad pickup GLB** — pour les Quad Damage en BR aussi.
+        self.load_quad_pickup_asset();
+        // **Health pack GLB** — trousse de soin moderne.
+        self.load_health_pack_asset();
+        // **Railgun pickup GLB** — modèle moderne du railgun au sol.
+        self.load_railgun_pickup_asset();
+        // **Grenade ammo box GLB** — boîte de munitions grenades.
+        self.load_grenade_ammo_asset();
+        // **Rocket ammo box GLB** — boîte de munitions roquettes.
+        self.load_rocket_ammo_asset();
+        // **Cell ammo box GLB** — cellules énergétiques (plasma).
+        self.load_cell_ammo_asset();
+        self.load_lg_ammo_asset();
+        self.load_big_armor_asset();
+        self.load_plasma_pickup_asset();
+        self.load_railgun_ammo_asset();
+        self.load_regen_pickup_asset();
+        self.load_machinegun_pickup_asset();
+        self.load_bfg_pickup_asset();
+        self.load_lightninggun_pickup_asset();
+        self.load_shotgun_pickup_asset();
+        self.load_grenadelauncher_pickup_asset();
+        self.load_gauntlet_pickup_asset();
+        self.load_shotgun_ammo_asset();
+        self.load_bfg_ammo_asset();
+        self.load_rocketlauncher_pickup_asset();
+        self.load_combat_armor_asset();
+        self.load_medkit_asset();
+        self.load_armor_shard_asset();
+        // **Mode exploration** (v0.9.5++ user request) — quand
+        // `br_bots=0`, on n'affiche QUE rochers + powerups sur le
+        // terrain, sans statues / statue_femme / drones / hellhounds /
+        // ring shrink.  Carte propre pour visite touristique.
+        let exploration_mode = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
+        // **Rochers GLB** — gardés en exploration (décor minimal).
+        self.load_rock_asset();
+        self.spawn_br_rocks(&terrain);
+        // **Statues GLB** — désactivées en exploration (user request).
+        if !exploration_mode {
+            self.load_statue_asset();
+            self.spawn_br_statues(&terrain);
+            // **Statues femme GLB** — élément décoratif sur les plages.
+            self.load_statue_femme_asset();
+            self.spawn_br_statue_femme(&terrain);
+        }
+        // **Buildings / Hellhounds / Grass** déjà désactivés.
+        // **Spawn lights GLB** (v0.9.5++) — pour chaque prop placé,
+        // émet ses lights KHR_lights_punctual à la position monde.
+        // Skipped si l'asset n'a pas de lights (la plupart).
+        for prop_name in ["rock", "statue", "statue_femme", "ammo_crate", "quad_pickup"] {
+            self.spawn_glb_lights_for_prop(prop_name);
+        }
+
+        // Enregistre l'état BR.  On laisse `world = None` — les sites
+        // qui dépendent de `self.world.as_ref()` (collisions, items
+        // spawning) testeront `terrain.is_some()` en fallback.
+        self.world = None;
+        let terrain_arc = Arc::new(terrain);
+        // Upload côté GPU pour le rendu — pipeline terrain dédié, cache
+        // chunks LOD-adaptatif, sélection chaque frame selon la caméra.
+        if let Some(r) = self.renderer.as_mut() {
+            r.upload_terrain(terrain_arc.clone());
+        }
+        self.terrain = Some(terrain_arc);
+        // **Mode exploration** (v0.9.5++) — pas de ring shrink quand
+        // `br_bots=0` (sinon il tuerait le joueur en visite tranquille).
+        let exploration_mode = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
+        self.br_ring = if exploration_mode { None } else { Some(ring) };
+        // Reset atmosphère BR à chaque entrée de map terrain — garantit
+        // que `tick_atmosphere` ré-arme `next_lightning_at` à un délai
+        // frais (cf. branche `is_finite()`), même si on revient en BR
+        // après un détour BSP.  Sinon un éclair pouvait se déclencher
+        // immédiatement à l'entrée si le timer précédent avait été
+        // dépassé hors-BR.
+        self.next_lightning_at = f32::INFINITY;
+        self.lightning_flash_until = 0.0;
+        // **Items spawn par POI tier** (v0.9.5) — pour chaque POI, on
+        // pose un set d'items proportionnel au tier autour du centre
+        // (ring de quelques unités). Pas de respawn en BR (item ramassé
+        // = perdu pour le match), modélisé via `respawn_cooldown` énorme.
+        self.spawn_br_pickups();
+
+        // **POI light pillars** (v0.9.5) — colonnes lumineuses au-dessus
+        // des POI tier 4 (capitales, volcan, lagons premium) pour les
+        // repérer de loin façon Apex/Warzone "loot beam".  Empilées en
+        // dlights successives sur 800u de haut. Tint par type POI.
+        if let Some(terrain) = self.terrain.as_ref().cloned() {
+            if let Some(r) = self.renderer.as_mut() {
+                for poi in terrain.pois() {
+                    if poi.tier < 4 {
+                        continue;
+                    }
+                    let (color, intensity) = match poi.kind {
+                        q3_terrain::PoiKind::Volcano => ([1.0, 0.45, 0.10], 4.0),
+                        q3_terrain::PoiKind::Beach => ([0.40, 0.85, 1.0], 3.5),
+                        q3_terrain::PoiKind::City => ([1.0, 0.85, 0.30], 4.0),
+                        q3_terrain::PoiKind::Peak => ([0.85, 0.55, 1.0], 3.5),
+                        q3_terrain::PoiKind::Cirque => ([0.55, 1.0, 0.55], 3.5),
+                        _ => ([1.0, 0.85, 0.30], 3.5),
+                    };
+                    let z_ground = terrain.height_at(poi.x, poi.y);
+                    // 4 dlights empilées de 200u en 200u → "pillar"
+                    // sur 800u. Lifetime 9999s = pratique infinie.
+                    for k in 0..4 {
+                        let z = z_ground + 100.0 + k as f32 * 200.0;
+                        r.spawn_dlight(
+                            Vec3::new(poi.x, poi.y, z),
+                            300.0, // rayon
+                            color,
+                            intensity,
+                            self.time_sec,
+                            9999.0,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Drain bots BR (v0.9.5) — `spawn_bot` détecte automatiquement
+        // le mode terrain et choisit un POI tier ≥ 2 pour le spawn.
+        // Gated par cvar `br_bots` (défaut 0 = carte vide pour
+        // exploration / tests visuels).
+        let br_bots_enabled = self.cvars.get_i32("br_bots").unwrap_or(0) != 0;
+        if br_bots_enabled && self.pending_local_bots > 0 {
+            let n = self.pending_local_bots;
+            self.pending_local_bots = 0;
+            self.ensure_player_rig_loaded();
+            for i in 0..n {
+                let bot_name = format!("brbot{:02}", i + 1);
+                self.spawn_bot(&bot_name, Some(3));
+            }
+            info!(
+                "BR: spawn initial {} bot(s) demandés, {} effectifs",
+                n,
+                self.bots.len()
+            );
+        } else {
+            // Drain les bots pending sans les spawn — sinon le compteur
+            // accumulerait à chaque map BR rechargée.
+            self.pending_local_bots = 0;
+            info!("BR: réunion vide (br_bots = 0) — pas de spawn de bots");
+        }
+    }
+
+    /// **Generic GLB prop loader** (v0.9.5+) — charge un asset GLB
+    /// disque et l'enregistre dans le renderer.  v0.9.5++ : stocke
+    /// aussi les lights extraites pour spawn au moment du place
+    /// d'instance.
+    fn load_prop_glb(&mut self, name: &str, paths: &[&str]) {
+        let bases = resolve_asset_search_bases();
+        let mut tried: Vec<String> = Vec::new();
+        for base in &bases {
+            for rel in paths {
+                let full = base.join(rel);
+                tried.push(full.display().to_string());
+                let bytes = match std::fs::read(&full) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                match q3_model::glb::GlbMesh::from_glb_bytes(&bytes) {
+                    Ok(mesh) => {
+                        info!(
+                            "prop GLB '{}' chargé : '{}' ({} verts, {} idx, radius {:.1}, {} lights)",
+                            name,
+                            full.display(),
+                            mesh.vertices.len(),
+                            mesh.indices.len(),
+                            mesh.radius(),
+                            mesh.lights.len(),
+                        );
+                        // Stocke les lights pour spawn au place.
+                        self.prop_lights.insert(name.to_string(), mesh.lights.clone());
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.upload_prop(name, &mesh);
+                        }
+                        return;
+                    }
+                    Err(e) => warn!("prop GLB '{}' '{}': {}", name, full.display(), e),
+                }
+            }
+        }
+        warn!(
+            "prop GLB '{}' : aucun asset trouvé. Cherché dans :\n  {}",
+            name,
+            tried.join("\n  ")
+        );
+    }
+
+    /// **Spawn des lights GLB** (v0.9.5++) — quand on a placé un
+    /// `RockProp` du nom donné, applique sa transform à chaque light
+    /// extraite du mesh et spawn une dlight monde correspondante.
+    fn spawn_glb_lights_for_prop(&mut self, prop_name: &str) {
+        let Some(lights) = self.prop_lights.get(prop_name).cloned() else { return; };
+        if lights.is_empty() { return; }
+        let Some(r) = self.renderer.as_mut() else { return; };
+        // Récupère toutes les instances du prop pour spawner leurs lights.
+        let instances: Vec<(Vec3, f32, f32)> = self
+            .rocks
+            .iter()
+            .filter(|p| p.prop_name == prop_name)
+            .map(|p| (p.pos, p.yaw, p.scale))
+            .collect();
+        for (pos, yaw, scale) in instances {
+            let cy = yaw.cos();
+            let sy = yaw.sin();
+            for light in &lights {
+                // Transform local → world : Y-up→Z-up, scale, rotate Z(yaw), translate.
+                let lx = light.position[0] * scale;
+                let ly = light.position[1] * scale; // Y local devient Z world
+                let lz = light.position[2] * scale;
+                let world_x = pos.x + cy * lx + sy * lz;
+                let world_y = pos.y + sy * lx - cy * lz;
+                let world_z = pos.z + ly;
+                let radius = if light.range > 0.0 {
+                    (light.range * scale).clamp(50.0, 800.0)
+                } else {
+                    300.0
+                };
+                let intensity = (light.intensity * 0.01).clamp(0.5, 5.0);
+                r.spawn_dlight(
+                    Vec3::new(world_x, world_y, world_z),
+                    radius,
+                    light.color,
+                    intensity,
+                    self.time_sec,
+                    9999.0,
+                );
+            }
+        }
+    }
+
+    fn load_rock_asset(&mut self) {
+        self.load_prop_glb(
+            "rock",
+            &["assets/models/rock_scatter.glb", "assets/models/rock.glb"],
+        );
+    }
+    fn load_statue_asset(&mut self) {
+        self.load_prop_glb(
+            "statue",
+            &["assets/models/statue.glb"],
+        );
+    }
+    fn load_building_asset(&mut self) {
+        self.load_prop_glb(
+            "building",
+            &["assets/models/building.glb"],
+        );
+    }
+    fn load_hellhound_asset(&mut self) {
+        self.load_prop_glb(
+            "hellhound",
+            &["assets/models/hellhound.glb"],
+        );
+    }
+    fn load_statue_femme_asset(&mut self) {
+        self.load_prop_glb(
+            "statue_femme",
+            &["assets/models/statue_femme.glb"],
+        );
+    }
+    fn load_grass_asset(&mut self) {
+        self.load_prop_glb(
+            "grass",
+            &["assets/models/grass.glb"],
+        );
+    }
+    fn load_quad_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "quad_pickup",
+            &["assets/models/quad_pickup.glb"],
+        );
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("quad_pickup") {
+                if radius > 0.001 {
+                    self.quad_pickup_scale = Some(40.0 / radius);
+                }
+            }
+        }
+    }
+    fn load_health_pack_asset(&mut self) {
+        self.load_prop_glb(
+            "health_pack",
+            &["assets/models/health_pack.glb"],
+        );
+        // Target world size ~22u — cohérent avec un MD3 health bobble.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("health_pack") {
+                if radius > 0.001 {
+                    self.health_pack_scale = Some(22.0 / radius);
+                    info!(
+                        "health_pack: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.health_pack_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_railgun_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "railgun_pickup",
+            &["assets/models/railgun_pickup.glb"],
+        );
+        // Target world size ~30u — taille d'un weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("railgun_pickup") {
+                if radius > 0.001 {
+                    self.railgun_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "railgun_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.railgun_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_grenade_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "grenade_ammo",
+            &["assets/models/grenade_ammo.glb"],
+        );
+        // Target world size ~25u — cohérent avec ammo_crate.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("grenade_ammo") {
+                if radius > 0.001 {
+                    self.grenade_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "grenade_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.grenade_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_rocket_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "rocket_ammo",
+            &["assets/models/rocket_ammo.glb"],
+        );
+        // Target world size ~25u — cohérent avec ammo_crate / grenade_ammo.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("rocket_ammo") {
+                if radius > 0.001 {
+                    self.rocket_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "rocket_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.rocket_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_cell_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "cell_ammo",
+            &["assets/models/cell_ammo.glb"],
+        );
+        // Target world size ~25u — cohérent avec les autres ammo crates.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("cell_ammo") {
+                if radius > 0.001 {
+                    self.cell_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "cell_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.cell_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_lg_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "lg_ammo",
+            &["assets/models/lg_ammo.glb"],
+        );
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("lg_ammo") {
+                if radius > 0.001 {
+                    self.lg_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "lg_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.lg_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_big_armor_asset(&mut self) {
+        self.load_prop_glb(
+            "big_armor",
+            &["assets/models/big_armor.glb"],
+        );
+        // Target world size ~30u — taille canonique d'un body armor Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("big_armor") {
+                if radius > 0.001 {
+                    self.big_armor_scale = Some(30.0 / radius);
+                    info!(
+                        "big_armor: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.big_armor_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_plasma_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "plasma_pickup",
+            &["assets/models/plasma_pickup.glb"],
+        );
+        // Target world size ~30u — comme railgun_pickup (weapon Q3).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("plasma_pickup") {
+                if radius > 0.001 {
+                    self.plasma_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "plasma_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.plasma_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_machinegun_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "machinegun_pickup",
+            &["assets/models/machinegun_pickup.glb"],
+        );
+        // Target world size ~30u — taille d'un weapon pickup Q3
+        // (cohérent avec plasma_pickup et railgun_pickup).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("machinegun_pickup") {
+                if radius > 0.001 {
+                    self.machinegun_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "machinegun_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.machinegun_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_bfg_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "bfg_pickup",
+            &["assets/models/bfg_pickup.glb"],
+        );
+        // Target world size ~32u — un peu plus gros que les autres
+        // weapon pickups (le BFG est imposant en Q3).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("bfg_pickup") {
+                if radius > 0.001 {
+                    self.bfg_pickup_scale = Some(32.0 / radius);
+                    info!(
+                        "bfg_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.bfg_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_lightninggun_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "lightninggun_pickup",
+            &["assets/models/lightninggun_pickup.glb"],
+        );
+        // Target world size ~30u — taille standard d'un weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("lightninggun_pickup") {
+                if radius > 0.001 {
+                    self.lightninggun_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "lightninggun_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.lightninggun_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_shotgun_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "shotgun_pickup",
+            &["assets/models/shotgun_pickup.glb"],
+        );
+        // Target world size ~30u — taille standard d'un weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("shotgun_pickup") {
+                if radius > 0.001 {
+                    self.shotgun_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "shotgun_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.shotgun_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_grenadelauncher_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "grenadelauncher_pickup",
+            &["assets/models/grenadelauncher_pickup.glb"],
+        );
+        // Target world size ~30u — taille standard weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("grenadelauncher_pickup") {
+                if radius > 0.001 {
+                    self.grenadelauncher_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "grenadelauncher_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.grenadelauncher_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_gauntlet_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "gauntlet_pickup",
+            &["assets/models/gauntlet_pickup.glb"],
+        );
+        // Target world size ~30u — taille standard weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("gauntlet_pickup") {
+                if radius > 0.001 {
+                    self.gauntlet_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "gauntlet_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.gauntlet_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_shotgun_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "shotgun_ammo",
+            &["assets/models/shotgun_ammo.glb"],
+        );
+        // Target world size ~18u (un peu plus petit que les autres
+        // ammo crates ~25u — user request : cartouches calibre 12 plus
+        // petites au sol qu'une vraie caisse de munitions).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("shotgun_ammo") {
+                if radius > 0.001 {
+                    self.shotgun_ammo_scale = Some(18.0 / radius);
+                    info!(
+                        "shotgun_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.shotgun_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_bfg_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "bfg_ammo",
+            &["assets/models/bfg_ammo.glb"],
+        );
+        // Target world size ~25u — cohérent avec les autres ammo crates.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("bfg_ammo") {
+                if radius > 0.001 {
+                    self.bfg_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "bfg_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.bfg_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_rocketlauncher_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "rocketlauncher_pickup",
+            &["assets/models/rocketlauncher_pickup.glb"],
+        );
+        // Target world size ~30u — taille standard weapon pickup Q3.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("rocketlauncher_pickup") {
+                if radius > 0.001 {
+                    self.rocketlauncher_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "rocketlauncher_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.rocketlauncher_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_combat_armor_asset(&mut self) {
+        self.load_prop_glb(
+            "combat_armor",
+            &["assets/models/combat_armor.glb"],
+        );
+        // Target world size ~28u — un peu plus petit que body armor 100.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("combat_armor") {
+                if radius > 0.001 {
+                    self.combat_armor_scale = Some(28.0 / radius);
+                    info!(
+                        "combat_armor: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.combat_armor_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_medkit_asset(&mut self) {
+        self.load_prop_glb(
+            "medkit",
+            &["assets/models/medkit.glb"],
+        );
+        // Target world size ~22u (cohérent avec health_pack).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("medkit") {
+                if radius > 0.001 {
+                    self.medkit_scale = Some(22.0 / radius);
+                    info!(
+                        "medkit: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.medkit_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_armor_shard_asset(&mut self) {
+        self.load_prop_glb(
+            "armor_shard",
+            &["assets/models/armor_shard.glb"],
+        );
+        // Target world size ~18u (petit shard, plus petit que combat 50).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("armor_shard") {
+                if radius > 0.001 {
+                    self.armor_shard_scale = Some(18.0 / radius);
+                    info!(
+                        "armor_shard: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.armor_shard_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_railgun_ammo_asset(&mut self) {
+        self.load_prop_glb(
+            "railgun_ammo",
+            &["assets/models/railgun_ammo.glb"],
+        );
+        // Target world size ~25u — cohérent avec les autres ammo crates.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("railgun_ammo") {
+                if radius > 0.001 {
+                    self.railgun_ammo_scale = Some(25.0 / radius);
+                    info!(
+                        "railgun_ammo: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.railgun_ammo_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_regen_pickup_asset(&mut self) {
+        self.load_prop_glb(
+            "regen_pickup",
+            &["assets/models/regen_pickup.glb"],
+        );
+        // Target world size ~30u — comme quad_pickup (powerup Q3).
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("regen_pickup") {
+                if radius > 0.001 {
+                    self.regen_pickup_scale = Some(30.0 / radius);
+                    info!(
+                        "regen_pickup: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.regen_pickup_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_ammo_crate_asset(&mut self) {
+        self.load_prop_glb(
+            "ammo_crate",
+            &["assets/models/ammo_crate.glb"],
+        );
+        // Calcule le scale auto pour matcher la taille standard d'un
+        // pickup MD3 Q3 (~25u) en mémoise dans `self`.
+        // Target world size = 25u — cible visuelle d'un MD3 ammo Q3.
+        // scale = target / mesh_radius.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("ammo_crate") {
+                if radius > 0.001 {
+                    self.ammo_crate_scale = Some(25.0 / radius);
+                    info!(
+                        "ammo_crate: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.ammo_crate_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+    fn load_tropical_asset(&mut self) {
+        self.load_prop_glb(
+            "tropical",
+            &["assets/models/tropical_pack.glb", "assets/models/tropical.glb"],
+        );
+    }
+
+    /// **Spawn rochers BR** — disséminés sur les zones rocheuses
+    /// (splat rock > 0.5) à des altitudes raisonnables.  Densité
+    /// variable selon le biome :
+    ///   * sommets (z > 800) : densité haute
+    ///   * pentes moyennes (200..800) : densité moyenne
+    ///   * sable côtier / végétation dense : faible
+    fn spawn_br_rocks(&mut self, terrain: &q3_terrain::Terrain) {
+        self.rocks.clear();
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("rock"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        // Auto-scale rock — target world size ~80u par rocher.
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("rock"))
+            .unwrap_or(1.0);
+        let base_rock_scale = if r_native > 0.001 { 80.0 / r_native } else { 1.0 };
+        // On échantillonne `n_samples` positions pseudo-aléatoires
+        // dans la grille du terrain et on accepte celles qui passent
+        // le filtre biome.  Hash-based pour reproductibilité d'une
+        // session à l'autre (pas de RNG pour le décor → on aime
+        // qu'un POI ait toujours les mêmes rochers).
+        const N_SAMPLES: usize = 1500;
+        let mut spawned = 0;
+        for k in 0..N_SAMPLES {
+            // Hash → coords dans la grille (évite distribution uniform
+            // pure qui donne des grilles visibles).
+            let h1 = (k.wrapping_mul(2654435761) ^ 0xDEADBEEF) as u32;
+            let h2 = (k.wrapping_mul(40503) ^ 0x12345678) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            // Position monde correspondante.
+            let wx = terrain.meta.origin_x
+                + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y
+                + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+            // Skip océan et eau.
+            if wz <= terrain.meta.water_level + 5.0 {
+                continue;
+            }
+            // Skip zones urbaines (les villes ont déjà leurs items, pas de rochers dedans).
+            let urban = terrain.biome_weight(wx, wy, 3);
+            if urban > 0.4 {
+                continue;
+            }
+            let rock_w = terrain.biome_weight(wx, wy, 0);
+            // Densité par biome — accept_proba scale par splat rock + altitude.
+            let alt_factor = if wz > 800.0 {
+                0.9
+            } else if wz > 200.0 {
+                0.5
+            } else {
+                0.15
+            };
+            let accept_proba = (rock_w * 0.7 + alt_factor * 0.3).clamp(0.0, 1.0);
+            // Rejection sampling via 3e hash.
+            let h3 = (k.wrapping_mul(73856093) ^ 0xCAFEBABE) as u32;
+            let r3 = (h3 & 0xffff) as f32 / 65535.0;
+            if r3 > accept_proba {
+                continue;
+            }
+            // Yaw aléatoire pour variété.
+            let yaw_h = (k.wrapping_mul(83492791) ^ 0xFEEDC0DE) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            // Scale variable [0.5, 1.5].
+            let scale_h = (k.wrapping_mul(2246822519) ^ 0xBADCAB1E) as u32;
+            let scale = 0.5 + (scale_h & 0xff) as f32 / 255.0 * 1.0;
+            // Tint blanc → couleurs natives de la baseColorTexture du GLB.
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: scale * base_rock_scale,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                prop_name: "rock",
+            });
+            spawned += 1;
+            if spawned >= 400 {
+                break; // cap pour ne pas exploser le cost de draw
+            }
+        }
+        info!("BR: {} rochers disséminés sur le terrain", self.rocks.len());
+    }
+
+    /// **Spawn props tropicaux BR** (v0.9.5+) — palmiers/plantes du
+    /// `tropical_pack.glb` en zones côtières (sable + bord de
+    /// végétation).  Densité haute près des plages, nulle en altitude.
+    /// **Spawn statues BR** (v0.9.5++) — 1 statue landmark par POI
+    /// tier ≥ 3.  Position : centre du POI, légèrement décalée pour
+    /// ne pas overlap les pickups.  Yaw aléatoire stable, scale auto
+    /// basé sur le radius natif (target ~120u — visible à distance,
+    /// signature visuelle des zones premium).  Stocké dans `self.rocks`
+    /// avec un nom de prop dédié pour réutiliser le pipeline.
+    fn spawn_br_statues(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("statue"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("statue"))
+            .unwrap_or(1.0);
+        let base_scale = if r_native > 0.001 { 120.0 / r_native } else { 1.0 };
+        let mut spawned = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            if poi.tier < 3 {
+                continue;
+            }
+            // Décalage léger autour du centre POI pour ne pas piler
+            // sur les items spawn.
+            let offset_x = (i as f32 * 13.0).sin() * 60.0;
+            let offset_y = (i as f32 * 13.0).cos() * 60.0;
+            let x = poi.x + offset_x;
+            let y = poi.y + offset_y;
+            let z = terrain.height_at(x, y);
+            if z <= terrain.meta.water_level + 5.0 {
+                continue; // skip océan / lagons
+            }
+            let yaw_h = (i.wrapping_mul(2654435761) ^ 0xC0DEC0DE) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            // Hack RockProp partagé — on encode le type via un name
+            // suffixe dans la matrice render. On ajoute un nouveau
+            // marqueur scale (3e signe) pour distinguer statue de
+            // rock+tropical.
+            // Simplification : statue = scale > 1000 (jamais atteint
+            // par rocks/tropical qui restent < 200).
+            self.rocks.push(RockProp {
+                pos: Vec3::new(x, y, z),
+                yaw,
+                scale: base_scale,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                prop_name: "statue",
+            });
+            spawned += 1;
+        }
+        info!(
+            "BR: {} statues placées sur POI tier ≥ 3 (radius={:.2}, scale base={:.1})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    /// **Spawn grass BR** (v0.9.5++) — touffes d'herbe disséminées
+    /// en zones végétales basse altitude (splat veg > 0.5, z < 400m).
+    /// Densité élevée (~600 touffes) pour casser l'uniforme du sol
+    /// vert.  Auto-scale ~25u (touffe d'herbe à hauteur cheville).
+    fn spawn_br_grass(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("grass"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("grass"))
+            .unwrap_or(1.0);
+        let base_scale = if r_native > 0.001 { 25.0 / r_native } else { 1.0 };
+        const N_SAMPLES: usize = 4000;
+        let mut spawned = 0usize;
+        for k in 0..N_SAMPLES {
+            let h1 = (k.wrapping_mul(2654435761) ^ 0x6BADBEEF) as u32;
+            let h2 = (k.wrapping_mul(40503) ^ 0x12345678) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            let wx = terrain.meta.origin_x + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+            if wz <= terrain.meta.water_level + 5.0 || wz > 400.0 {
+                continue; // skip océan + altitude
+            }
+            // Filtre : zones avec splat végétation > 0.5.
+            let veg = terrain.biome_weight(wx, wy, 2);
+            if veg < 0.4 {
+                continue;
+            }
+            let h3 = (k.wrapping_mul(73856093) ^ 0xCAFE) as u32;
+            // Densité scaled par poids végé.
+            if (h3 & 0xff) as f32 / 255.0 > veg {
+                continue;
+            }
+            let yaw_h = (k.wrapping_mul(83492791) ^ 0x55AA) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            let scale_h = (k.wrapping_mul(2246822519) ^ 0xBEAD) as u32;
+            let scale = 0.7 + (scale_h & 0xff) as f32 / 255.0 * 0.6;
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: base_scale * scale,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                prop_name: "grass",
+            });
+            spawned += 1;
+            if spawned >= 600 {
+                break;
+            }
+        }
+        info!(
+            "BR: {} touffes d'herbe disséminées (radius={:.2}, scale={:.2})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    /// **Spawn statues femme BR** (v0.9.5++) — décor sur les plages
+    /// et stations balnéaires (Beach POI). Une par plage majeure.
+    fn spawn_br_statue_femme(&mut self, terrain: &q3_terrain::Terrain) {
+        use q3_terrain::PoiKind;
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("statue_femme"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("statue_femme"))
+            .unwrap_or(1.0);
+        // Target ~80u (taille statue grande nature).
+        let base_scale = if r_native > 0.001 { 80.0 / r_native } else { 1.0 };
+        let mut spawned = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            if !matches!(poi.kind, PoiKind::Beach) || poi.tier < 2 {
+                continue;
+            }
+            // Centre POI (pas d'offset — la statue est l'attraction).
+            let x = poi.x;
+            let y = poi.y;
+            let z = terrain.height_at(x, y);
+            if z <= terrain.meta.water_level + 5.0 {
+                continue;
+            }
+            let yaw_h = (i.wrapping_mul(2654435761) ^ 0xFEEDC0FE) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            self.rocks.push(RockProp {
+                pos: Vec3::new(x, y, z),
+                yaw,
+                scale: base_scale,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                prop_name: "statue_femme",
+            });
+            spawned += 1;
+        }
+        info!(
+            "BR: {} statues_femme placées (Beach POI tier ≥ 2, scale={:.2})",
+            spawned, base_scale
+        );
+    }
+
+    /// **Spawn hellhounds BR** (v0.9.5++) — décors statiques style
+    /// Quake autour des POI Forest + Volcano. Petite meute par POI.
+    fn spawn_br_hellhounds(&mut self, terrain: &q3_terrain::Terrain) {
+        use q3_terrain::PoiKind;
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("hellhound"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("hellhound"))
+            .unwrap_or(1.0);
+        // Target ~30u (taille d'un chien à l'écran).
+        let base_scale = if r_native > 0.001 { 30.0 / r_native } else { 1.0 };
+        let mut spawned = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            // Forest = meute de 3-4 chiens, Volcano = meute de 5
+            // (gardien du cratère).
+            let count = match poi.kind {
+                PoiKind::Forest => 3,
+                PoiKind::Volcano => 5,
+                PoiKind::Cirque => 2,
+                _ => 0,
+            };
+            if count == 0 { continue; }
+            let ring = poi.radius * 0.4;
+            for k in 0..count {
+                let theta = (k as f32 / count as f32) * std::f32::consts::TAU
+                    + (i as f32 * 0.27);
+                let x = poi.x + theta.cos() * ring;
+                let y = poi.y + theta.sin() * ring;
+                let z = terrain.height_at(x, y);
+                if z <= terrain.meta.water_level + 5.0 {
+                    continue;
+                }
+                // Yaw face vers l'extérieur (sentinelle).
+                let yaw = theta;
+                self.rocks.push(RockProp {
+                    pos: Vec3::new(x, y, z),
+                    yaw,
+                    scale: base_scale,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                    prop_name: "hellhound",
+                });
+                spawned += 1;
+            }
+        }
+        info!(
+            "BR: {} hellhounds placés (Forest+Volcano+Cirque, radius={:.2}, scale={:.2})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    /// **Spawn buildings BR** (v0.9.5++) — clusters de bâtiments
+    /// dans les zones City/Town pour donner du relief vertical aux
+    /// quartiers urbains.  3-6 buildings par POI urbain en cercle
+    /// autour du centre.  Auto-scale ~250u (immeuble).  Yaw aligné
+    /// approximativement face au centre POI pour suggérer une rue.
+    fn spawn_br_buildings(&mut self, terrain: &q3_terrain::Terrain) {
+        use q3_terrain::PoiKind;
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("building"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("building"))
+            .unwrap_or(1.0);
+        let base_scale = if r_native > 0.001 { 250.0 / r_native } else { 1.0 };
+        let mut spawned = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            // Densité par tier : capitales = 6, towns = 3-4, autres = 0.
+            let count = match (poi.kind, poi.tier) {
+                (PoiKind::City, _) => 6,
+                (PoiKind::Town, t) if t >= 3 => 4,
+                (PoiKind::Town, _) => 3,
+                (PoiKind::Industrial | PoiKind::Airport, _) => 4,
+                _ => 0,
+            };
+            if count == 0 {
+                continue;
+            }
+            // Anneau de buildings autour du POI center.
+            let ring_radius = poi.radius * 0.55;
+            for k in 0..count {
+                let angle = (k as f32 / count as f32) * std::f32::consts::TAU
+                    + (i as f32 * 0.13);
+                let x = poi.x + angle.cos() * ring_radius;
+                let y = poi.y + angle.sin() * ring_radius;
+                let z = terrain.height_at(x, y);
+                if z <= terrain.meta.water_level + 5.0 {
+                    continue;
+                }
+                // Yaw face au centre POI (bâtiment "regarde" la place).
+                let to_center_x = poi.x - x;
+                let to_center_y = poi.y - y;
+                let yaw = to_center_y.atan2(to_center_x);
+                // Variation taille par building (±30%).
+                let var_h = (i.wrapping_mul(2654435761).wrapping_add(k as usize) ^ 0xBADC0DE)
+                    as u32;
+                let scale_var = 0.7 + (var_h & 0xff) as f32 / 255.0 * 0.6;
+                // Tint blanc → texture native du GLB.
+                self.rocks.push(RockProp {
+                    pos: Vec3::new(x, y, z),
+                    yaw,
+                    scale: base_scale * scale_var,
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                    prop_name: "building",
+                });
+                spawned += 1;
+            }
+        }
+        info!(
+            "BR: {} buildings placés sur zones urbaines (radius={:.2}, scale base={:.1})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    fn spawn_br_tropical(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("tropical"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        // Auto-scale tropical — target world size ~50u par plante.
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("tropical"))
+            .unwrap_or(1.0);
+        let base_trop_scale = if r_native > 0.001 { 50.0 / r_native } else { 1.0 };
+        // On stocke dans `self.rocks` aussi (struct identique) mais
+        // on tag avec un yaw + tint qui le différenciera côté queue
+        // (via un fanion en signe du scale, bidouille rapide).  Plus
+        // propre : nouvelle struct, mais par MVP on partage.
+        const N_SAMPLES: usize = 1200;
+        let mut spawned = 0;
+        for k in 0..N_SAMPLES {
+            let h1 = (k.wrapping_mul(2654435761) ^ 0xC0FFEE00) as u32;
+            let h2 = (k.wrapping_mul(40503) ^ 0x55AA55AA) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            let wx = terrain.meta.origin_x
+                + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y
+                + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+            // Skip océan + altitude.
+            if wz <= terrain.meta.water_level + 5.0 || wz > 200.0 {
+                continue;
+            }
+            let sand = terrain.biome_weight(wx, wy, 1);
+            let veg = terrain.biome_weight(wx, wy, 2);
+            // Accept seulement sur transitions sable/végé (côte) ou
+            // plein végé en basse altitude.
+            let prob = (sand * 0.6 + veg * 0.5).clamp(0.0, 1.0);
+            let h3 = (k.wrapping_mul(73856093) ^ 0xCAFEBABE) as u32;
+            let r3 = (h3 & 0xffff) as f32 / 65535.0;
+            if r3 > prob {
+                continue;
+            }
+            let yaw_h = (k.wrapping_mul(83492791) ^ 0xFEEDC0DE) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            let scale_h = (k.wrapping_mul(2246822519) ^ 0xBADCAB1E) as u32;
+            let scale = 0.6 + (scale_h & 0xff) as f32 / 255.0 * 0.8; // 0.6..1.4
+            // Tint vert tropical avec léger jitter.
+            let tj = ((scale_h >> 8) & 0x3f) as f32 / 63.0 * 0.25;
+            let tint = [0.7 + tj * 0.2, 0.95 - tj * 0.2, 0.5 + tj * 0.3, 1.0];
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: scale * base_trop_scale,
+                tint,
+                prop_name: "tropical",
+            });
+            spawned += 1;
+            if spawned >= 250 {
+                break;
+            }
+        }
+        info!("BR: {} props tropicaux disséminés", spawned);
+    }
+
+    /// **Bot frag drop** (v0.9.5++) — quand un bot meurt, drop un
+    /// item aléatoire au sol.  v0.9.5+++ : weapon-aware drops biaisés
+    /// sur l'arme du killer (frag au RL → drop rockets, frag au PG →
+    /// drop cells).  Plus : 2 % chance de powerup rare (Haste/Regen).
+    fn spawn_bot_drop(&mut self, pos: Vec3) {
+        let Some(r) = self.renderer.as_mut() else { return; };
+        let roll = rand_unit().abs();
+        // Arme du killer = arme active du joueur au moment du frag.
+        // Si le bot s'est suicidé (ring), pas de bias spécifique.
+        let killer_weapon = self.active_weapon;
+
+        let (kind, mesh_path) = if roll < 0.02 {
+            // 2 % powerup rare (Haste, lifetime court).
+            (
+                PickupKind::Powerup {
+                    powerup: PowerupKind::Haste,
+                    duration: 20.0,
+                },
+                "models/powerups/instant/haste.md3",
+            )
+        } else if roll < 0.27 {
+            (
+                PickupKind::Health { amount: 25, max_cap: 100 },
+                "models/powerups/health/medium_cross.md3",
+            )
+        } else if roll < 0.50 {
+            (
+                PickupKind::Armor { amount: 25 },
+                "models/powerups/armor/shard.md3",
+            )
+        } else if roll < 0.62 {
+            (
+                PickupKind::Health { amount: 5, max_cap: 200 },
+                "models/powerups/health/small_cross.md3",
+            )
+        } else if roll < 0.92 {
+            // Ammo bias : drop ammo de l'arme du killer (récompense
+            // immédiate). Fallback MG si l'arme n'a pas d'ammo (Gauntlet).
+            let (slot, amount, mesh) = match killer_weapon {
+                WeaponId::Rocketlauncher => (WeaponId::Rocketlauncher.slot(), 5, "models/powerups/ammo/rocketam.md3"),
+                WeaponId::Plasmagun => (WeaponId::Plasmagun.slot(), 30, "models/powerups/ammo/plasmaam.md3"),
+                WeaponId::Lightninggun => (WeaponId::Lightninggun.slot(), 30, "models/powerups/ammo/lightningam.md3"),
+                WeaponId::Railgun => (WeaponId::Railgun.slot(), 5, "models/powerups/ammo/railgunam.md3"),
+                WeaponId::Shotgun => (WeaponId::Shotgun.slot(), 10, "models/powerups/ammo/shotgunam.md3"),
+                WeaponId::Grenadelauncher => (WeaponId::Grenadelauncher.slot(), 5, "models/powerups/ammo/grenadeam.md3"),
+                WeaponId::Bfg => (WeaponId::Bfg.slot(), 5, "models/powerups/ammo/bfgam.md3"),
+                _ => (WeaponId::Machinegun.slot(), 50, "models/powerups/ammo/machinegunam.md3"),
+            };
+            (
+                PickupKind::Ammo { slot, amount },
+                mesh,
+            )
+        } else {
+            // Weapon drop = arme du killer (rare).
+            let (weapon, mesh) = match killer_weapon {
+                WeaponId::Rocketlauncher => (WeaponId::Rocketlauncher, "models/weapons2/rocketl/rocketl.md3"),
+                WeaponId::Plasmagun => (WeaponId::Plasmagun, "models/weapons2/plasma/plasma.md3"),
+                WeaponId::Railgun => (WeaponId::Railgun, "models/weapons2/railgun/railgun.md3"),
+                WeaponId::Lightninggun => (WeaponId::Lightninggun, "models/weapons2/lightning/lightning.md3"),
+                _ => (WeaponId::Shotgun, "models/weapons2/shotgun/shotgun.md3"),
+            };
+            (
+                PickupKind::Weapon { weapon, ammo: 5 },
+                mesh,
+            )
+        };
+        let mesh = match r.load_md3(&self.vfs, mesh_path) {
+            Ok(m) => m,
+            Err(_) => return, // mesh manquant → skip silencieusement
+        };
+        // Position : à hauteur du buste pour que le drop soit visible
+        // au-dessus du gib spawn (et pas enterré dans le sang).
+        let drop_pos = pos + Vec3::Z * 16.0;
+        self.pickups.push(PickupGpu {
+            mesh,
+            origin: drop_pos,
+            angles: q3_math::Angles::ZERO,
+            kind,
+            // Drop éphémère : 30 s avant qu'il ne disparaisse, pour
+            // ne pas saturer la carte si beaucoup de bots meurent.
+            respawn_cooldown: 30.0,
+            respawn_at: None,
+            entity_index: u16::MAX,
+        });
+    }
+
+    /// **Common SFX loader** (v0.9.5+) — charge tous les SFX joueur
+    /// (jump/footsteps/fire/pain/pickup/feedback) depuis le VFS.
+    /// Appelé par load_map (BSP) et load_terrain_map (BR) — sans ça
+    /// le mode BR était silencieux car les SFX étaient chargés
+    /// uniquement dans le path BSP.
+    fn load_common_sfx(&mut self) {
         // Sons couramment déclenchés par le joueur : on tente quelques
         // noms conventionnels Q3, les échecs deviennent None (pas bloquant).
         self.sfx_jump = None;
@@ -2991,28 +5649,139 @@ impl App {
                     "sfx: {} variante(s) de footstep chargée(s)",
                     self.sfx_footsteps.len()
                 );
+            } else {
+                warn!(
+                    "sfx: AUCUNE footstep chargée \
+                     (cherché sound/player/footsteps/step1-4.wav et boot1-4.wav)"
+                );
             }
             // Tir : on essaie une liste de chemins candidats par arme
             // (vanilla + variantes connues). Le 1er existant gagne.
             // Loggue le succès pour diagnostiquer rapidement les armes
             // muettes — historique : RL silencieux sur certains pak0
             // partiels où `rocklf1a.wav` n'était pas présent.
+            // **Discovery VFS-based** (v0.9.5++) — au lieu de chercher
+            // des chemins hardcoded canoniques, on liste TOUS les .wav
+            // sous `sound/weapons/` et on les matche par keyword sur le
+            // nom de fichier.  Robuste face aux variations de paks
+            // (Steam, demo, mods, custom).
+            let all_weapon_wavs: Vec<String> = self
+                .vfs
+                .list_prefix("sound/weapons/")
+                .into_iter()
+                .filter(|p| p.ends_with(".wav"))
+                .collect();
+            info!(
+                "sfx: {} fichiers .wav trouvés sous sound/weapons/",
+                all_weapon_wavs.len()
+            );
+            if all_weapon_wavs.is_empty() {
+                warn!(
+                    "sfx: AUCUN .wav trouvé sous sound/weapons/ — vérifie \
+                     le path de baseq3 et la présence des paks (pak0.pk3 etc.)"
+                );
+            } else {
+                // Log un échantillon pour diagnostic.
+                for sample in all_weapon_wavs.iter().take(8) {
+                    info!("sfx: dispo `{}`", sample);
+                }
+                if all_weapon_wavs.len() > 8 {
+                    info!("sfx: ...et {} autres", all_weapon_wavs.len() - 8);
+                }
+            }
+            // Match keyword-based : pour chaque arme, cherche un .wav
+            // dont le path contient un keyword associé + indice "fire/launch".
+            // Préfère les paths canoniques d'abord (faster + plus précis),
+            // sinon fallback sur n'importe quel .wav contenant le keyword.
             for w in WeaponId::ALL {
                 let mut loaded = false;
+                // 1. Essai des paths canoniques (rapide).
                 for &path in w.fire_sfx_paths() {
                     if let Some(h) = try_load_sfx(&self.vfs, snd, path) {
-                        info!("sfx: {:?} ← `{}`", w, path);
+                        info!("sfx: {:?} ← `{}` (canonique)", w, path);
                         self.sfx_fire.push((w, h));
                         loaded = true;
                         break;
                     }
                 }
+                // 2. Fallback : keyword match sur le listing VFS.
+                if !loaded {
+                    let keywords: &[&str] = match w {
+                        WeaponId::Gauntlet => &["melee", "gaunt", "fstatck"],
+                        WeaponId::Machinegun => &["machgun", "machinegun", "machgf", "mg_"],
+                        WeaponId::Shotgun => &["shotgun", "sshot"],
+                        WeaponId::Grenadelauncher => &["grenade", "grenlf", "gl_"],
+                        WeaponId::Rocketlauncher => &["rocket", "rocklf", "rl_"],
+                        WeaponId::Lightninggun => &["lightning", "lg_"],
+                        WeaponId::Railgun => &["railgun", "railgf", "rail"],
+                        WeaponId::Plasmagun => &["plasma", "hyprbf", "plasx"],
+                        WeaponId::Bfg => &["bfg"],
+                    };
+                    for path in &all_weapon_wavs {
+                        let lower = path.to_lowercase();
+                        if keywords.iter().any(|kw| lower.contains(kw))
+                            && (lower.contains("fire") || lower.contains("f1") || lower.contains("launch"))
+                        {
+                            if let Some(h) = try_load_sfx(&self.vfs, snd, path) {
+                                info!("sfx: {:?} ← `{}` (keyword match)", w, path);
+                                self.sfx_fire.push((w, h));
+                                loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 3. 2ème fallback : n'importe quel .wav contenant le keyword.
+                if !loaded {
+                    let keywords: &[&str] = match w {
+                        WeaponId::Gauntlet => &["melee", "gaunt"],
+                        WeaponId::Machinegun => &["machgun", "machinegun", "machgf"],
+                        WeaponId::Shotgun => &["shotgun", "sshot"],
+                        WeaponId::Grenadelauncher => &["grenade", "grenlf"],
+                        WeaponId::Rocketlauncher => &["rocket", "rocklf"],
+                        WeaponId::Lightninggun => &["lightning"],
+                        WeaponId::Railgun => &["railgun", "railgf", "rail"],
+                        WeaponId::Plasmagun => &["plasma", "hyprbf"],
+                        WeaponId::Bfg => &["bfg"],
+                    };
+                    for path in &all_weapon_wavs {
+                        let lower = path.to_lowercase();
+                        if keywords.iter().any(|kw| lower.contains(kw)) {
+                            if let Some(h) = try_load_sfx(&self.vfs, snd, path) {
+                                info!("sfx: {:?} ← `{}` (keyword loose match)", w, path);
+                                self.sfx_fire.push((w, h));
+                                loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if !loaded {
                     warn!(
-                        "sfx: arme {:?} SANS son de tir (aucun candidat trouvé : {:?})",
-                        w,
-                        w.fire_sfx_paths()
+                        "sfx: arme {:?} SANS son de tir (canonique + keyword échec)",
+                        w
                     );
+                }
+            }
+            // **Universal fallback** (v0.9.5++) — si AU MOINS une arme a
+            // un son chargé, toutes les armes sans son héritent du
+            // premier sample disponible.  Garantit qu'aucune arme ne
+            // reste muette tant qu'un seul .wav weapons existe sur le
+            // disque.  Cas d'usage : pak0 partiels où seul le shotgun
+            // est présent → les 8 autres armes utilisent ce sample.
+            if !self.sfx_fire.is_empty()
+                && self.sfx_fire.len() < WeaponId::ALL.len()
+            {
+                let fallback_handle = self.sfx_fire[0].1;
+                let fallback_weapon = self.sfx_fire[0].0;
+                for w in WeaponId::ALL {
+                    if !self.sfx_fire.iter().any(|(other, _)| *other == w) {
+                        warn!(
+                            "sfx: arme {:?} muette → fallback sur le sample de {:?}",
+                            w, fallback_weapon
+                        );
+                        self.sfx_fire.push((w, fallback_handle));
+                    }
                 }
             }
             info!("sfx: {}/{} arme(s) avec son de tir",
@@ -3234,275 +6003,318 @@ impl App {
                 }
             }
         }
-        // Reset du timer "dernier frag" pour qu'un kill en début de
-        // nouvelle map ne déclenche pas un Excellent hérité de la map
-        // précédente. NEG_INFINITY → `time_sec - last_frag_at > 2.0s`
-        // garanti pour le 1er frag.
-        self.last_frag_at = f32::NEG_INFINITY;
-        // Et pareil pour le combo Railgun : une nouvelle map remet le
-        // tracker à zéro, on ne veut pas qu'un hit RG de la map
-        // précédente valide un Impressive sur le premier hit d'après.
-        self.rg_last_hit = false;
 
-        // Pickups : pour chaque entité avec un MD3 conventionnel, on
-        // charge le mesh et on stocke (mesh, origin, angles). Les erreurs
-        // individuelles sont loggées sans bloquer le chargement — les PK3
-        // de démo n'ont pas forcément tous les weapons2/…
-        self.pickups.clear();
-        if let Some(r) = self.renderer.as_mut() {
-            let mut loaded = 0usize;
-            let mut missing = 0usize;
-            for (i, ent) in world.entities.iter().enumerate() {
-                let Some(path) = ent.kind.pickup_model_path() else {
-                    continue;
+    }
+
+    /// **Drone GLB asset** (v0.9.5) — charge `assets/models/drone.glb`
+    /// si présent et upload le mesh vers le pipeline drone du
+    /// renderer.  Échec silencieux si absent (pas d'asset = pas de
+    /// drones, gameplay identique).
+    fn load_drone_asset(&mut self) {
+        const PATHS: &[&str] = &[
+            "assets/models/drone.glb",
+            "models/drone.glb",
+            "assets/drone.glb",
+        ];
+        let bases = resolve_asset_search_bases();
+        let mut tried: Vec<String> = Vec::new();
+        for base in &bases {
+            for rel in PATHS {
+                let full = base.join(rel);
+                tried.push(full.display().to_string());
+                let bytes = match std::fs::read(&full) {
+                    Ok(b) => b,
+                    Err(_) => continue,
                 };
-                match r.load_md3(&self.vfs, path) {
-                    Ok(mesh) => {
-                        let (kind, respawn_cooldown) = PickupKind::from_entity(&ent.kind);
-                        self.pickups.push(PickupGpu {
-                            mesh,
-                            origin: ent.origin,
-                            angles: ent.angles,
-                            kind,
-                            respawn_cooldown,
-                            respawn_at: None,
-                            entity_index: i as u16,
-                        });
-                        loaded += 1;
-                    }
-                    Err(e) => {
-                        missing += 1;
-                        warn!("md3 '{path}' KO: {e}");
-                    }
-                }
-            }
-            info!("pickups: {} chargés, {} manquants", loaded, missing);
-
-            // Viewmodels : un mesh par arme détenue. Les absents sont
-            // loggés en warn mais ne bloquent pas la map — on n'affiche
-            // simplement pas de viewmodel pour l'arme concernée.
-            self.viewmodels.clear();
-            for w in WeaponId::ALL {
-                match r.load_md3(&self.vfs, w.viewmodel_path()) {
+                match q3_model::glb::GlbMesh::from_glb_bytes(&bytes) {
                     Ok(mesh) => {
                         info!(
-                            "viewmodel {}: '{}' ({} frames)",
-                            w.name(),
-                            w.viewmodel_path(),
-                            mesh.num_frames()
+                            "drone GLB chargé : '{}' ({} verts, radius {:.1})",
+                            full.display(),
+                            mesh.vertices.len(),
+                            mesh.radius()
                         );
-                        self.viewmodels.push((w, mesh));
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.upload_drone_mesh(&mesh);
+                        }
+                        return;
                     }
-                    Err(_) => warn!("viewmodel {}: asset manquant", w.name()),
+                    Err(e) => warn!("drone GLB '{}': {}", full.display(), e),
                 }
             }
-
-            // Rocket volant — MD3 partagé pour tous les projectiles rocket.
-            // Absent = projectile invisible, mais le gameplay tourne quand même.
-            self.rocket_mesh = r
-                .load_md3(&self.vfs, "models/ammo/rocket/rocket.md3")
-                .ok();
-            // Plasma volant — Q3 original utilise un sprite, pas un MD3 ;
-            // on tente quelques noms connus, sinon silencieux (invisible).
-            const PLASMA_MESH_CANDIDATES: &[&str] = &[
-                "models/weaphits/plasma.md3",
-                "models/weaphits/plasmball.md3",
-                "models/ammo/plasma/plasma.md3",
-            ];
-            self.plasma_mesh = PLASMA_MESH_CANDIDATES
-                .iter()
-                .find_map(|p| r.load_md3(&self.vfs, p).ok());
-            // Grenade volante — un seul nom conventionnel dans les pk3 Q3.
-            const GRENADE_MESH_CANDIDATES: &[&str] = &[
-                "models/ammo/grenade1.md3",
-                "models/weaphits/grenade1.md3",
-                "models/ammo/grenade/grenade.md3",
-            ];
-            self.grenade_mesh = GRENADE_MESH_CANDIDATES
-                .iter()
-                .find_map(|p| r.load_md3(&self.vfs, p).ok());
         }
+        warn!(
+            "drone GLB : aucun asset trouvé. Cherché dans :\n  {}",
+            tried.join("\n  ")
+        );
+    }
 
-        // Nouvelle map → on remet à zéro les projectiles / explosions de
-        // l'ancienne instance pour éviter des frames fantômes.
-        self.projectiles.clear();
-        self.explosions.clear();
-        self.particles.clear();
-        // Nouveau match : on repart à zéro sur les frags + état d'intermission.
-        self.frags = 0;
-        self.deaths = 0;
-        self.match_winner = None;
-        self.warmup_until = self.time_sec + WARMUP_DURATION;
-        self.first_blood_announced = false;
-        self.total_shots = 0;
-        self.total_hits = 0;
-        self.time_warnings_fired = 0;
-        // On décale virtuellement le départ du chrono à la fin du warmup
-        // pour que `time_remaining` reste borné à `TIME_LIMIT_SECONDS`
-        // pendant le compte à rebours.
-        self.match_start_at = self.warmup_until;
-
-        // Nouvelle map → on purge les bots de la précédente (ils avaient des
-        // waypoints et une physique liés à l'ancien monde).
-        self.bots.clear();
-
-        // Jump pads + téléporteurs — reconstruction complète à chaque map.
-        // Résolution des `target → target_position / misc_teleporter_dest`
-        // via `World::find_by_targetname`, qu'on a déjà.
-        self.jump_pads.clear();
-        self.teleporters.clear();
-        self.hurt_zones.clear();
-        // Stoppe les ambient speakers de la map précédente AVANT d'en
-        // lancer de nouveaux — sinon chaque map change laisserait
-        // fuiter un ou plusieurs `SpatialSink` toujours vivants,
-        // mixant deux ambiances à la fois.
-        if let Some(snd) = self.sound.as_ref() {
-            for h in self.ambient_speakers.drain(..) {
-                snd.stop_loop(h);
-            }
+    /// **Spawn drones BR** (v0.9.5) — pose 6 drones en orbites
+    /// concentriques au-dessus du centre de l'île, à des altitudes
+    /// et rayons variés.  Décalage de phase par drone pour qu'ils
+    /// ne soient pas tous au même endroit.
+    fn spawn_br_drones(&mut self, terrain: &q3_terrain::Terrain) {
+        self.drones.clear();
+        // Sans renderer ou sans mesh chargé, inutile de spawner.
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.drone_has_mesh())
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let center = terrain.center();
+        // 6 drones dans 3 orbites + 2 hauteurs. Altitudes baissées
+        // (800-1400) et rayons réduits pour qu'ils restent dans le
+        // FOV joueur sans avoir à viser le ciel.
+        const SPECS: &[(f32, f32, f32, f32, [f32; 4])] = &[
+            ( 2_500.0,  900.0,  0.15, 0.0,                        [0.85, 0.92, 1.00, 1.0]),
+            ( 2_500.0,  900.0,  0.15, std::f32::consts::PI,       [0.95, 0.85, 0.55, 1.0]),
+            ( 4_500.0, 1_200.0, -0.10, 1.0,                        [0.70, 0.80, 1.00, 1.0]),
+            ( 4_500.0, 1_200.0, -0.10, 1.0 + std::f32::consts::PI, [0.95, 0.95, 0.95, 1.0]),
+            ( 6_500.0, 1_400.0,  0.07, 2.0,                        [1.00, 0.65, 0.40, 1.0]),
+            ( 6_500.0, 1_400.0,  0.07, 2.0 + std::f32::consts::PI, [0.55, 0.85, 1.00, 1.0]),
+        ];
+        // **Auto-scale drone** (v0.9.5++) — calcule le scale pour
+        // que la silhouette du drone ait ~600u dans le monde (visible
+        // depuis 5km). target / mesh_radius. Garde-fou si radius
+        // dégénéré (asset boggy) → fallback 100.
+        let r_mesh = self.renderer.as_ref().map(|r| r.drone_radius()).unwrap_or(0.0);
+        let base_scale = if r_mesh > 0.001 {
+            600.0 / r_mesh
         } else {
-            self.ambient_speakers.clear();
+            100.0
+        };
+        for &(radius, alt, ang_speed, phase, tint) in SPECS {
+            self.drones.push(Drone {
+                orbit_center: center,
+                orbit_radius: radius,
+                altitude: alt,
+                angular_speed: ang_speed,
+                phase,
+                scale: base_scale * (1.0 + (phase * 0.4).sin() * 0.25),
+                tint,
+            });
         }
-        self.on_jumppad_idx = None;
-        self.on_teleport_idx = None;
-        let gravity = self.params.gravity.max(1.0);
-        for ent in &world.entities {
-            match ent.kind {
-                EntityKind::TriggerPush => {
-                    let Some(target_name) = ent.target.as_deref() else {
-                        warn!("trigger_push #{:?} sans `target` — ignoré", ent.id);
-                        continue;
-                    };
-                    let Some(dst) = world.find_by_targetname(target_name).next() else {
-                        warn!(
-                            "trigger_push #{:?}: cible '{}' introuvable",
-                            ent.id, target_name
-                        );
-                        continue;
-                    };
-                    let bounds = ent.bounds;
-                    let origin = (bounds.mins + bounds.maxs) * 0.5;
-                    // AimAtTarget de g_trigger.c :
-                    //   height = dest.z - origin.z
-                    //   time   = sqrt(height / (0.5 * gravity))
-                    //   horiz  = (dest - origin).xy, puis scale pour qu'on
-                    //            atterrisse sur la cible au moment `time`.
-                    //   result.z = time * gravity (valeur absolue du "up kick")
-                    let height = dst.origin.z - origin.z;
-                    if height <= 0.0 {
-                        warn!(
-                            "trigger_push #{:?}: cible non au-dessus (h={:.1}), ignoré",
-                            ent.id, height
-                        );
-                        continue;
-                    }
-                    let time = (height / (0.5 * gravity)).sqrt();
-                    if !time.is_finite() || time <= 0.0 {
-                        continue;
-                    }
-                    let mut dir = dst.origin - origin;
-                    dir.z = 0.0;
-                    let dist = dir.length();
-                    let mut v = if dist > 1e-3 {
-                        (dir / dist) * (dist / time)
-                    } else {
-                        Vec3::ZERO
-                    };
-                    v.z = time * gravity;
-                    self.jump_pads.push(JumpPad {
-                        bounds,
-                        center: origin,
-                        launch_velocity: v,
-                    });
-                }
-                EntityKind::TriggerHurt => {
-                    let bounds = ent.bounds;
-                    let damage = extra_i32(ent, "dmg").unwrap_or(5).max(1);
-                    let spawnflags = extra_i32(ent, "spawnflags").unwrap_or(0);
-                    // Spawnflags Q3 — cf. g_trigger.c :
-                    //   bit 0 = START_OFF, bit 1 = SILENT,
-                    //   bit 2 = NO_PROTECTION, bit 4 = SLOW.
-                    // START_OFF n'est pas supporté (on n'a pas de targetname
-                    // dispatcher — tout part enabled). C'est OK pour q3dm*.
-                    let slow = (spawnflags & 16) != 0;
-                    let no_protection = (spawnflags & 4) != 0;
-                    let interval = if slow { 1.0 } else { 0.1 };
-                    // Label kill-feed : on devine lave / void / standard
-                    // depuis la hauteur de la zone (les void drops sont
-                    // typiquement de très larges zones tout en bas de map).
-                    // Approximation, mais plus parlant qu'un tag "HURT"
-                    // générique. Damage ≥ 100 = instant kill (void typique).
-                    let label: &'static str = if damage >= 100 {
-                        "VOID"
-                    } else if no_protection {
-                        "LAVA"
-                    } else {
-                        "HURT"
-                    };
-                    self.hurt_zones.push(HurtZone {
-                        bounds,
-                        damage,
-                        interval,
-                        next_at: 0.0,
-                        no_protection,
-                        label,
-                    });
-                }
-                EntityKind::TriggerTeleport => {
-                    let Some(target_name) = ent.target.as_deref() else {
-                        warn!("trigger_teleport #{:?} sans `target` — ignoré", ent.id);
-                        continue;
-                    };
-                    let Some(dst) = world.find_by_targetname(target_name).next() else {
-                        warn!(
-                            "trigger_teleport #{:?}: cible '{}' introuvable",
-                            ent.id, target_name
-                        );
-                        continue;
-                    };
-                    let bounds = ent.bounds;
-                    let src_center = (bounds.mins + bounds.maxs) * 0.5;
-                    self.teleporters.push(Teleporter {
-                        bounds,
-                        src_center,
-                        dst_origin: dst.origin,
-                        dst_angles: dst.angles,
-                    });
-                }
-                // `func_plat` (ascenseurs) : non implémenté — requiert un
-                // système de *brush mover* dynamique dans `q3-collision`
-                // (pour qu'un joueur puisse monter dessus pendant que le
-                // brush translate) + un pipeline de transform par
-                // sous-modèle dans `q3-renderer` (pour dessiner la chose
-                // animée). Les q3dm1-13 de base n'utilisent pas ce
-                // classname, donc on se contente de le logger pour ne pas
-                // flooder de warnings sur les maps qui en contiennent
-                // (q3tourney*, maps custom…).
-                EntityKind::FuncPlat => {
-                    debug!(
-                        "func_plat #{:?} détecté — non implémenté, traité comme non-bloquant",
-                        ent.id
+        info!(
+            "BR: {} drones spawnés (mesh radius={:.2}, scale base={:.1})",
+            self.drones.len(),
+            r_mesh,
+            base_scale,
+        );
+    }
+
+    /// **Weapon / projectile assets** (v0.9.5) — chargé à chaque map
+    /// load (BSP ou BR terrain) pour avoir les viewmodels + rocket /
+    /// plasma / grenade meshes.  Sans ça, les pickups d'arme en BR
+    /// ne montraient PAS de viewmodel quand on switche dessus.
+    fn load_weapon_assets(&mut self) {
+        let Some(r) = self.renderer.as_mut() else { return; };
+        self.viewmodels.clear();
+        for w in WeaponId::ALL {
+            match r.load_md3(&self.vfs, w.viewmodel_path()) {
+                Ok(mesh) => {
+                    info!(
+                        "viewmodel {}: '{}' ({} frames)",
+                        w.name(),
+                        w.viewmodel_path(),
+                        mesh.num_frames()
                     );
+                    self.viewmodels.push((w, mesh));
                 }
-                _ => {
-                    // target_speaker : on les traite dans une passe
-                    // séparée ci-dessous pour éviter de dupliquer le
-                    // code de chargement audio sur chaque bras du match.
-                    if is_target_speaker(ent) {
-                        self.spawn_target_speaker(ent);
+                Err(_) => warn!("viewmodel {}: asset manquant", w.name()),
+            }
+        }
+        self.rocket_mesh = r
+            .load_md3(&self.vfs, "models/ammo/rocket/rocket.md3")
+            .ok();
+        const PLASMA_MESH_CANDIDATES: &[&str] = &[
+            "models/weaphits/plasma.md3",
+            "models/weaphits/plasmball.md3",
+            "models/ammo/plasma/plasma.md3",
+        ];
+        self.plasma_mesh = PLASMA_MESH_CANDIDATES
+            .iter()
+            .find_map(|p| r.load_md3(&self.vfs, p).ok());
+        const GRENADE_MESH_CANDIDATES: &[&str] = &[
+            "models/ammo/grenade1.md3",
+            "models/weaphits/grenade1.md3",
+            "models/ammo/grenade/grenade.md3",
+        ];
+        self.grenade_mesh = GRENADE_MESH_CANDIDATES
+            .iter()
+            .find_map(|p| r.load_md3(&self.vfs, p).ok());
+    }
+
+    /// **BR pickups spawn** (v0.9.5) — pose un set d'items autour de
+    /// chaque POI proportionnel à son tier. Modèle :
+    /// * tier 4 : Quad/Mega Health + RG + RL + ammo (5-6 items)
+    /// * tier 3 : MH + RA + RL ou PG + ammo (4 items)
+    /// * tier 2 : SG/MG + health/armor (3 items)
+    ///
+    /// Les items sont disposés en cercle 200u de rayon autour du centre
+    /// POI, à 30u au-dessus du sol pour ne pas être enterrés.
+    /// `respawn_cooldown` = 9999.0 (i.e. jamais en BR — un item ramassé
+    /// est perdu pour le match).
+    fn spawn_br_pickups(&mut self) {
+        use q3_terrain::PoiKind;
+
+        self.pickups.clear();
+        let Some(terrain) = self.terrain.as_ref().cloned() else {
+            return;
+        };
+        let Some(_renderer) = self.renderer.as_mut() else {
+            return;
+        };
+
+        // Spec d'items par tier (path MD3, kind).  On utilise les
+        // chemins canoniques Q3 pak0 — chargement échoue en silence
+        // si l'asset manque, l'item est juste skip.
+        struct ItemSpec {
+            path: &'static str,
+            kind: PickupKind,
+        }
+        let tier4: &[ItemSpec] = &[
+            ItemSpec {
+                path: "models/powerups/instant/quad.md3",
+                kind: PickupKind::Powerup {
+                    powerup: PowerupKind::QuadDamage,
+                    duration: 30.0,
+                },
+            },
+            ItemSpec {
+                path: "models/powerups/health/mega_cross.md3",
+                kind: PickupKind::Health { amount: 100, max_cap: 200 },
+            },
+            ItemSpec {
+                path: "models/weapons2/railgun/railgun.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Railgun,
+                    ammo: 10,
+                },
+            },
+            ItemSpec {
+                path: "models/weapons2/rocketl/rocketl.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Rocketlauncher,
+                    ammo: 10,
+                },
+            },
+            ItemSpec {
+                path: "models/powerups/armor/armor_red.md3",
+                kind: PickupKind::Armor { amount: 100 },
+            },
+        ];
+        let tier3: &[ItemSpec] = &[
+            ItemSpec {
+                path: "models/powerups/health/large_cross.md3",
+                kind: PickupKind::Health { amount: 50, max_cap: 100 },
+            },
+            ItemSpec {
+                path: "models/powerups/armor/armor_yel.md3",
+                kind: PickupKind::Armor { amount: 50 },
+            },
+            ItemSpec {
+                path: "models/weapons2/plasma/plasma.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Plasmagun,
+                    ammo: 50,
+                },
+            },
+            ItemSpec {
+                path: "models/weapons2/rocketl/rocketl.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Rocketlauncher,
+                    ammo: 10,
+                },
+            },
+        ];
+        let tier2: &[ItemSpec] = &[
+            ItemSpec {
+                path: "models/weapons2/shotgun/shotgun.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Shotgun,
+                    ammo: 10,
+                },
+            },
+            ItemSpec {
+                path: "models/weapons2/machinegun/machinegun.md3",
+                kind: PickupKind::Weapon {
+                    weapon: WeaponId::Machinegun,
+                    ammo: 100,
+                },
+            },
+            ItemSpec {
+                path: "models/powerups/health/medium_cross.md3",
+                kind: PickupKind::Health { amount: 25, max_cap: 100 },
+            },
+            ItemSpec {
+                path: "models/powerups/armor/shard.md3",
+                kind: PickupKind::Armor { amount: 5 },
+            },
+        ];
+
+        let mut spawned = 0usize;
+        let mut missing = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            let specs: &[ItemSpec] = match poi.tier {
+                4 => tier4,
+                3 => tier3,
+                2 => tier2,
+                _ => continue,
+            };
+            // Bonus pour les POI iconiques (Volcano/City) — un set
+            // tier-au-dessus pose une couche d'items rares.
+            let _bonus = matches!(poi.kind, PoiKind::Volcano | PoiKind::City);
+
+            // **Mode exploration** (v0.9.5++) — si `br_bots=0`, on ne
+            // spawn QUE des powerups (Quad / Regen / Haste / etc.) ET
+            // rochers, comme demandé par le user.  Les armes / armures /
+            // health crosses sont skip.
+            let exploration = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
+            for (k, spec) in specs.iter().enumerate() {
+                if exploration && !matches!(spec.kind, PickupKind::Powerup { .. }) {
+                    continue;
+                }
+                // Position en cercle autour du POI.
+                let theta = (k as f32 / specs.len() as f32) * std::f32::consts::TAU;
+                let r_off = 100.0 + (i as f32).sin() * 30.0;
+                let x = poi.x + theta.cos() * r_off;
+                let y = poi.y + theta.sin() * r_off;
+                let z = terrain.height_at(x, y) + 30.0;
+
+                let mesh_res = self
+                    .renderer
+                    .as_mut()
+                    .map(|r| r.load_md3(&self.vfs, spec.path));
+                let mesh = match mesh_res {
+                    Some(Ok(m)) => m,
+                    Some(Err(_)) => {
+                        missing += 1;
+                        continue;
                     }
-                }
+                    None => continue,
+                };
+                self.pickups.push(PickupGpu {
+                    mesh,
+                    origin: Vec3::new(x, y, z),
+                    angles: q3_math::Angles::ZERO,
+                    kind: spec.kind.clone(),
+                    // BR : pas de respawn (un item ramassé est perdu).
+                    respawn_cooldown: 9999.0,
+                    respawn_at: None,
+                    entity_index: u16::MAX,
+                });
+                spawned += 1;
             }
         }
         info!(
-            "world: {} jump pad(s), {} téléporteur(s), {} hurt zone(s), {} speaker(s) loopés",
-            self.jump_pads.len(),
-            self.teleporters.len(),
-            self.hurt_zones.len(),
-            self.ambient_speakers.len()
+            "BR pickups: {} placés sur {} POI ({} assets manquants)",
+            spawned,
+            terrain.pois().len(),
+            missing
         );
-
-        self.world = Some(world);
     }
 
     /// Instancie un `target_speaker` de la map courante.
@@ -3622,19 +6434,9 @@ impl App {
                     } else {
                         format!("maps/{name}.bsp")
                     };
+                    // load_map drain pending_local_bots en interne
+                    // depuis v0.9.3 — pas besoin de dupliquer ici.
                     self.load_map(&path);
-                    // Si on a `--bots N` en attente de spawn (cas où le
-                    // joueur a chargé la map via le menu plutôt que via
-                    // `--map`), on les spawn ici aussi.
-                    if self.pending_local_bots > 0 {
-                        let n = self.pending_local_bots;
-                        self.pending_local_bots = 0;
-                        for i in 0..n {
-                            let bot_name = format!("bot{:02}", i + 1);
-                            self.spawn_bot(&bot_name, Some(3));
-                        }
-                        info!("solo: {n} bot(s) spawnés post-map (via menu)");
-                    }
                 }
                 PendingAction::AddBot(name, skill) => {
                     // Dispatch : si on est serveur réseau, le bot va
@@ -3725,7 +6527,75 @@ impl App {
                         prev.map(|p| format!(" (remplace {p:?})")).unwrap_or_default(),
                     );
                 }
+                PendingAction::MusicPlay(path) => {
+                    self.handle_music_play(&path);
+                }
+                PendingAction::MusicStop => {
+                    if let Some(snd) = self.sound.as_ref() {
+                        snd.stop_music();
+                        info!("music: stopped");
+                    }
+                }
+                PendingAction::MapDlList => {
+                    info!("mapdl: catalogue ({} entrées) :", self.map_dl.catalog.len());
+                    for line in self.map_dl.list_for_console() {
+                        info!("{}", line);
+                    }
+                    info!("mapdl: utilise `mapdl get <id>` pour télécharger");
+                }
+                PendingAction::MapDlGet(id) => {
+                    self.map_dl.start(&id);
+                }
+                PendingAction::MapDlStatus => {
+                    let st = self.map_dl.status_snapshot();
+                    match st {
+                        crate::map_dl::DownloadStatus::Idle => {
+                            info!("mapdl: idle (aucun job actif)");
+                        }
+                        crate::map_dl::DownloadStatus::Downloading { id, received, total } => {
+                            let pct = if total > 0 {
+                                (received as f32 / total as f32 * 100.0) as i32
+                            } else { -1 };
+                            info!("mapdl: `{}` — {} / {} bytes ({}%)",
+                                  id, received, total, pct);
+                        }
+                        crate::map_dl::DownloadStatus::Verifying { id } => {
+                            info!("mapdl: `{}` — vérification SHA256", id);
+                        }
+                        crate::map_dl::DownloadStatus::Extracting { id } => {
+                            info!("mapdl: `{}` — extraction PK3", id);
+                        }
+                        crate::map_dl::DownloadStatus::Done { id, path } => {
+                            info!("mapdl: `{}` — terminé → {}", id, path.display());
+                        }
+                        crate::map_dl::DownloadStatus::Error { id, message } => {
+                            info!("mapdl: `{}` — ERREUR : {}", id, message);
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Joue un fichier audio local en loop comme musique de fond.
+    /// Path : absolu ou relatif au CWD.  Échec silencieux si le fichier
+    /// n'est pas trouvé (log warn) ou si rodio ne sait pas le décoder
+    /// (formats supportés actuellement : WAV, OGG).
+    fn handle_music_play(&mut self, path: &std::path::Path) {
+        let Some(snd) = self.sound.as_ref() else {
+            warn!("music: audio non initialisé");
+            return;
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("music: impossible de lire `{}`: {}", path.display(), e);
+                return;
+            }
+        };
+        match snd.play_music(bytes) {
+            Ok(()) => info!("music: now playing `{}`", path.display()),
+            Err(e) => warn!("music: échec lecture `{}`: {}", path.display(), e),
         }
     }
 
@@ -4042,67 +6912,126 @@ impl App {
                     u.num_frames(),
                     h.num_frames()
                 );
-                self.bot_rig = Some(PlayerRig { lower: l, upper: u, head: h });
+                // **Charge animation.cfg** (v0.9.5++) — source canonique
+                // des ranges d'animation pour CE modèle.  Chaque player
+                // model a son propre fichier (sarge.cfg ≠ keel.cfg etc.).
+                let cfg_path = format!("{dir}/animation.cfg");
+                let anims = match self.vfs.read(&cfg_path) {
+                    Ok(bytes) => {
+                        let s = String::from_utf8_lossy(&bytes);
+                        parse_animation_cfg(&s)
+                    }
+                    Err(e) => {
+                        warn!("animation.cfg absent pour '{dir}' ({e}) — fallback offsets canoniques");
+                        hashbrown::HashMap::new()
+                    }
+                };
+                self.bot_rig = Some(PlayerRig { lower: l, upper: u, head: h, anims });
                 break;
             }
         }
         if self.bot_rig.is_none() {
-            // Aucun model joueur trouvé dans le pak0 actif. Sans rig,
-            // `queue_bots` skip TOUS les bots (cf. l'`if let Some(rig)`
-            // côté render). Symptôme observé : bots présents dans la
-            // logique de jeu (frags, tirs, etc.) mais invisibles.
-            // Cause typique : pak0 partiel (démo Q3) ou flag --base
-            // qui pointe sur un dossier sans `models/players/`.
-            warn!(
-                "player rig: AUCUN model joueur trouvé — les bots seront \
-                 INVISIBLES. Vérifie ton baseq3/pak0.pk3 (chemin attendu \
-                 `models/players/<nom>/{{lower,upper,head}}.md3`). \
-                 Candidats testés : {}",
-                PLAYER_CANDIDATES.len()
-            );
+            // Aucun model joueur trouvé. Liste ce qui EXISTE dans le
+            // VFS sous `models/players/` pour orienter le diagnostic
+            // (un nom de model non standard, un chemin légèrement
+            // différent, etc.). Sans ce log on jouait à la devinette.
+            let mut found_paths: Vec<String> = self
+                .vfs
+                .list_prefix("models/players/")
+                .into_iter()
+                .filter(|p| p.ends_with(".md3"))
+                .collect();
+            found_paths.sort();
+            if found_paths.is_empty() {
+                warn!(
+                    "player rig: VFS ne contient AUCUN .md3 sous \
+                     models/players/. Cause probable : --base pointe \
+                     sur un dossier sans pak0.pk3 vanilla. Le fallback \
+                     beam vertical sera utilisé pour les bots."
+                );
+            } else {
+                warn!(
+                    "player rig: aucun ENSEMBLE COMPLET (lower+upper+head) \
+                     trouvé. Cependant le VFS contient {} fichier(s) MD3 \
+                     sous models/players/ :",
+                    found_paths.len()
+                );
+                for p in found_paths.iter().take(20) {
+                    warn!("  - {}", p);
+                }
+                if found_paths.len() > 20 {
+                    warn!("  … et {} autres", found_paths.len() - 20);
+                }
+            }
         }
     }
 
     fn spawn_bot(&mut self, name: &str, skill_override: Option<i32>) {
-        // Pré-vérifs avant de prendre la moindre ressource. On scope le
-        // borrow de `self.world` à ce bloc pour pouvoir appeler
-        // `ensure_player_rig_loaded` (qui prend `&mut self`) juste après.
-        {
-            let Some(world) = self.world.as_ref() else {
-                warn!("addbot: pas de map chargée");
-                return;
-            };
+        // Pré-vérifs : on accepte soit un BSP (`world`) soit un terrain BR.
+        // Un seul des deux doit être présent à la fois (cf. load_map et
+        // load_terrain_map).
+        let mode_world = self.world.is_some();
+        let mode_terrain = self.terrain.is_some();
+        if !mode_world && !mode_terrain {
+            warn!("addbot: pas de map chargée");
+            return;
+        }
+        if mode_world {
+            let world = self.world.as_ref().unwrap();
             if world.spawn_points.is_empty() && world.player_start.is_none() {
                 warn!("addbot: la map n'a pas de point de spawn");
                 return;
             }
         }
 
-        // Lazy-load le rig partagé au premier bot.
+        // Lazy-load le rig partagé au premier bot. Si AUCUN model
+        // joueur n'est trouvé dans le VFS (pak0 partiel / démo), on
+        // continue quand même : la logique IA + collisions + score
+        // tourne sans rig, et le rendu utilise un fallback beam
+        // vertical (cf. queue_bots None branch).
         if self.bot_rig.is_none() {
             self.ensure_player_rig_loaded();
             if self.bot_rig.is_none() {
-                warn!("addbot: aucun player model complet (lower+upper+head) trouvé dans le VFS");
-                return;
+                warn!(
+                    "addbot: '{name}' spawné SANS rig MD3 (asset manquant) — \
+                     rendu fallback beam, gameplay normal"
+                );
             }
         }
-        // Re-acquisition du borrow après le `&mut self` ci-dessus.
-        let world = self.world.as_ref().expect("world checké au début");
 
-        // Spawn point : on cycle dans les DM spawn points, fallback sur
-        // player_start. On offset de +1 pour ne pas faire spawner le premier
-        // bot sur `spawn_points[0]` qui coïncide typiquement avec le
-        // `player_start` du joueur — sinon le bot apparaît clippé dans le
-        // joueur au démarrage d'une map (visible comme une silhouette blanche
-        // à travers le viewmodel tant que le joueur ne bouge pas).
         let idx = self.bots.len() + 1;
-        let (origin, angles) = if !world.spawn_points.is_empty() {
-            let sp = &world.spawn_points[idx % world.spawn_points.len()];
-            (sp.origin, sp.angles)
+        let (spawn_origin, angles) = if mode_world {
+            // BSP : cycle dans les DM spawn points, fallback player_start.
+            let world = self.world.as_ref().unwrap();
+            let (origin, ang) = if !world.spawn_points.is_empty() {
+                let sp = &world.spawn_points[idx % world.spawn_points.len()];
+                (sp.origin, sp.angles)
+            } else {
+                (world.player_start.unwrap_or(Vec3::ZERO), world.player_start_angles)
+            };
+            (origin + Vec3::Z * 40.0, ang)
         } else {
-            (world.player_start.unwrap_or(Vec3::ZERO), world.player_start_angles)
+            // **BR** : spawn sur un POI tier ≥ 2 distribué pseudo-uniformément.
+            // On choisit l'index par hash de `idx + time` pour que des
+            // bots successifs n'atterrissent pas tous sur le même POI.
+            let terrain = self.terrain.as_ref().unwrap();
+            let pois: Vec<&q3_terrain::Poi> =
+                terrain.pois().iter().filter(|p| p.tier >= 2).collect();
+            let xy = if pois.is_empty() {
+                let c = terrain.center();
+                (c.x, c.y)
+            } else {
+                let h = (idx.wrapping_mul(2654435761) ^ self.time_sec.to_bits() as usize)
+                    % pois.len();
+                let p = pois[h];
+                // Petit offset pour ne pas piler tous les bots au même
+                // sample exact si plusieurs partagent le POI.
+                let offset = (idx as f32 * 13.0).sin() * 60.0;
+                (p.x + offset, p.y + offset.cos() * 80.0)
+            };
+            let z = terrain.height_at(xy.0, xy.1) + 60.0;
+            (Vec3::new(xy.0, xy.1, z), q3_math::Angles::ZERO)
         };
-        let spawn_origin = origin + Vec3::Z * 40.0;
 
         // Résolution de la difficulté : override explicite par la
         // commande console > cvar `bot_skill` > défaut III.  On clampe
@@ -4114,10 +7043,20 @@ impl App {
         let skill = BotSkill::from_int(skill_n);
         let mut bot = Bot::with_skill(name, spawn_origin, skill);
         bot.view_angles = angles;
-        // Waypoints : tous les autres spawn points, dans l'ordre.
-        for (i, sp) in world.spawn_points.iter().enumerate() {
-            if i != idx % world.spawn_points.len().max(1) {
-                bot.push_waypoint(sp.origin + Vec3::Z * 40.0);
+        // Waypoints — BSP : DM spawn points dans l'ordre. BR : POI tier
+        // ≥ 2 dans l'ordre (= "patrouille de POI à POI" en attendant
+        // une vraie navmesh terrain).
+        if mode_world {
+            let world = self.world.as_ref().unwrap();
+            for (i, sp) in world.spawn_points.iter().enumerate() {
+                if i != idx % world.spawn_points.len().max(1) {
+                    bot.push_waypoint(sp.origin + Vec3::Z * 40.0);
+                }
+            }
+        } else if let Some(terrain) = self.terrain.as_ref() {
+            for p in terrain.pois().iter().filter(|p| p.tier >= 2) {
+                let z = terrain.height_at(p.x, p.y) + 60.0;
+                bot.push_waypoint(Vec3::new(p.x, p.y, z));
             }
         }
 
@@ -4125,7 +7064,12 @@ impl App {
         body.view_angles = angles;
 
         let tint = bot_tint(idx);
-        info!("addbot: '{name}' spawné à {:?} (tint={:?})", spawn_origin, tint);
+        let personality = bot_personality_from_index(idx);
+        bot.set_personality(personality);
+        info!(
+            "addbot: '{name}' spawné à {:?} (tint={:?}, pers={})",
+            spawn_origin, tint, bot_personality_tag(personality)
+        );
         self.bots.push(BotDriver {
             bot,
             body,
@@ -4144,10 +7088,24 @@ impl App {
             deaths: 0,
             last_fire_at: f32::NEG_INFINITY,
             last_damage_at: f32::NEG_INFINITY,
+            last_pain_sfx_at: f32::NEG_INFINITY,
             airborne_since: None,
             last_land_at: f32::NEG_INFINITY,
             anim_phase: 0.0,
             anim_state: BotAnimState::Idle,
+            last_heard_pos: None,
+            last_heard_at: f32::NEG_INFINITY,
+            personality: bot_personality_from_index(idx),
+            last_chatter_at: f32::NEG_INFINITY,
+            death_started_at: None,
+            lower_anim_start: usize::MAX,
+            lower_anim_started_at: 0.0,
+            upper_anim_start: usize::MAX,
+            upper_anim_started_at: 0.0,
+            death_variant: (idx as u8) % 3,
+            prev_yaw: 0.0,
+            last_turn_at: f32::NEG_INFINITY,
+            gesture_started_at: None,
         });
     }
 
@@ -4155,6 +7113,8 @@ impl App {
     /// fallback), restaure sa santé et réinitialise sa physique. Appelé
     /// quand `respawn_at` est échu.
     fn respawn_player(&mut self) {
+        // Track le timestamp respawn pour le stats overlay "ALIVE".
+        self.last_respawn_time = self.time_sec;
         // Lookup du spawn : pseudo-aléatoire léger indexé sur time+deaths
         // pour ne pas retomber au même endroit à chaque mort.
         let (origin, angles) = {
@@ -4346,7 +7306,12 @@ impl App {
                     });
                 }
                 PickupKind::Ammo { slot, amount } => {
-                    let s = slot as usize;
+                    // **Bounds clamp** (v0.9.5++ polish) — `slot` est un
+                    // `u8` non-typé qui pourrait théoriquement venir d'une
+                    // désérialisation réseau ou d'un éditeur de map avec
+                    // une valeur ≥ self.ammo.len().  On clamp pour éviter
+                    // un panic OOB sur l'array fixe `[i32; N]`.
+                    let s = (slot as usize).min(self.ammo.len() - 1);
                     // Cherche le max_ammo du slot — on prend celui de l'arme
                     // qui matche, sinon fallback 200.
                     let max = WeaponId::ALL
@@ -4404,16 +7369,32 @@ impl App {
             match e {
                 Event::Health { sfx_pos, new_hp, hp_was } => {
                     info!("pickup health: {} → {}", hp_was, new_hp);
-                    if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_bot) {
-                        // Faute d'un sfx dédié chargé, on recycle le pain_bot
-                        // comme bip de pickup — audible et diégétique.
-                        play_at(snd, h, sfx_pos, Priority::Low);
+                    // Mega health (>100) joue son sample dédié si dispo,
+                    // sinon le sample health standard. Fallback final
+                    // sur pain_bot (legacy bip).
+                    let is_mega = new_hp > 100;
+                    let sfx = if is_mega {
+                        self.sfx_megahealth_pickup
+                            .or(self.sfx_health_pickup)
+                            .or(self.sfx_pain_bot)
+                    } else {
+                        self.sfx_health_pickup.or(self.sfx_pain_bot)
+                    };
+                    if let (Some(snd), Some(h)) = (self.sound.as_ref(), sfx) {
+                        // Priority::High → jamais culled par un tir
+                        // (Priority::Weapon = 4, High = 3 < Weapon mais
+                        // les pickups passent toujours via le slot le
+                        // plus bas, qui est rarement plasma à plein
+                        // débit). On augmente aussi le volume via
+                        // near_dist plus grand.
+                        play_at(snd, h, sfx_pos, Priority::High);
                     }
                 }
                 Event::Armor { sfx_pos, new_armor } => {
                     info!("pickup armor → {}", new_armor);
-                    if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_bot) {
-                        play_at(snd, h, sfx_pos, Priority::Low);
+                    let sfx = self.sfx_armor_pickup.or(self.sfx_pain_bot);
+                    if let (Some(snd), Some(h)) = (self.sound.as_ref(), sfx) {
+                        play_at(snd, h, sfx_pos, Priority::High);
                     }
                 }
                 Event::Weapon { sfx_pos, weapon, was_new, ammo_after } => {
@@ -4435,14 +7416,16 @@ impl App {
                     }
                     let sfx = self.sfx_weapon_pickup.or(self.sfx_pain_bot);
                     if let (Some(snd), Some(h)) = (self.sound.as_ref(), sfx) {
-                        play_at(snd, h, sfx_pos, Priority::Normal);
+                        play_at(snd, h, sfx_pos, Priority::High);
                     }
                 }
                 Event::Ammo { sfx_pos, slot, ammo_after } => {
                     info!("pickup ammo slot {} → {}", slot, ammo_after);
                     let sfx = self.sfx_ammo_pickup.or(self.sfx_pain_bot);
                     if let (Some(snd), Some(h)) = (self.sound.as_ref(), sfx) {
-                        play_at(snd, h, sfx_pos, Priority::Low);
+                        // Priority::High pour ne pas être étouffé par un
+                        // tir d'arme automatique (MG/PG) en cours.
+                        play_at(snd, h, sfx_pos, Priority::High);
                     }
                 }
                 Event::Powerup { sfx_pos, powerup, expires_at } => {
@@ -4526,29 +7509,24 @@ impl App {
         // décor (KillActor::World) — Q3 original a la même règle.  Un
         // seul tir par match ; reset par `restart_match`.
         if !self.first_blood_announced {
+            // On vient juste de push dans `kill_feed` au-dessus, donc
+            // `last()` est garanti `Some`.  Capturé une fois pour éviter
+            // 6× re-lookup + unwrap (lisibilité + micro-perf).
+            let last_ev = self
+                .kill_feed
+                .last()
+                .expect("kill_feed pushed above");
             let is_selfkill = matches!(
-                (&self.kill_feed.last().unwrap().killer, &self.kill_feed.last().unwrap().victim),
+                (&last_ev.killer, &last_ev.victim),
                 (KillActor::Player, KillActor::Player)
-            ) || match (
-                &self.kill_feed.last().unwrap().killer,
-                &self.kill_feed.last().unwrap().victim,
-            ) {
+            ) || match (&last_ev.killer, &last_ev.victim) {
                 (KillActor::Bot(a), KillActor::Bot(b)) => a == b,
                 _ => false,
             };
-            let killer_is_world = matches!(
-                self.kill_feed.last().unwrap().killer,
-                KillActor::World
-            );
+            let killer_is_world = matches!(last_ev.killer, KillActor::World);
             if !is_selfkill && !killer_is_world {
+                let killer_label = last_ev.killer.label().to_string();
                 self.first_blood_announced = true;
-                let killer_label = self
-                    .kill_feed
-                    .last()
-                    .unwrap()
-                    .killer
-                    .label()
-                    .to_string();
                 let msg = format!("FIRST BLOOD: {killer_label} draws first!");
                 info!("first blood → {killer_label}");
                 self.push_pickup_toast(msg, [1.0, 0.2, 0.2, 1.0]);
@@ -4601,6 +7579,14 @@ impl App {
         let speaker = bot.bot.name.clone();
         self.push_chat(speaker, text);
         self.next_chat_at = self.time_sec + CHAT_GLOBAL_COOLDOWN;
+        // **Gesture anim** (v0.9.5++) — déclenche TORSO_GESTURE sur les
+        // taunts (KillInsult uniquement, pas Death/Respawn qui sont
+        // joués dans des contextes où l'anim mort/respawn prime).
+        if matches!(trigger, ChatTrigger::KillInsult) {
+            if let Some(b) = self.bots.get_mut(idx) {
+                b.gesture_started_at = Some(self.time_sec);
+            }
+        }
     }
 
     /// Ajoute une ligne de chat et FIFO-évince la plus ancienne si on
@@ -4785,6 +7771,42 @@ impl App {
         if self.match_winner.is_some() {
             return;
         }
+        // **BR victory condition** (v0.9.5) — last man standing : si
+        // un seul acteur (joueur ou bot) est vivant, il gagne. Pas de
+        // fraglimit / timelimit en BR — le ring force le converge.
+        // **Mode exploration** (v0.9.5++) — si `br_bots=0`, la map est
+        // vide donc le check est désactivé (sinon le joueur seul =
+        // immediately VICTORY screen, bloque le mouvement).
+        if self.terrain.is_some() {
+            let br_bots_enabled = self.cvars.get_i32("br_bots").unwrap_or(0) != 0;
+            if !br_bots_enabled {
+                return; // exploration mode — pas de match
+            }
+            let player_alive = !self.player_health.is_dead();
+            let alive_bots: Vec<&BotDriver> = self
+                .bots
+                .iter()
+                .filter(|b| !b.health.is_dead())
+                .collect();
+            let total_alive = alive_bots.len() + if player_alive { 1 } else { 0 };
+            if total_alive == 1 {
+                self.match_winner = if player_alive {
+                    Some(KillActor::Player)
+                } else {
+                    Some(KillActor::Bot(alive_bots[0].bot.name.clone()))
+                };
+                info!("BR match over — winner = {:?}", self.match_winner);
+                return;
+            }
+            if total_alive == 0 {
+                // Tout le monde est mort (rare : ring kill simultané)
+                self.match_winner = Some(KillActor::World);
+                info!("BR match over — egalité (ring)");
+                return;
+            }
+            // En BR on n'utilise PAS frag/time-limit — on attend le ring.
+            return;
+        }
         // Victoire par fraglimit (priorité haute : si quelqu'un a déjà
         // atteint la limite pile quand le timer tombe à 0, on lui donne
         // la victoire au lieu de recalculer sur les scores).
@@ -4842,6 +7864,73 @@ impl App {
         });
     }
 
+    /// Pousse un floater "+1 FRAG" au point de kill — distinct des
+    /// damage numbers : durée de vie plus longue (1.6 s vs 1.2), gros
+    /// caractères orange-rouge, monte plus haut.  Donne un feedback
+    /// visuel "juicy" type Apex/CoD à chaque frag, complémentaire du
+    /// kill-marker X dans le réticule (qui est centré écran, alors
+    /// que ce floater est ancré au monde sur le bot mort).
+    /// **Headshot sparkle** — gerbe dorée additive de 8 particules
+    /// rapides + dlight blanc-jaune bref au point d'impact tête.
+    /// Distinct des sparks rouges de hit normal : signale clairement
+    /// "headshot" sans toast HUD ni audio additionnel.
+    fn push_headshot_sparkle(&mut self, pos: Vec3) {
+        // 8 particules dorées en sphère étirée — évoque un éclat lumineux.
+        for k in 0..8 {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            // Direction sphérique uniforme avec un boost +Z léger pour
+            // que la majorité du flash monte vers la caméra du joueur.
+            let theta = (k as f32) * std::f32::consts::TAU / 8.0
+                + rand_unit() * 0.4;
+            let phi = rand_unit() * 0.6 + 0.4; // [0..1] biais haut
+            let cos_phi = phi.cos();
+            let sin_phi = phi.sin();
+            let dir = Vec3::new(
+                theta.cos() * sin_phi,
+                theta.sin() * sin_phi,
+                cos_phi.abs() + 0.3,
+            )
+            .normalize_or_zero();
+            let speed = 220.0 * (0.7 + 0.4 * rand_unit().abs());
+            let velocity = dir * speed;
+            let lifetime = 0.35 * (0.8 + 0.4 * rand_unit().abs());
+            self.particles.push(Particle {
+                origin: pos,
+                velocity,
+                color: [1.0, 0.92, 0.45, 0.9], // gold vif
+                expire_at: self.time_sec + lifetime,
+                lifetime,
+            });
+        }
+        // Dlight bref blanc-jaune pour souligner l'impact.
+        if let Some(r) = self.renderer.as_mut() {
+            r.spawn_dlight(
+                pos,
+                120.0,
+                [1.0, 0.95, 0.65],
+                2.0,
+                self.time_sec,
+                0.05,
+            );
+        }
+    }
+
+    fn push_frag_confirm(&mut self, origin: Vec3) {
+        if self.floating_damages.len() >= DAMAGE_NUMBER_MAX {
+            self.floating_damages.remove(0);
+        }
+        self.floating_damages.push(FloatingDamage {
+            origin,
+            damage: 0, // ignoré pour les frags
+            to_player: false,
+            expire_at: self.time_sec + 1.6,
+            lifetime: 1.6,
+            is_frag: true,
+        });
+    }
+
     fn push_damage_number(&mut self, origin: Vec3, damage: i32, to_player: bool) {
         if damage <= 0 {
             return;
@@ -4857,6 +7946,7 @@ impl App {
             to_player,
             expire_at: self.time_sec + DAMAGE_NUMBER_LIFETIME,
             lifetime: DAMAGE_NUMBER_LIFETIME,
+            is_frag: false,
         });
         // Combo counter : on ne suit que les dégâts INFLIGÉS par le
         // joueur.  Les dégâts reçus (`to_player = true`) ont déjà la
@@ -4879,7 +7969,7 @@ impl App {
         // Couche 1 — sparks chauds (orange/jaune, rapide, courte vie).
         for _ in 0..PARTICLE_EXPLOSION_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit());
             let len = dir.length();
@@ -4911,7 +8001,7 @@ impl App {
         let debris_count = (PARTICLE_EXPLOSION_COUNT / 3).max(6);
         for _ in 0..debris_count {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit() * 0.6);
             let len = dir.length();
@@ -4952,6 +8042,52 @@ impl App {
                 self.time_sec,
                 0.08,            // lifetime court (80 ms)
             );
+        }
+        // Couche 4 — **heat shimmer** (v0.9.5++) : ~12 particules
+        // semi-transparentes ocre-jaune à forte vélocité +Z. Sans flag
+        // gravity_scale custom on triche en donnant juste assez de
+        // vitesse upward pour que la particule monte ~80 unités avant
+        // que `PARTICLE_GRAVITY` ne renverse la trajectoire — temps
+        // pendant lequel elle fade out. Visuellement elle évoque une
+        // colonne d'air chaud qui s'élève au-dessus du point d'impact,
+        // pas un vrai blur screen-space mais lecture "heat" claire à
+        // l'œil. Couleur très désaturée + alpha bas pour éviter de
+        // concurrencer le flash principal.
+        const HEAT_COUNT: usize = 12;
+        for i in 0..HEAT_COUNT {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            // Cône étroit autour du +Z — chaque particule diverge légèrement.
+            let theta = (i as f32) * std::f32::consts::TAU / (HEAT_COUNT as f32)
+                + rand_unit() * 0.3;
+            let radial = 0.10 + 0.20 * rand_unit().abs();
+            let vx = theta.cos() * radial;
+            let vy = theta.sin() * radial;
+            let vz = 1.0; // dominante verticale
+            let dir = Vec3::new(vx, vy, vz).normalize_or_zero();
+            // Vitesse modérée — laisse la gravité reprendre vite.  Pic
+            // ~80–110 unités vers le haut avant inversion.
+            let speed = 280.0 * (0.7 + 0.3 * rand_unit().abs());
+            let velocity = dir * speed;
+            // Ocre/jaune/sépia désaturé → "air chaud" plutôt que "feu".
+            let h = rand_unit().abs();
+            let color = [
+                0.85 + 0.15 * h,
+                0.65 + 0.20 * h,
+                0.30 + 0.10 * h,
+                0.35, // alpha bas → translucide, ne mange pas le flash
+            ];
+            // Vie longue (~0.9 s) pour que le mouvement vertical lent
+            // ait le temps de se lire.
+            let lifetime = 0.85 * (0.8 + 0.4 * rand_unit().abs());
+            self.particles.push(Particle {
+                origin,
+                velocity,
+                color,
+                expire_at: self.time_sec + lifetime,
+                lifetime,
+            });
         }
     }
 
@@ -5007,7 +8143,7 @@ impl App {
         };
         for _ in 0..PARTICLE_HIT_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             // Direction = normale + bruit : les sparks s'écartent mais
             // restent globalement orientés "vers l'extérieur" de la surface.
@@ -5040,7 +8176,7 @@ impl App {
     /// qu'une balle de MG.  Plasma ne passe pas par ici (c'est un
     /// projectile + explosion, il a son propre décal de brûlure).
     ///
-    /// `normal` doit pointer hors du mur (typiquement `trace.plane_normal`).
+    /// `normal` doit pointer hors du mur (typiquement `trace_normal`).
     /// `pos` est le point d'impact exact retourné par la trace.
     fn push_wall_mark(&mut self, pos: Vec3, normal: Vec3, weapon: WeaponId) {
         // Paramètres par arme.  Couleur = sRGB linéaire, alpha est la
@@ -5134,20 +8270,12 @@ impl App {
         let to = from + Vec3::new(0.0, 0.0, -max_drop);
         let trace = world.collision.trace_ray(from, to, Contents::MASK_SHOT);
         if trace.fraction >= 1.0 {
-            // Rien en-dessous — entité dans le vide, pas d'ombre.
             return;
         }
-        // Ne pas projeter l'ombre sur un plafond / mur incliné : si la
-        // normale ne pointe pas « raisonnablement » vers le haut, skip.
-        // 0.5 ≈ 60° d'inclinaison max — les rampes douces conservent leur
-        // ombre, les murs verticaux (normale horizontale) sont éliminés.
         if trace.plane_normal.z < 0.5 {
             return;
         }
         let hit_pt = from + (to - from) * trace.fraction;
-        // Atténuation : au contact direct (fraction ≈ 0) on est à fond,
-        // plus on est loin, plus l'ombre est discrète.  Courbe quadratique
-        // pour un fade doux en fin de plage.
         let falloff = 1.0 - trace.fraction.clamp(0.0, 1.0);
         let alpha = alpha_max * falloff * falloff;
         if alpha < 0.02 {
@@ -5238,9 +8366,18 @@ impl App {
     /// gibs Quake. Direction sphérique (pas de biais vers le haut — un
     /// bot qui meurt part dans tous les sens), affecté par la gravité.
     fn push_death_gibs(&mut self, pos: Vec3) {
+        // **Death gibs amélioré** (V2f) — 3 strates :
+        // 1. Sang carmin (existant) : éjection radiale, vie moyenne
+        // 2. Chunks plus gros (nouveau) : moins nombreux, plus lents,
+        //    couleur rouge sombre, vie longue → tombent au sol
+        // 3. Brume rose claire (nouveau) : douche de fines particules
+        //    qui restent suspendues 0.6s puis fade
+        // 4. Flash blanc 1-frame additif → "impact" perçu
+
+        // Strate 1 — sang carmin (existant, légèrement boosté).
         for _ in 0..PARTICLE_GIB_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit());
             let len = dir.length();
@@ -5249,13 +8386,10 @@ impl App {
             } else {
                 dir /= len;
             }
-            // Biais léger vers le haut pour que les gibs rebondissent
-            // visuellement plutôt que de tous piquer direct vers le sol.
             if dir.z < -0.3 {
                 dir.z = -dir.z * 0.5;
             }
             let speed = PARTICLE_GIB_SPEED * (0.4 + 0.6 * rand_unit().abs());
-            // Teinte rouge carmin avec variance vers pourpre.
             let hue = rand_unit().abs();
             let color = [0.8 + 0.2 * hue, 0.05 + 0.15 * hue, 0.05 + 0.10 * hue, 1.0];
             let lifetime = PARTICLE_GIB_LIFETIME * (0.7 + 0.3 * rand_unit().abs());
@@ -5266,6 +8400,64 @@ impl App {
                 expire_at: self.time_sec + lifetime,
                 lifetime,
             });
+        }
+        // Strate 2 — chunks gros et sombres (~moitié du count, vitesse
+        // réduite, vie ×1.5 pour tomber + traîner).
+        let chunks = (PARTICLE_GIB_COUNT / 2).max(8);
+        for _ in 0..chunks {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            let mut dir = Vec3::new(rand_unit(), rand_unit(), rand_unit() * 0.5);
+            let len = dir.length();
+            if len < 1e-3 {
+                dir = Vec3::Z;
+            } else {
+                dir /= len;
+            }
+            let speed = PARTICLE_GIB_SPEED * 0.55 * (0.3 + 0.7 * rand_unit().abs());
+            let darkness = 0.3 + 0.2 * rand_unit().abs();
+            self.particles.push(Particle {
+                origin: pos,
+                velocity: dir * speed,
+                color: [darkness, darkness * 0.2, darkness * 0.15, 1.0],
+                expire_at: self.time_sec
+                    + PARTICLE_GIB_LIFETIME * 1.5 * (0.7 + 0.3 * rand_unit().abs()),
+                lifetime: PARTICLE_GIB_LIFETIME * 1.5,
+            });
+        }
+        // Strate 3 — brume rose claire (mist / aérosol). Particules
+        // lentes qui flottent. Donne un nuage post-impact visible.
+        let mist = 16;
+        for _ in 0..mist {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            let dir = Vec3::new(
+                rand_unit() * 0.7,
+                rand_unit() * 0.7,
+                0.3 + rand_unit().abs() * 0.5,
+            );
+            let speed = 60.0 + rand_unit().abs() * 40.0;
+            self.particles.push(Particle {
+                origin: pos + Vec3::new(rand_unit() * 8.0, rand_unit() * 8.0, rand_unit().abs() * 8.0),
+                velocity: dir.normalize() * speed,
+                color: [1.0, 0.55, 0.55, 0.7],
+                expire_at: self.time_sec + 0.6,
+                lifetime: 0.6,
+            });
+        }
+        // Strate 4 — dlight flash blanc bref (40 ms) pour signaler
+        // l'impact. Empilé avec les explosion dlights → bien visible.
+        if let Some(r) = self.renderer.as_mut() {
+            r.spawn_dlight(
+                pos + Vec3::Z * 16.0,
+                180.0,
+                [1.0, 0.85, 0.85],
+                3.0,
+                self.time_sec,
+                0.04,
+            );
         }
     }
 
@@ -5288,7 +8480,7 @@ impl App {
         // Sparks qui montent en cône étroit + un peu de dispersion xy.
         for _ in 0..PARTICLE_RESPAWN_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             let dx = rand_unit() * 0.35;
             let dy = rand_unit() * 0.35;
@@ -5306,6 +8498,47 @@ impl App {
                 lifetime,
             });
         }
+        // **Horizontal ring fanfare** (v0.9.5++) — 16 particules en cercle
+        // qui partent radialement vers l'extérieur dans le plan XY.
+        // Couplé au beam vertical, ça donne la signature visuelle
+        // "explosion d'arrivée" canonique des item respawns BR.
+        const RING_COUNT: usize = 16;
+        for k in 0..RING_COUNT {
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            let theta = (k as f32) * std::f32::consts::TAU
+                / (RING_COUNT as f32);
+            let dir = Vec3::new(theta.cos(), theta.sin(), 0.05);
+            let speed = 150.0 + rand_unit().abs() * 60.0;
+            let lifetime = 0.55 * (0.8 + 0.3 * rand_unit().abs());
+            // Légère teinte plus pâle pour distinguer de la colonne ascendante.
+            let ring_color = [
+                color[0] * 0.85 + 0.15,
+                color[1] * 0.85 + 0.15,
+                color[2] * 0.85 + 0.15,
+                color[3] * 0.9,
+            ];
+            self.particles.push(Particle {
+                origin: pos + Vec3::Z * 4.0,
+                velocity: dir * speed,
+                color: ring_color,
+                expire_at: self.time_sec + lifetime,
+                lifetime,
+            });
+        }
+        // Dlight cyan brève au point de respawn → flash visible de loin
+        // qui matche la palette du bandeau radius-respawn.
+        if let Some(r) = self.renderer.as_mut() {
+            r.spawn_dlight(
+                pos + Vec3::Z * 16.0,
+                280.0,
+                [color[0], color[1], color[2]],
+                2.5,
+                self.time_sec,
+                0.18,
+            );
+        }
     }
 
     /// Splash à la transition surface↔eau : une gerbe de gouttelettes
@@ -5316,7 +8549,7 @@ impl App {
         let color = [0.7, 0.85, 1.0, 1.0];
         for _ in 0..PARTICLE_WATER_SPLASH_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             // Éventail conique vers le haut : petit radius latéral, grosse
             // composante Z positive pour que ça gicle façon éclaboussure.
@@ -5346,7 +8579,7 @@ impl App {
         let color = [0.75, 0.9, 1.0, 0.85];
         for _ in 0..PARTICLE_BUBBLE_COUNT {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             let dx = rand_unit() * 0.2;
             let dy = rand_unit() * 0.2;
@@ -5418,6 +8651,12 @@ impl App {
         // alors qu'un Quad précédent vient de flaguer `warned=true` zappe
         // le bip 3s de la nouvelle instance.
         self.powerup_warned[kind.index()] = false;
+        // Flash full-screen teinté de la couleur du powerup. Donne une
+        // confirmation visuelle forte de la transition « sans → avec »
+        // (équivalent du strobe Q3 sur pickup).  Le fade est géré dans
+        // draw_hud via (powerup_flash_until - now).
+        self.powerup_flash_until = self.time_sec + POWERUP_FLASH_SEC;
+        self.powerup_flash_color = kind.pickup_fx_color();
         t
     }
 
@@ -5537,6 +8776,69 @@ impl App {
         }
     }
 
+    /// **Atmospheric ambience BR** — éclairs périodiques + dlight qui
+    /// brièvement illumine le ciel.  Activé uniquement en mode BR
+    /// (terrain présent), sinon no-op.  Le premier appel arme
+    /// `next_lightning_at` à un délai aléatoire dans la fenêtre
+    /// [LIGHTNING_INTERVAL_MIN..MAX] depuis maintenant.
+    fn tick_atmosphere(&mut self) {
+        // BR uniquement — le mode BSP a déjà sa propre ambiance via
+        // shaders / sky / fog. Le terrain Réunion bénéficie d'une
+        // touche orageuse pour casser la monotonie diurne.
+        if self.terrain.is_none() {
+            return;
+        }
+        // Gel pendant l'intermission post-match — la caméra est figée,
+        // un éclair surprendrait le joueur en lecture du scoreboard.
+        if self.match_winner.is_some() {
+            return;
+        }
+        let now = self.time_sec;
+        // Premier passage : armer le timer à un délai aléatoire.
+        if !self.next_lightning_at.is_finite() {
+            let interval = LIGHTNING_INTERVAL_MIN
+                + rand_unit().abs() * (LIGHTNING_INTERVAL_MAX - LIGHTNING_INTERVAL_MIN);
+            self.next_lightning_at = now + interval;
+            return;
+        }
+        if now < self.next_lightning_at {
+            return;
+        }
+        // Trigger flash : overlay HUD bref + dlight très haut +
+        // schedule du prochain.
+        self.lightning_flash_until = now + LIGHTNING_FLASH_SEC;
+        // Dlight haut dans le ciel à une position aléatoire au-dessus
+        // du joueur (pas trop loin pour que l'illumination touche
+        // les surfaces visibles).  Bleu-blanc froid, lifetime court.
+        if let Some(r) = self.renderer.as_mut() {
+            let dx = rand_unit() * 800.0;
+            let dy = rand_unit() * 800.0;
+            let sky_pos = self.player.origin + Vec3::new(dx, dy, 1800.0);
+            r.spawn_dlight(
+                sky_pos,
+                3500.0,                  // énorme rayon — éclaire la scène
+                [0.85, 0.92, 1.00],      // bleu-blanc froid
+                3.5,                     // intensité forte
+                now,
+                LIGHTNING_FLASH_SEC,     // synchro avec le flash HUD
+            );
+        }
+        // **Camera shake** corrélé au flash — secousse subtile (≈ 1/3
+        // d'une explosion proche) pour donner l'impression du tonnerre
+        // qui résonne. Pas d'audio (pas de SFX thunder chargé), donc
+        // le shake fait office de "sentir" le grondement.  Empile-safe
+        // (max-merge avec un éventuel shake d'explosion concurrent).
+        let lightning_shake = 0.0035_f32; // rad, ≈ 1/3 d'un splash proche
+        if lightning_shake > self.shake_intensity {
+            self.shake_intensity = lightning_shake;
+        }
+        self.shake_until = self.shake_until.max(now + SHAKE_DURATION);
+        // Programme le prochain éclair après un délai variable.
+        let interval = LIGHTNING_INTERVAL_MIN
+            + rand_unit().abs() * (LIGHTNING_INTERVAL_MAX - LIGHTNING_INTERVAL_MIN);
+        self.next_lightning_at = now + interval;
+    }
+
     /// Applique un tick de régénération si Regen est actif. Fraction
     /// accumulée dans `regen_accum` pour éviter la quantification (dt très
     /// petit → 15·dt < 1 HP/frame). `Health::heal` cap déjà à `max`, donc
@@ -5555,6 +8857,35 @@ impl App {
             let whole = self.regen_accum.floor() as i32;
             if whole > 0 && !self.player_health.is_full() {
                 self.player_health.heal(whole);
+                // **Regen sparkle** (v0.9.5++) — 2 particules vertes
+                // qui s'élèvent autour du joueur à chaque HP gagné.
+                // Donne un feedback visuel discret distinct du badge
+                // HUD : montre que la régénération "agit" ici et
+                // maintenant, pas juste un timer abstrait.
+                for k in 0..2 {
+                    if self.particles.len() >= PARTICLE_MAX {
+                        self.particles.swap_remove(0);
+                    }
+                    let theta = (k as f32) * std::f32::consts::PI
+                        + rand_unit() * 0.6;
+                    let radius = 14.0 + rand_unit().abs() * 6.0;
+                    let pos = self.player.origin
+                        + Vec3::new(theta.cos() * radius, theta.sin() * radius, 6.0);
+                    // Vélocité presque verticale → sparkle ascendant.
+                    let velocity = Vec3::new(
+                        rand_unit() * 8.0,
+                        rand_unit() * 8.0,
+                        45.0 + rand_unit().abs() * 25.0,
+                    );
+                    let lifetime = 0.55 * (0.8 + 0.4 * rand_unit().abs());
+                    self.particles.push(Particle {
+                        origin: pos,
+                        velocity,
+                        color: [0.40, 1.00, 0.45, 0.85], // vert vif
+                        expire_at: self.time_sec + lifetime,
+                        lifetime,
+                    });
+                }
             }
             self.regen_accum -= whole as f32;
         }
@@ -5589,6 +8920,35 @@ impl App {
                 // Atténuation : un pas n'écrase ni un tir, ni un pickup.
                 // `Low` priority laisse le mixer dropper si plein.
                 play_at(snd, self.sfx_footsteps[idx], self.player.origin, Priority::Low);
+            }
+            // **Footstep particles** (V2a) — petit puff de poussière
+            // sous le pied. Couleur grise neutre, vitesse basse, vie
+            // courte (0.4s). 3-4 particules par pas suffisent — l'œil
+            // capte le mouvement de "kick" sans saturer la scène.
+            // Position : sous les pieds (origin = pied du hull).
+            for k in 0..3 {
+                if self.particles.len() >= PARTICLE_MAX {
+                    self.particles.swap_remove(0);
+                }
+                let foot = self.player.origin;
+                let angle = (k as f32) * 2.094 + rand_unit() * 0.5; // 120° entre 3 puffs
+                let r = 8.0 + rand_unit().abs() * 6.0;
+                let pos = Vec3::new(
+                    foot.x + angle.cos() * r,
+                    foot.y + angle.sin() * r,
+                    foot.z + 2.0,
+                );
+                self.particles.push(Particle {
+                    origin: pos,
+                    velocity: Vec3::new(
+                        angle.cos() * 25.0,
+                        angle.sin() * 25.0,
+                        15.0 + rand_unit().abs() * 12.0,
+                    ),
+                    color: [0.55, 0.50, 0.45, 0.65],
+                    expire_at: self.time_sec + 0.40,
+                    lifetime: 0.40,
+                });
             }
         }
     }
@@ -6047,9 +9407,72 @@ impl App {
         }
     }
 
+    /// **Railgun zoom (sniper scope)** (v0.9.5++) — actif quand
+    /// `secondary_fire` est tenu ET que l'arme active est le Railgun.
+    /// Retourne `Some(zoom_ratio)` où `zoom_ratio < 1.0` réduit le FOV
+    /// (ex. `0.33` → ~3× zoom), `None` si pas de zoom.
+    ///
+    /// Le ratio est utilisé pour :
+    ///   * réduire le FOV de la caméra (proche × 1/3)
+    ///   * scaler la sensibilité souris au même ratio (mvt précis)
+    ///   * activer l'overlay scope HUD (vignette circulaire + crosshair)
+    fn railgun_zoom_ratio(&self) -> Option<f32> {
+        if self.active_weapon == WeaponId::Railgun
+            && self.input.secondary_fire
+            && !self.player_health.is_dead()
+            && !self.menu.open
+            && !self.console.is_open()
+        {
+            // 3× zoom → FOV ~30° à partir de cg_fov 90°.
+            Some(0.33)
+        } else {
+            None
+        }
+    }
+
+    /// **Muzzle position en world space** — point d'où partent
+    /// visuellement les balles, beams et muzzle flashes pour chaque
+    /// arme.  Doit matcher la position du bout du canon dans le
+    /// viewmodel (GLB ou MD3) pour que tirs/effets soient cohérents.
+    ///
+    /// Convention : offset (forward, right, down_neg) depuis l'œil.
+    /// Les armes GLB ont des géométries différentes → tuning empirique
+    /// par arme.  Les armes MD3 utilisent une valeur médiane.
+    fn viewmodel_muzzle_pos(&self, weapon: WeaponId) -> Vec3 {
+        let eye = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+        let basis = self.player.view_angles.to_vectors();
+        // Offsets (forward, right, down_neg) tunés par arme — chaque GLB
+        // a une géométrie différente, donc le bout du canon n'est pas
+        // au même endroit dans l'espace local.  Toutes les armes Q3
+        // sont maintenant en GLB (9/9), pas de fallback MD3 utilisé.
+        let (fwd, rt, up_neg) = match weapon {
+            // Armes longues / fusils long canon.
+            WeaponId::Machinegun      => (28.0, 4.0, 4.0),
+            WeaponId::Lightninggun    => (26.0, 5.0, 4.0),
+            WeaponId::Rocketlauncher  => (26.0, 6.0, 5.0),
+            WeaponId::Shotgun         => (24.0, 6.0, 5.0),
+            WeaponId::Grenadelauncher => (22.0, 6.0, 5.0),
+            // Armes médiums.
+            WeaponId::Bfg             => (18.0, 6.0, 5.0),
+            WeaponId::Plasmagun
+            | WeaponId::Railgun       => (14.0, 6.0, 5.0),
+            // Mêlée Gauntlet — pas de canon, "tip" = bout du gant à la
+            // hauteur de la main (range courte 64u, le hit se fait au
+            // contact).
+            WeaponId::Gauntlet        => (10.0, 5.0, 4.0),
+        };
+        eye + basis.forward * fwd + basis.right * rt - basis.up * up_neg
+    }
+
     fn fire_weapon(&mut self) -> bool {
         use q3_collision::Contents;
-        let Some(world) = self.world.as_ref() else { return false; };
+        // **BR mode** (v0.9.5) — accepte le firing si terrain présent
+        // (les traces hitscan iront vers Terrain::trace_ray au lieu
+        // de world.collision.trace_ray, via le shim `trace_shot` ci-
+        // dessous).
+        if self.world.is_none() && self.terrain.is_none() {
+            return false;
+        }
         let weapon = self.active_weapon;
         // **Tir secondaire** (RMB) — chaque arme implémente sa variante
         // alt-fire via `secondary_params(weapon)` qui modifie damage/
@@ -6092,7 +9515,10 @@ impl App {
         //      Si on trouve une arme cible, on la sélectionne ET on skip
         //      le tir de cette frame (le joueur doit retapper).  Sinon
         //      on reste sur l'arme vide et il est "dry".
-        if (self.ammo[slot] as u32) < params.ammo_cost as u32 {
+        // **Comparaison signée** (v0.9.5++ fix) — éviter le cast i32→u32
+        // qui pouvait wrap-around si `ammo[slot]` était corrompu négatif
+        // (deserialize cheaté), donnant un tir infini exploit.
+        if self.ammo[slot] < params.ammo_cost as i32 {
             if self.time_sec >= self.next_empty_click_at {
                 self.next_empty_click_at = self.time_sec + 0.4;
                 info!("*click* — {} est vide", weapon.name());
@@ -6150,7 +9576,10 @@ impl App {
             }
             return false;
         }
-        self.ammo[slot] = (self.ammo[slot] - params.ammo_cost as i32).max(0);
+        // **Garde-fou** (v0.9.5++ polish) — `saturating_sub` au lieu de
+        // `(x - y).max(0)` pour éviter l'overflow théorique (ammo_cost
+        // est u8 donc toujours ≥ 0, pas de check supplémentaire requis).
+        self.ammo[slot] = self.ammo[slot].saturating_sub(params.ammo_cost as i32);
         // Stats accuracy : un `fire_weapon()` qui dépasse l'ammo-check
         // compte comme un shot tiré.  Le Gauntlet (ammo_cost = 0) compte
         // aussi — un swing est un "tir" pour le tally global.
@@ -6171,31 +9600,140 @@ impl App {
         let basis = self.player.view_angles.to_vectors();
 
         // SFX + muzzle flash une seule fois par volée.
-        if let Some((_, h)) = self.sfx_fire.iter().find(|(w, _)| *w == weapon) {
-            if let Some(snd) = self.sound.as_ref() {
-                play_at(snd, *h, eye, Priority::Weapon);
+        // **Plasma SFX throttle** (v0.9.5++) — le plasma tire à 10/sec
+        // et le sample fait ~0.3s. Sans throttle, 3+ voix se superposent
+        // chaque seconde → les 64 canaux SoundSystem saturent et le
+        // mixer drop des plays → "pas de son". Throttle à 6/sec pour
+        // garder le feel de rapid-fire sans clogger les channels.
+        let mut should_play_fire_sfx = true;
+        if matches!(weapon, WeaponId::Plasmagun | WeaponId::Lightninggun) {
+            const RAPID_FIRE_SFX_COOLDOWN: f32 = 0.16;
+            if self.time_sec - self.last_fire_sfx_at < RAPID_FIRE_SFX_COOLDOWN {
+                should_play_fire_sfx = false;
             }
         }
+        if should_play_fire_sfx {
+            if let Some((_, h)) = self.sfx_fire.iter().find(|(w, _)| *w == weapon) {
+                if let Some(snd) = self.sound.as_ref() {
+                    let played = play_at(snd, *h, eye, Priority::Weapon);
+                    let master = snd.master_volume();
+                    info!(
+                        "sfx-fire: {:?} handle={:?} played={} master_vol={:.2} eye_pos={:?}",
+                        weapon, h, played, master, eye
+                    );
+                    if !played {
+                        warn!(
+                            "sfx-fire: {:?} play_3d a échoué (channels saturés ou volume nul)",
+                            weapon
+                        );
+                    }
+                } else {
+                    warn!("sfx-fire: {:?} self.sound = None — pas de système audio", weapon);
+                }
+            } else {
+                warn!("sfx-fire: {:?} non trouvé dans sfx_fire (taille={})", weapon, self.sfx_fire.len());
+            }
+            self.last_fire_sfx_at = self.time_sec;
+        }
         self.muzzle_flash_until = self.time_sec + 0.06;
+        // **Bot sound awareness** (v0.9.5) — chaque bot dans
+        // BOT_HEARING_RADIUS du tireur enregistre la position joueur
+        // comme « bruit entendu ». Le tick_bots utilisera ensuite
+        // last_heard_pos pour insérer un waypoint d'investigation si
+        // pas de LOS direct.  Effet émergent : un tir révèle la
+        // position joueur même sans qu'un bot le voie → flush des
+        // ennemis qui campaient un coin éloigné.
+        let now = self.time_sec;
+        for bd in self.bots.iter_mut() {
+            if bd.health.is_dead() {
+                continue;
+            }
+            let d = (bd.body.origin - self.player.origin).length();
+            if d <= BOT_HEARING_RADIUS {
+                bd.last_heard_pos = Some(self.player.origin);
+                bd.last_heard_at = now;
+            }
+        }
+        // **Bullet shells eject** (V2b) — MG et SG seulement (les
+        // autres armes n'ont pas de douilles physiques en Q3).
+        // Position : depuis l'éjecteur droit du viewmodel approx
+        // (eye + forward*8 + right*9 + up*1). Vélocité initiale :
+        // sortie latérale droite + un peu vers le haut/derrière, +
+        // gravité qui les fait tomber. Vie courte (0.6s) suffit
+        // visuellement.
+        if matches!(weapon, WeaponId::Machinegun | WeaponId::Shotgun) {
+            let basis = self.player.view_angles.to_vectors();
+            let shell_origin = self.player.origin
+                + Vec3::Z * PLAYER_EYE_HEIGHT
+                + basis.forward * 8.0
+                + basis.right * 9.0
+                + Vec3::Z;
+            // Vitesse latérale droite + arrière + up — la douille
+            // s'éjecte vers l'extérieur de la chambre puis chute.
+            let shell_vel = basis.right * 70.0
+                - basis.forward * 30.0
+                + Vec3::Z * (45.0 + rand_unit().abs() * 25.0);
+            if self.particles.len() >= PARTICLE_MAX {
+                self.particles.swap_remove(0);
+            }
+            self.particles.push(Particle {
+                origin: shell_origin,
+                velocity: shell_vel,
+                color: [0.85, 0.65, 0.20, 1.0], // laiton chaud
+                expire_at: self.time_sec + 0.6,
+                lifetime: 0.6,
+            });
+        }
         // Impulse de recul : cumule avec la valeur courante pour que les
         // rafales sentent "chargées", clampé à `VIEW_KICK_MAX` pour
         // éviter un viewmodel qui disparaît de l'écran sur tir auto.
         self.view_kick = (self.view_kick + weapon.view_kick()).min(VIEW_KICK_MAX);
-        // Dlight muzzle flash : orange-jaune chaud, rayon modeste, durée
-        // calée sur `muzzle_flash_until` (60 ms).  Invisible pour les
-        // armes dont le WeaponKind gère son propre visuel (rail/LG),
-        // mais sans conséquence si on la spawne quand même — la dlight
-        // expire avant que l'œil y fasse attention.
-        if let Some(r) = self.renderer.as_mut() {
-            r.spawn_dlight(
-                eye + basis.forward * 4.0,
-                200.0,
-                [1.0, 0.75, 0.3],
-                1.5,
-                self.time_sec,
-                0.06,
-            );
+        // **Punch angles** (v0.9.5++) — pitch up + jitter de yaw,
+        // ajoutés au rendu sans toucher l'aim.  Le PRNG du yaw est
+        // dérivé de `time_sec` quantifié pour rester déterministe-ish
+        // tout en variant entre tirs.
+        let (kick_pitch, kick_yaw_jitter) = weapon.recoil_kick();
+        self.view_kick_pitch = (self.view_kick_pitch + kick_pitch).min(15.0);
+        if kick_yaw_jitter > 0.001 {
+            // Hash simple sur time_sec pour un yaw signé.  `to_bits()`
+            // sur f32 donne un u32, on le passe en u64 avant le mul
+            // pour éviter un overflow const (le multiplicateur est >u32).
+            let h = (self.time_sec * 1000.0).to_bits() as u64;
+            let r = ((h.wrapping_mul(0x9E3779B97F4A7C15u64) >> 33) as u32 as f32
+                / u32::MAX as f32)
+                - 0.5;
+            self.view_kick_yaw += r * 2.0 * kick_yaw_jitter;
+            self.view_kick_yaw = self.view_kick_yaw.clamp(-5.0, 5.0);
         }
+        // Dlight muzzle flash **per-weapon** (v0.9.5+) — utilise la
+        // couleur retournée par `weapon.muzzle_flash()` au lieu d'un
+        // orange générique. Plasma → bleu, BFG → vert, Railgun →
+        // bleu-violet, etc. Si l'arme retourne `None` (gauntlet/LG),
+        // pas de dlight — leur effet visuel est géré par le beam.
+        if let Some((color, _flash_size)) = weapon.muzzle_flash() {
+            if let Some(r) = self.renderer.as_mut() {
+                let (radius, intensity) = match weapon {
+                    WeaponId::Bfg => (380.0, 4.0),
+                    WeaponId::Rocketlauncher => (300.0, 3.0),
+                    WeaponId::Shotgun => (260.0, 2.5),
+                    WeaponId::Railgun => (250.0, 2.5),
+                    WeaponId::Plasmagun => (180.0, 1.5),
+                    WeaponId::Machinegun => (170.0, 1.5),
+                    _ => (200.0, 1.8),
+                };
+                r.spawn_dlight(
+                    eye + basis.forward * 4.0,
+                    radius,
+                    [color[0], color[1], color[2]],
+                    intensity,
+                    self.time_sec,
+                    0.08,
+                );
+            }
+        }
+        // Smoke puff désactivé (v0.9.5+) — affichage 3D bizarre
+        // signalé. À ré-activer après debug. Le muzzle dlight per-
+        // weapon couvre déjà l'effet visuel.
 
         // Branchement sur le type de tir : projectile → spawn entité et
         // on sort. Hitscan → on continue dans la boucle de raycasts.
@@ -6205,14 +9743,29 @@ impl App {
             splash_damage,
         } = params.kind
         {
-            // Spawn légèrement devant l'œil pour éviter d'exploser dans la
-            // face du joueur au moindre obstacle côté sol.
-            let spawn = eye + basis.forward * 16.0;
+            // **Spawn position du projectile** — utilise le helper
+            // `viewmodel_muzzle_pos` qui retourne le bout du canon
+            // selon l'arme (cohérent avec muzzle flash + tracers +
+            // beams).  Évite que les projectiles partent depuis l'œil
+            // du joueur (16u devant) ce qui faisait spawner les
+            // grenades/roquettes derrière le canon visible.
+            let spawn = self.viewmodel_muzzle_pos(weapon);
             // Mesh + tint + physique propres à l'arme.
             // * plasma : bleu électrique, linéaire, fuse 5s (kill-switch)
             // * grenade : gris neutre, gravité + rebond, fuse 2.5s (Q3 canon)
             // * rocket (défaut) : blanc, linéaire, fuse 5s
             let (mesh, tint, gravity, bounce, fuse) = match weapon {
+                WeaponId::Plasmagun if alt_active => (
+                    // **PG orb alt** : on swap sur le mesh rocket pour
+                    // signaler visuellement la masse plus grosse, tint
+                    // bleu-violet saturé. Plus lent + splash large
+                    // (déjà via secondary_params).
+                    self.rocket_mesh.clone(),
+                    [0.55, 0.45, 1.0, 1.0],
+                    0.0,
+                    false,
+                    4.0,
+                ),
                 WeaponId::Plasmagun => (
                     self.plasma_mesh.clone(),
                     [0.45, 0.65, 1.0, 1.0],
@@ -6220,12 +9773,32 @@ impl App {
                     false,
                     5.0,
                 ),
+                WeaponId::Grenadelauncher if alt_active => (
+                    // **GL airburst alt** : pas de rebond (explose au
+                    // premier contact), gravité conservée mais vitesse
+                    // élevée → trajectoire tendue. Tint orange chaud
+                    // pour distinguer la fuse vive.
+                    self.grenade_mesh.clone(),
+                    [1.0, 0.55, 0.20, 1.0],
+                    800.0,
+                    false,
+                    3.0,
+                ),
                 WeaponId::Grenadelauncher => (
                     self.grenade_mesh.clone(),
                     [0.9, 0.9, 0.75, 1.0],
                     800.0, // Q3 g_gravity
                     true,
                     2.5, // fuse canonique
+                ),
+                WeaponId::Bfg if alt_active => (
+                    // **BFG zone alt** : tint vert plus saturé, fuse
+                    // un peu plus longue car projectile plus lent.
+                    self.rocket_mesh.clone(),
+                    [0.30, 1.0, 0.30, 1.0],
+                    0.0,
+                    false,
+                    6.0,
                 ),
                 WeaponId::Bfg => (
                     // On partage le mesh rocket — pas de MD3 BFG natif dans
@@ -6275,7 +9848,17 @@ impl App {
             return true;
         }
 
-        let spread_rad = params.spread_deg.to_radians();
+        // **Spread bloom** (v0.9.5+) — recoil-modulé. Le MG en plein
+        // auto voit son spread doubler après ~1 s de tir continu, mais
+        // se reset rapidement entre rafales (basé sur view_kick courant
+        // qui décroît expo-fast). Les armes single-shot (RG, RL) ne
+        // sont pas affectées (leur spread base = 0).
+        let bloom_factor = match weapon {
+            WeaponId::Machinegun | WeaponId::Plasmagun => 1.0 + self.view_kick * 1.5,
+            WeaponId::Shotgun => 1.0 + self.view_kick * 0.4, // léger
+            _ => 1.0,
+        };
+        let spread_rad = (params.spread_deg * bloom_factor).to_radians();
         let mut any_hit = false;
         // Idem que `any_hit` mais pour les kills : un tir qui finit un
         // bot (taken > 0 && dead) flag ceci. Déclenche le thunk kill-
@@ -6303,6 +9886,9 @@ impl App {
         // collectés pour flush hors-borrow.
         let mut pending_sparks: Vec<(Vec3, Vec3, [f32; 4])> = Vec::new();
         let mut pending_gibs: Vec<Vec3> = Vec::new();
+        // Points d'impact headshot — flush hors-borrow vers la gerbe
+        // dorée + dlight blanc-jaune dans `push_headshot_sparkle`.
+        let mut pending_headshot_sparkles: Vec<Vec3> = Vec::new();
         // Bullet holes persistants sur les murs (pos, normal) — posés
         // après la boucle pour les mêmes raisons de borrow que les sparks.
         let mut pending_wall_marks: Vec<(Vec3, Vec3)> = Vec::new();
@@ -6318,6 +9904,27 @@ impl App {
         };
         let spark_flesh_color: [f32; 4] = [1.0, 0.25, 0.2, 1.0];
 
+        // **Trace shim BSP / Terrain** (v0.9.5) — unifie le trace
+        // hitscan pour les deux modes de map.  Capture le world et
+        // le terrain par référence : si world existe, on délègue à
+        // sa collision (BSP brushes) ; sinon on utilise le
+        // heightmap. Retourne `(fraction, plane_normal, contents)`.
+        let world_ref = self.world.as_ref();
+        let terrain_ref = self.terrain.clone();
+        let trace_shot = |start: Vec3, end: Vec3, mask: Contents|
+            -> (f32, Vec3, Contents)
+        {
+            if let Some(w) = world_ref {
+                let tr = w.collision.trace_ray(start, end, mask);
+                (tr.fraction, tr.plane_normal, tr.contents)
+            } else if let Some(t) = terrain_ref.as_ref() {
+                let tr = t.trace_ray(start, end);
+                (tr.fraction, tr.plane_normal, Contents::SOLID)
+            } else {
+                (1.0, Vec3::Z, Contents::empty())
+            }
+        };
+
         for _ in 0..params.pellets.max(1) {
             let fwd = if spread_rad == 0.0 {
                 basis.forward
@@ -6330,8 +9937,9 @@ impl App {
             };
             let end = eye + fwd * params.range;
 
-            let world_trace = world.collision.trace_ray(eye, end, Contents::MASK_SHOT);
-            let t_wall = world_trace.fraction * params.range;
+            let (wt_frac, wt_normal, wt_contents) =
+                trace_shot(eye, end, Contents::MASK_SHOT);
+            let t_wall = wt_frac * params.range;
 
             let mut best: Option<(f32, usize)> = None;
             for (i, d) in self.bots.iter().enumerate() {
@@ -6361,29 +9969,78 @@ impl App {
             }
 
             if let Some((t_bot, idx)) = best {
-                // On calcule le multiplicateur Quad AVANT de prendre le
-                // mut-borrow sur `self.bots` (emprunt partiel non supporté
-                // quand on appelle `self.player_damage_multiplier()`).
-                let dmg = params.damage * self.player_damage_multiplier();
+                // **Headshot detection** (G2a) — l'impact est calculé à
+                // `eye + fwd * t_bot`. Si sa Z relative au pied du bot
+                // dépasse HEADSHOT_Z_THRESHOLD, on multiplie les dégâts
+                // par HEADSHOT_DMG_MULT et on flag pour le feedback
+                // visuel/sonore distinct.
+                let bot_origin = self.bots[idx].body.origin;
+                let hit_pt_pre = eye + fwd * t_bot;
+                let is_headshot = (hit_pt_pre.z - bot_origin.z) >= HEADSHOT_Z_THRESHOLD;
+                let mut dmg = params.damage * self.player_damage_multiplier();
+                if is_headshot {
+                    dmg = (dmg as f32 * HEADSHOT_DMG_MULT) as i32;
+                }
                 let bot_driver = &mut self.bots[idx];
                 let bot_pos = bot_driver.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+                let was_alive = !bot_driver.health.is_dead();
                 let taken = bot_driver.health.take_damage(dmg);
                 let dead = bot_driver.health.is_dead();
                 let name = bot_driver.bot.name.clone();
+                // **Death anim trigger** (v0.9.5++) — au moment exact où
+                // le bot meurt, on enregistre le timestamp pour piloter
+                // BOTH_DEATH1 → BOTH_DEAD1 freeze dans queue_bots.
+                if was_alive && dead && bot_driver.death_started_at.is_none() {
+                    bot_driver.death_started_at = Some(self.time_sec);
+                }
                 if taken > 0 {
                     // Horodate la prise de dégât pour déclencher l'anim
                     // TORSO_PAIN côté rendu (fenêtre ~200 ms).
                     bot_driver.last_damage_at = self.time_sec;
-                    if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_bot) {
-                        play_at(snd, h, bot_pos, Priority::Low);
+                    // **Dodge réaction** (v0.9.5) — informe l'IA bot qu'elle
+                    // vient de prendre un hit → bot va strafer + sauter
+                    // pendant DODGE_DURATION pour casser la mire.
+                    bot_driver.bot.notify_damage_taken();
+                    // **Anti-spam pain SFX** + **death SFX** distinct :
+                    // sur le hit fatal on joue death_bot une fois. Sur
+                    // les hits non-létaux on joue pain_bot mais avec un
+                    // cooldown par bot pour éviter le SG-spam ou splash-
+                    // spam de "ouch" simultanés.
+                    if let Some(snd) = self.sound.as_ref() {
+                        if dead {
+                            if let Some(h) = self.sfx_death_bot.or(self.sfx_pain_bot) {
+                                play_at(snd, h, bot_pos, Priority::Weapon);
+                            }
+                        } else if (self.time_sec - bot_driver.last_pain_sfx_at)
+                            >= PAIN_SFX_COOLDOWN
+                        {
+                            if let Some(h) = self.sfx_pain_bot {
+                                play_at(snd, h, bot_pos, Priority::Low);
+                                bot_driver.last_pain_sfx_at = self.time_sec;
+                            }
+                        }
                     }
                     any_hit = true;
+                    // Bug fix v0.9.5++ : avant on passait `is_headshot`
+                    // dans la position `to_player` du tuple — les
+                    // headshots étaient rendus comme dégâts SUBIS (rouge)
+                    // au lieu d'INFLIGÉS (orange/jaune) et zappaient le
+                    // combo counter.  Le headshot a déjà sa signature
+                    // visuelle dédiée via `pending_headshot_sparkles`
+                    // (gerbe dorée + dlight blanc-jaune ci-dessous).
                     pending_damage_nums.push((bot_pos, taken, false));
                     // Sparks rouges au point d'impact sur le bot ; normale
                     // = opposée à la direction du tir (les gouttes partent
                     // vers le tireur).
                     let hit_pt = eye + fwd * t_bot;
                     pending_sparks.push((hit_pt, -fwd, spark_flesh_color));
+                    // **Headshot sparkle** (v0.9.5++) — petite gerbe
+                    // dorée additive autour du point d'impact tête.
+                    // 6 particules rapides + 1 dlight bref blanc-jaune
+                    // → "ding" visuel au-dessus du sang rouge standard.
+                    if is_headshot {
+                        pending_headshot_sparkles.push(hit_pt);
+                    }
                     // **P5 — Blood spray decal** : on trace AU-DELÀ de
                     // la cible (16 u dans la direction du tir) pour
                     // trouver le mur derrière, et y poser une décale
@@ -6391,11 +10048,11 @@ impl App {
                     // cinéma — pas crucial gameplay, gros impact visuel.
                     let beyond_start = hit_pt + fwd * 4.0;
                     let beyond_end = beyond_start + fwd * 64.0;
-                    let beyond =
-                        world.collision.trace_ray(beyond_start, beyond_end, Contents::SOLID);
-                    if beyond.fraction < 1.0 {
-                        let blood_pt = beyond_start + fwd * (beyond.fraction * 64.0);
-                        pending_blood_decals.push((blood_pt, beyond.plane_normal));
+                    let (b_frac, b_normal, _) =
+                        trace_shot(beyond_start, beyond_end, Contents::SOLID);
+                    if b_frac < 1.0 {
+                        let blood_pt = beyond_start + fwd * (b_frac * 64.0);
+                        pending_blood_decals.push((blood_pt, b_normal));
                     }
                 }
                 if taken > 0 && dead {
@@ -6418,7 +10075,7 @@ impl App {
                     ));
                     pending_gibs.push(bot_pos);
                 }
-            } else if world_trace.fraction < 1.0 {
+            } else if wt_frac < 1.0 {
                 // Pas touché de bot mais bien tapé un mur → sparks + bullet
                 // hole persistant.  La décale se pose sur la surface via
                 // `plane_normal` (orientation alignée au mur, pas
@@ -6431,7 +10088,7 @@ impl App {
                 // sont pas remontés par le trace v1, on retombe donc
                 // sur Contents (WATER/LAVA/SLIME) qui couvre 80 % du
                 // sentiment "matériau impacté".
-                let contents = world_trace.contents;
+                let contents = wt_contents;
                 let (impact_color, impact_decal): ([f32; 4], Option<[f32; 4]>) =
                     if contents.contains(Contents::WATER) {
                         // Splash bleu, pas de décale (l'eau ne marque pas).
@@ -6450,9 +10107,9 @@ impl App {
                         // hole persistant.
                         (spark_world_color, Some([0.05, 0.05, 0.06, 0.7]))
                     };
-                pending_sparks.push((hit_pt, world_trace.plane_normal, impact_color));
+                pending_sparks.push((hit_pt, wt_normal, impact_color));
                 if impact_decal.is_some() {
-                    pending_wall_marks.push((hit_pt, world_trace.plane_normal));
+                    pending_wall_marks.push((hit_pt, wt_normal));
                 }
 
                 // **Rail ricochet** (W7) : si alt-fire actif sur railgun
@@ -6462,19 +10119,19 @@ impl App {
                 // d'impact, en cherchant un bot. Dégâts à 50% pour
                 // équilibrer.
                 if alt_active && matches!(weapon, WeaponId::Railgun) {
-                    let n = world_trace.plane_normal;
+                    let n = wt_normal;
                     let reflected = fwd - n * 2.0 * fwd.dot(n);
                     let ricochet_origin =
                         hit_pt + reflected * 2.0; // léger lift hors mur
                     let ricochet_range = 1024.0_f32;
                     let ricochet_end =
                         ricochet_origin + reflected * ricochet_range;
-                    let r_trace = world.collision.trace_ray(
+                    let (r_frac, _, _) = trace_shot(
                         ricochet_origin,
                         ricochet_end,
                         Contents::MASK_SHOT,
                     );
-                    let r_t_wall = r_trace.fraction * ricochet_range;
+                    let r_t_wall = r_frac * ricochet_range;
                     let mut r_best: Option<(f32, usize)> = None;
                     for (i, d) in self.bots.iter().enumerate() {
                         if d.health.is_dead() || d.invul_until > self.time_sec
@@ -6502,7 +10159,7 @@ impl App {
                     // du ricochet (bot ou mur).
                     let (r_t_hit, r_hit_pt) = match r_best {
                         Some((t, _)) => (t, ricochet_origin + reflected * t),
-                        None if r_trace.fraction < 1.0 => (
+                        None if r_frac < 1.0 => (
                             r_t_wall,
                             ricochet_origin + reflected * r_t_wall,
                         ),
@@ -6526,6 +10183,7 @@ impl App {
                         let taken = bot_driver.health.take_damage(dmg);
                         if taken > 0 {
                             bot_driver.last_damage_at = self.time_sec;
+                            bot_driver.bot.notify_damage_taken();
                             any_hit = true;
                             pending_damage_nums
                                 .push((bot_pos, taken, false));
@@ -6562,10 +10220,10 @@ impl App {
                     None => t_wall,
                 };
                 let hit_pt = eye + fwd * t_hit;
-                // On décale légèrement le départ vers le bas/devant pour
-                // que le beam parte visuellement de la main, pas du centre
-                // de l'écran.
-                let start = eye + basis.forward * 8.0 - basis.up * 6.0;
+                // **Muzzle position par arme** — utilise le helper
+                // commun pour que le beam parte du bout du canon visible
+                // (différent par GLB), pas d'un offset générique.
+                let start = self.viewmodel_muzzle_pos(weapon);
                 let (color, lifetime) = match weapon {
                     WeaponId::Lightninggun => ([0.55, 0.75, 1.0, 0.9], 0.08_f32),
                     WeaponId::Railgun => ([0.95, 0.25, 0.55, 0.85], 0.6_f32),
@@ -6585,10 +10243,51 @@ impl App {
                     style,
                 });
             }
+
+            // **Bullet tracers** (v0.9.5++) — pour MG/SG/PG on dessine
+            // un trait fin et bref œil→impact.  Couleur gold-orange
+            // pour MG/SG (poudre), blanc-cyan pour PG (plasma).  Très
+            // brève (60 ms) → l'œil voit "fléchette" puis disparaît,
+            // pas de spam visuel sustained.  En SG (11 pellets) ça
+            // visualise le cône de dispersion, ce qui aide à lire le
+            // meilleur range d'engagement.
+            if matches!(
+                weapon,
+                WeaponId::Machinegun | WeaponId::Shotgun | WeaponId::Plasmagun
+            ) {
+                let t_hit = match best {
+                    Some((t_bot, _)) => t_bot.min(t_wall),
+                    None => t_wall,
+                };
+                let hit_pt = eye + fwd * t_hit;
+                // **Muzzle position par arme** — helper commun.
+                let start = self.viewmodel_muzzle_pos(weapon);
+                let (mut color, lifetime) = match weapon {
+                    WeaponId::Plasmagun => ([0.40, 0.85, 1.0, 0.55], 0.05_f32),
+                    _ => ([1.0, 0.85, 0.40, 0.55], 0.06_f32), // MG/SG gold
+                };
+                // **Quad tracers** SUPPRIMÉ (v0.9.5++ user request) — la
+                // couleur des tracers ne change plus pendant Quad.
+                // Feedback restant : SFX d'activation + chrono HUD.
+                self.beams.push(ActiveBeam {
+                    a: start,
+                    b: hit_pt,
+                    color,
+                    expire_at: self.time_sec + lifetime,
+                    lifetime,
+                    style: BeamStyle::Straight,
+                });
+            }
         }
 
         if any_hit {
             self.hit_marker_until = self.time_sec + 0.18;
+            // **FOV punch** — kick d'élargissement horizontal sur hit.
+            // Set strength = HIT par défaut ; sera bumpé à FRAG plus
+            // bas si `any_kill`.  Le punch dans le `cg_fov` apply path
+            // décroît linéairement sur FOV_PUNCH_DURATION.
+            self.fov_punch_until = self.time_sec + FOV_PUNCH_DURATION;
+            self.fov_punch_strength = FOV_PUNCH_HIT;
             // Stat accuracy : un tir hitscan qui touche au moins 1 bot
             // compte comme +1 hit.  Une volée SG qui touche 2 cibles
             // compte 1 hit (pour matcher la granularité de `total_shots`
@@ -6607,6 +10306,13 @@ impl App {
             if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_kill_confirm) {
                 play_kill_feedback(snd, h, self.player.origin);
             }
+            // Kill-marker visuel : grand X rouge vif sur le réticule.
+            // Étendu si plusieurs frags tombent dans la fenêtre — pas
+            // de stacking, on ré-arme à chaque tick `any_kill`.
+            self.kill_marker_until = self.time_sec + KILL_MARKER_DURATION_SEC;
+            // FOV punch boosté sur frag létal — distinct du hit standard.
+            self.fov_punch_until = self.time_sec + FOV_PUNCH_DURATION;
+            self.fov_punch_strength = FOV_PUNCH_FRAG;
             // Médailles Q3 — évaluées AVANT `last_frag_at = time_sec`
             // pour que la fenêtre d'Excellent mesure bien le delta
             // entre frag précédent et frag courant.
@@ -6664,6 +10370,9 @@ impl App {
         for (pos, normal) in pending_wall_marks {
             self.push_wall_mark(pos, normal, weapon);
         }
+        for pos in pending_headshot_sparkles {
+            self.push_headshot_sparkle(pos);
+        }
         // P5 — décales de sang derrière les cibles touchées. Petite
         // tache rouge sombre, alpha 80 %, vie longue (30 s) pour que
         // les murs gardent leur historique de combat.
@@ -6682,6 +10391,12 @@ impl App {
         for pos in pending_gibs {
             self.push_death_gibs(pos);
             self.push_blood_splat(pos);
+            self.spawn_bot_drop(pos);
+            // Floater "+1 FRAG" au-dessus du bot fraggé — feedback
+            // visuel juicy ancré au monde.  Position légèrement
+            // au-dessus de la tête pour ne pas être obscurcie par
+            // les gibs.
+            self.push_frag_confirm(pos + Vec3::Z * BOT_CENTER_HEIGHT);
         }
         // Flush streak : chaque frag de la volée incrémente le compteur
         // et peut déclencher une bannière (palier 3/5/7/10/15/20).  On
@@ -6720,7 +10435,14 @@ impl App {
     /// Le joueur est aussi affecté par son propre splash (rocket jump).
     fn tick_projectiles(&mut self, dt: f32) {
         use q3_collision::Contents;
-        let Some(world) = self.world.as_ref() else { return; };
+        // **BR mode** (v0.9.5+) — accepte le tick si terrain présent.
+        // Sans ça, en BR mode, les projectiles spawnaient mais ne se
+        // mettaient jamais à jour → rocket immobile au point de tir.
+        if self.world.is_none() && self.terrain.is_none() {
+            return;
+        }
+        let world_ref = self.world.as_ref();
+        let terrain_ref = self.terrain.clone();
         // On collecte les explosions à appliquer hors-borrow.
         #[derive(Debug, Clone, Copy)]
         enum HitTarget {
@@ -6806,10 +10528,17 @@ impl App {
                             // (radians/s). On approxime via slerp simple :
                             // mix puis renormalise.
                             let mix = (HOMING_TURN_RATE * dt).min(1.0);
-                            let new_dir = (cur_dir * (1.0 - mix)
-                                + want_dir * mix)
-                                .normalize();
-                            p.velocity = new_dir * cur_speed;
+                            let blended = cur_dir * (1.0 - mix) + want_dir * mix;
+                            // **NaN guard** (v0.9.5++ polish) — si `cur_dir`
+                            // et `want_dir` sont anti-parallèles avec
+                            // `mix=0.5`, la somme = 0 → `normalize()` → NaN
+                            // qui se propage dans `p.velocity` et casse
+                            // toute la chaîne de collision en aval.
+                            // Fallback : on garde la direction courante.
+                            let len_sq = blended.length_squared();
+                            if len_sq > 1e-6 {
+                                p.velocity = blended * (cur_speed / len_sq.sqrt());
+                            }
                         }
                     } else {
                         p.homing_target = None;
@@ -6878,8 +10607,17 @@ impl App {
                 }
             }
             // Intersection avec le monde (hit le premier).
-            let trace = world.collision.trace_ray(p.origin, next, Contents::MASK_SHOT);
-            let t_world = trace.fraction * seg_len;
+            // BR mode → trace via heightmap au lieu de BSP.
+            let (trace_frac, trace_normal) = if let Some(w) = world_ref {
+                let tr = w.collision.trace_ray(p.origin, next, Contents::MASK_SHOT);
+                (tr.fraction, tr.plane_normal)
+            } else if let Some(t) = terrain_ref.as_ref() {
+                let tr = t.trace_ray(p.origin, next);
+                (tr.fraction, tr.plane_normal)
+            } else {
+                (1.0, Vec3::Z)
+            };
+            let t_world = trace_frac * seg_len;
 
             if let Some((t_hit, tgt)) = best {
                 if t_hit <= t_world {
@@ -6900,13 +10638,13 @@ impl App {
                     return false;
                 }
             }
-            if trace.fraction < 1.0 {
+            if trace_frac < 1.0 {
                 // Impact monde — deux comportements :
                 //  * `bounce=false` (rocket, plasma) : explose immédiatement.
                 //  * `bounce=true` (grenade) : réflexion amortie le long du
                 //    plan d'impact, continue à vivre jusqu'à la fuse.
                 if p.bounce {
-                    let normal = trace.plane_normal;
+                    let normal = trace_normal;
                     // Projectile quasi-immobile sur le sol → on le colle à
                     // la surface et on coupe sa vitesse pour qu'il attende
                     // la fuse sans glisser indéfiniment.
@@ -6942,7 +10680,7 @@ impl App {
                     // Impact sur une surface du monde : la trace fournit
                     // une normale cohérente, on la mémorise pour spawner
                     // une décale orientée.
-                    world_normal: trace.plane_normal,
+                    world_normal: trace_normal,
                 });
                 return false;
             }
@@ -6990,7 +10728,7 @@ impl App {
         // bleus très courts qui composent l'anneau autour du bolt.
         for pos in pending_orbital_sparks {
             if self.particles.len() >= PARTICLE_MAX {
-                self.particles.remove(0);
+                self.particles.swap_remove(0);
             }
             self.particles.push(Particle {
                 origin: pos,
@@ -7004,26 +10742,68 @@ impl App {
         // borrow sur self.projectiles est relâché.
         if let Some(r) = self.renderer.as_mut() {
             for (pos, weapon) in pending_trails {
-                let (color, size_start, size_end, lifetime) = match weapon {
-                    // Rocket : fumée blanche dense qui s'étale.
-                    WeaponId::Rocketlauncher => ([0.85, 0.85, 0.85, 0.6], 2.5, 10.0, 0.7),
-                    // Grenade : fumée grise plus fine, vie courte.
-                    WeaponId::Grenadelauncher => ([0.6, 0.6, 0.6, 0.5], 2.0, 6.0, 0.5),
-                    // BFG : traînée verdâtre énergétique.
-                    WeaponId::Bfg => ([0.4, 1.0, 0.5, 0.7], 4.0, 14.0, 0.8),
-                    _ => continue,
+                // **Trails détaillés v0.9.5++** — chaque arme a un
+                // trail multi-particules (smoke + heat + spark) pour
+                // un feedback visuel plus riche que la single puff.
+                match weapon {
+                    WeaponId::Rocketlauncher => {
+                        // Rocket : 1 puff de fumée blanche dense + 1
+                        // halo orange chaud (heat haze derrière) + 1
+                        // étincelle incandescente.
+                        r.spawn_particle(
+                            pos, Vec3::Z * 8.0,
+                            [0.92, 0.90, 0.88, 0.7], 3.0, 14.0,
+                            self.time_sec, 0.9,
+                        );
+                        r.spawn_particle(
+                            pos, Vec3::Z * 4.0,
+                            [1.0, 0.55, 0.20, 0.65], 4.0, 10.0,
+                            self.time_sec, 0.35,
+                        );
+                        r.spawn_particle(
+                            pos + Vec3::new(rand_unit() * 2.0, rand_unit() * 2.0, 0.0),
+                            Vec3::ZERO,
+                            [1.0, 0.85, 0.40, 1.0], 1.0, 0.5,
+                            self.time_sec, 0.18,
+                        );
+                    }
+                    WeaponId::Grenadelauncher => {
+                        // Grenade : fumée grise + petite étincelle.
+                        r.spawn_particle(
+                            pos, Vec3::Z * 6.0,
+                            [0.55, 0.55, 0.55, 0.55], 2.2, 7.0,
+                            self.time_sec, 0.55,
+                        );
+                        r.spawn_particle(
+                            pos, Vec3::ZERO,
+                            [1.0, 0.75, 0.35, 0.9], 0.8, 0.3,
+                            self.time_sec, 0.12,
+                        );
+                    }
+                    WeaponId::Bfg => {
+                        // BFG : énorme trail vert + arcs électriques.
+                        r.spawn_particle(
+                            pos, Vec3::Z * 4.0,
+                            [0.30, 1.0, 0.40, 0.85], 5.0, 18.0,
+                            self.time_sec, 1.0,
+                        );
+                        // 4 sparks orbitaux verts pour effet "plasma BFG"
+                        for k in 0..4 {
+                            let theta = (k as f32) * std::f32::consts::FRAC_PI_2;
+                            let off = Vec3::new(
+                                theta.cos() * 12.0,
+                                theta.sin() * 12.0,
+                                0.0,
+                            );
+                            r.spawn_particle(
+                                pos + off, off * 1.2,
+                                [0.55, 1.0, 0.55, 1.0], 1.5, 0.5,
+                                self.time_sec, 0.25,
+                            );
+                        }
+                    }
+                    _ => {}
                 };
-                r.spawn_particle(
-                    pos,
-                    // Vitesse très faible vers le haut — la fumée flotte
-                    // pendant qu'elle grossit, sans partir droit en l'air.
-                    Vec3::Z * 8.0,
-                    color,
-                    size_start,
-                    size_end,
-                    self.time_sec,
-                    lifetime,
-                );
             }
         }
 
@@ -7062,20 +10842,41 @@ impl App {
             if !matches!(b.weapon, WeaponId::Plasmagun | WeaponId::Bfg) {
                 self.push_explosion_smoke(b.pos);
             }
-            // Décale de brûlure : seulement sur un vrai impact surface
-            // (normal non-nulle).  Couleur : noir brûlé à 60 % d'alpha,
-            // rayon = 18 (≈ taille d'une scorch mark Q3 rocketlauncher),
-            // vie = 20 s avec fade sur les dernières 25 %.
+            // **Scorch marks empilées** (v0.9.5++ #39) — décales
+            // multi-couches par arme :
+            // * rocket/grenade : 1 grosse mark noire + 1 anneau brûlé
+            //   chaud orange (cercle externe résidu thermique)
+            // * BFG : grand cercle vert toxique + halo
+            // * plasma : trace bleu cyan diffuse
             if b.world_normal != Vec3::ZERO {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.spawn_decal(
-                        b.pos,
-                        b.world_normal,
-                        18.0,
-                        [0.05, 0.04, 0.03, 0.6],
-                        self.time_sec,
-                        20.0,
-                    );
+                    match b.weapon {
+                        WeaponId::Rocketlauncher | WeaponId::Grenadelauncher => {
+                            // Cercle noir central
+                            r.spawn_decal(b.pos, b.world_normal, 18.0,
+                                [0.04, 0.03, 0.02, 0.75], self.time_sec, 25.0);
+                            // Halo brûlé chaud externe (lifetime court)
+                            r.spawn_decal(b.pos, b.world_normal, 28.0,
+                                [0.45, 0.20, 0.06, 0.35], self.time_sec, 4.0);
+                        }
+                        WeaponId::Bfg => {
+                            // Cercle vert toxique central
+                            r.spawn_decal(b.pos, b.world_normal, 28.0,
+                                [0.20, 0.45, 0.18, 0.65], self.time_sec, 30.0);
+                            // Halo lumineux vert (court)
+                            r.spawn_decal(b.pos, b.world_normal, 42.0,
+                                [0.40, 0.95, 0.40, 0.30], self.time_sec, 3.5);
+                        }
+                        WeaponId::Plasmagun => {
+                            // Trace cyan diffuse (plasma "propre")
+                            r.spawn_decal(b.pos, b.world_normal, 14.0,
+                                [0.20, 0.50, 0.85, 0.45], self.time_sec, 8.0);
+                        }
+                        _ => {
+                            r.spawn_decal(b.pos, b.world_normal, 18.0,
+                                [0.05, 0.04, 0.03, 0.6], self.time_sec, 20.0);
+                        }
+                    }
                 }
             }
             // Dlight explosion : flash intense orange, fade rapide sur
@@ -7089,7 +10890,21 @@ impl App {
                 };
                 r.spawn_dlight(b.pos, radius, color, intensity, self.time_sec, 0.5);
             }
-            if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_rocket_explode) {
+            // Son d'impact spécifique à l'arme. Avant v0.9.4 toutes
+            // les explosions jouaient sfx_rocket_explode → plasma sonnait
+            // identique à rocket. Maintenant chaque arme a son sample
+            // dédié, fallback sur rocket_explode (puis None silencieux).
+            let impact_sfx = match b.weapon {
+                WeaponId::Rocketlauncher | WeaponId::Bfg => self
+                    .sfx_rocket_impact
+                    .or(self.sfx_rocket_explode),
+                WeaponId::Grenadelauncher => self
+                    .sfx_grenade_impact
+                    .or(self.sfx_rocket_explode),
+                WeaponId::Plasmagun => self.sfx_plasma_impact,
+                _ => self.sfx_rocket_explode,
+            };
+            if let (Some(snd), Some(h)) = (self.sound.as_ref(), impact_sfx) {
                 play_at(snd, h, b.pos, Priority::Weapon);
             }
             // Screen-shake : une explosion à <= `SHAKE_NEAR_DIST` du œil
@@ -7138,14 +10953,24 @@ impl App {
                         let name = bd.bot.name.clone();
                         let dead = bd.health.is_dead();
                         if taken > 0 {
+                            // Dodge réaction même sur direct hit projectile.
+                            bd.bot.notify_damage_taken();
                             let bot_pos = bd.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
-                            if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_bot) {
-                                play_at(snd, h, bot_pos, Priority::Low);
+                            // Pain SFX cooldownisé + death SFX si fatal.
+                            if let Some(snd) = self.sound.as_ref() {
+                                if dead {
+                                    if let Some(h) = self.sfx_death_bot.or(self.sfx_pain_bot) {
+                                        play_at(snd, h, bot_pos, Priority::Weapon);
+                                    }
+                                } else if (self.time_sec - bd.last_pain_sfx_at)
+                                    >= PAIN_SFX_COOLDOWN
+                                {
+                                    if let Some(h) = self.sfx_pain_bot {
+                                        play_at(snd, h, bot_pos, Priority::Low);
+                                        bd.last_pain_sfx_at = self.time_sec;
+                                    }
+                                }
                             }
-                            // Chiffre de dégât jaune si c'est le joueur qui
-                            // l'inflige ; rouge si c'est un autre bot (FF off
-                            // aujourd'hui mais on laisse la branche cohérente
-                            // au cas où).
                             let to_player = !matches!(b.owner, ProjectileOwner::Player);
                             pending_damage_nums.push((bot_pos, taken, to_player));
                             if matches!(b.owner, ProjectileOwner::Player) {
@@ -7169,6 +10994,14 @@ impl App {
                 }
                 Some(HitTarget::Player) => {
                     if !self.player_health.is_dead() {
+                        // **Godmode** (test) : skip damage si actif et
+                        // que le projectile ne vient pas du joueur lui-
+                        // même (rocket-jump self-damage reste utile).
+                        let godmode = self.cvars.get_i32("g_godmode").unwrap_or(0) != 0;
+                        let from_bot = !matches!(b.owner, ProjectileOwner::Player);
+                        if godmode && from_bot {
+                            continue;
+                        }
                         // Knockback direct joueur — même règle que pour
                         // les bots. Formule Q3 : avant absorption armor.
                         const KNOCKBACK_MASS: f32 = 200.0;
@@ -7200,13 +11033,25 @@ impl App {
                             // chiffre sur le joueur (il se verra quand on
                             // projettera sur l'écran, typique "-X HP" flotant).
                             pending_damage_nums.push((eye, taken, true));
-                            // Pain-arrow : direction = trajectoire du projectile
-                            // qui vient de toucher. `b.impact_dir` pointe déjà
-                            // dans le sens du vol (source → joueur) — c'est
-                            // exactement la sémantique qu'on veut pour le HUD.
                             self.last_damage_dir = b.impact_dir;
                             self.last_damage_until = self.time_sec + DAMAGE_DIR_SHOW_SEC;
                             self.pain_flash_until = self.time_sec + PAIN_FLASH_SEC;
+                            // **Player damage shake** — secousse caméra
+                            // proportionnelle aux dégâts pris.
+                            let dmg_shake = (taken as f32 * 0.10).min(5.0);
+                            if dmg_shake > self.shake_intensity {
+                                self.shake_intensity = dmg_shake;
+                            }
+                            self.shake_until =
+                                self.time_sec + SHAKE_DURATION;
+                            // Player hit sparks → particles rouges au
+                            // point d'impact (visible 3rd person des
+                            // autres joueurs ; subtil pour soi-même).
+                            self.push_hit_sparks(
+                                eye,
+                                -b.impact_dir,
+                                [1.0, 0.25, 0.2, 1.0],
+                            );
                         }
                         if self.player_health.is_dead() && self.respawn_at.is_none() {
                             self.deaths = self.deaths.saturating_add(1);
@@ -7280,12 +11125,26 @@ impl App {
                     let dead = bd.health.is_dead();
                     let name = bd.bot.name.clone();
                     if taken > 0 {
-                        if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_bot) {
-                            play_at(snd, h, center, Priority::Low);
+                        // Dodge réaction sur splash damage aussi —
+                        // un bot dans la zone d'effet d'une rocket
+                        // déclenche son pattern d'esquive.
+                        bd.bot.notify_damage_taken();
+                        // Pain cooldownisé + death SFX si fatal.
+                        if let Some(snd) = self.sound.as_ref() {
+                            if dead {
+                                if let Some(h) = self.sfx_death_bot.or(self.sfx_pain_bot) {
+                                    play_at(snd, h, center, Priority::Weapon);
+                                }
+                            } else if (self.time_sec - bd.last_pain_sfx_at)
+                                >= PAIN_SFX_COOLDOWN
+                            {
+                                if let Some(h) = self.sfx_pain_bot {
+                                    play_at(snd, h, center, Priority::Low);
+                                    bd.last_pain_sfx_at = self.time_sec;
+                                }
+                            }
                         }
                         pending_damage_nums.push((center, taken, false));
-                        // Ce bloc est gated par `matches!(b.owner, Player)`
-                        // plus haut, donc tout hit ici est un hit du joueur.
                         player_connected = true;
                     }
                     if taken > 0 && dead {
@@ -7307,9 +11166,17 @@ impl App {
             // Invulnérabilité post-respawn : on skip complètement — pas de
             // dégât et pas de knockback, pour ne pas pousser le joueur
             // hors de son spawn avant qu'il puisse se positionner.
+            // **Godmode** : skip splash bot, garde rocket-jump self.
             let player_took_direct = matches!(b.direct_target, Some(HitTarget::Player));
             let player_invul = self.player_invul_until > self.time_sec;
-            if !self.player_health.is_dead() && !player_took_direct && !player_invul {
+            let godmode = self.cvars.get_i32("g_godmode").unwrap_or(0) != 0;
+            let from_bot = !matches!(b.owner, ProjectileOwner::Player);
+            let block_godmode = godmode && from_bot;
+            if !self.player_health.is_dead()
+                && !player_took_direct
+                && !player_invul
+                && !block_godmode
+            {
                 let eye = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
                 let d2 = (eye - b.pos).length_squared();
                 if d2 <= r2 {
@@ -7379,6 +11246,16 @@ impl App {
                                     self.time_sec + DAMAGE_DIR_SHOW_SEC;
                             }
                             self.pain_flash_until = self.time_sec + PAIN_FLASH_SEC;
+                            // Damage shake (splash) — typiquement plus
+                            // violent que direct car le knockback agit
+                            // déjà sur la caméra. On ajoute un shake
+                            // modéré pour le ressenti.
+                            let dmg_shake = (taken as f32 * 0.08).min(4.0);
+                            if dmg_shake > self.shake_intensity {
+                                self.shake_intensity = dmg_shake;
+                            }
+                            self.shake_until =
+                                self.time_sec + SHAKE_DURATION;
                         }
                         if self.player_health.is_dead() && self.respawn_at.is_none() {
                             self.deaths = self.deaths.saturating_add(1);
@@ -7444,6 +11321,12 @@ impl App {
         for pos in pending_gibs {
             self.push_death_gibs(pos);
             self.push_blood_splat(pos);
+            self.spawn_bot_drop(pos);
+            // Floater "+1 FRAG" au-dessus du bot fraggé — feedback
+            // visuel juicy ancré au monde.  Position légèrement
+            // au-dessus de la tête pour ne pas être obscurcie par
+            // les gibs.
+            self.push_frag_confirm(pos + Vec3::Z * BOT_CENTER_HEIGHT);
         }
         // Streak : flush des frags de la volée d'explosions — même
         // logique que côté fire_weapon, paliers déclenchés un par un.
@@ -7536,6 +11419,12 @@ impl App {
         info!("weapon → {}", w.name());
         self.next_player_fire_at = self.time_sec + 0.1;
         self.weapon_switch_at = self.time_sec;
+        // **Reset fire flags** (v0.9.5++ fix) — sans ce reset, si le
+        // joueur tient RMB sur Railgun (zoom) puis switch → l'alt-fire
+        // de la nouvelle arme se déclenche immédiatement (UX bizarre).
+        // On force un edge-press sur la nouvelle arme.
+        self.input.fire = false;
+        self.input.secondary_fire = false;
         self.play_weapon_switch_sfx();
     }
 
@@ -7667,6 +11556,13 @@ impl App {
                 // On compte la mort juste avant le respawn — `health.is_dead()`
                 // ne sera plus vrai après `respawn()` donc ici est le bon moment.
                 d.deaths = d.deaths.saturating_add(1);
+                // Reset death anim state pour la prochaine vie.
+                // Tirage variant déterministe : hash du nom + deaths
+                // donne une distribution stable variée.
+                let h = d.bot.name.bytes().fold(d.deaths, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+                d.death_variant = (h % 3) as u8;
+                d.death_started_at = None;
+                d.gesture_started_at = None;
                 d.health.respawn();
                 // Même fenêtre d'invul que le joueur — évite que deux bots
                 // qui respawnent au même moment se fraggent mutuellement
@@ -7776,6 +11672,10 @@ impl App {
             KeyCode::F9 if pressed => {
                 self.show_perf_overlay = !self.show_perf_overlay;
             }
+            // **Stats live overlay** (V3f) — toggle F8.
+            KeyCode::F8 if pressed => {
+                self.show_stats_overlay = !self.show_stats_overlay;
+            }
             // F5 : restart match (remise à zéro frags / HP / respawn global).
             // Pratique pour itérer sans quitter l'exe.
             KeyCode::F5 if pressed => self.restart_match(),
@@ -7882,9 +11782,38 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = WindowAttributes::default()
+        // **Restore video settings from cvars** (v0.9.5) — `r_width` /
+        // `r_height` / `r_fullscreen` ont la flag ARCHIVE donc q3config
+        // .cfg les a chargés au démarrage de l'App.  CLI override
+        // (`--width / --height`) reste prioritaire si fourni.
+        let restored_w = self.cvars.get_i32("r_width").unwrap_or(self.init_width as i32);
+        let restored_h = self.cvars.get_i32("r_height").unwrap_or(self.init_height as i32);
+        let restored_fs = self.cvars.get_i32("r_fullscreen").unwrap_or(0) != 0;
+        let final_w = if self.init_width == 1280 && restored_w > 0 {
+            // Default CLI = 1280×720 ; si on a une valeur sauvegardée
+            // on la préfère.
+            restored_w as u32
+        } else {
+            self.init_width
+        };
+        let final_h = if self.init_height == 720 && restored_h > 0 {
+            restored_h as u32
+        } else {
+            self.init_height
+        };
+        let mut attrs = WindowAttributes::default()
             .with_title(concat!("Quake 3 RUST EDITION v", env!("CARGO_PKG_VERSION")))
-            .with_inner_size(PhysicalSize::new(self.init_width, self.init_height));
+            .with_inner_size(PhysicalSize::new(final_w, final_h));
+        if restored_fs {
+            // Fullscreen borderless sur le moniteur primaire (le
+            // moniteur courant n'est pas encore connu avant la
+            // création de la fenêtre, donc `None` = primaire).
+            attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
+        // Synchronise l'état menu pour que la sous-page Vidéo affiche
+        // les valeurs persistées dès la première ouverture.
+        self.menu.set_window_size(final_w, final_h);
+        self.menu.set_fullscreen(restored_fs);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -7928,54 +11857,15 @@ impl ApplicationHandler for App {
             Err(e) => warn!("audio: {e}"),
         }
 
-        if let Some(map) = self.requested_map.clone() {
-            // `--map` explicite en CLI : on charge direct, le menu reste
-            // fermé. C'est le flow "je sais ce que je veux" pour le dev.
-            self.load_map(&map);
-            // **Bots solo via `--bots N`** : drainé une fois ici, après
-            // `load_map` qui a chargé `world` + `bot_rig`. Skill III par
-            // défaut, noms séquentiels « bot01..botNN ».
-            if self.pending_local_bots > 0 {
-                let n = self.pending_local_bots;
-                self.pending_local_bots = 0;
-                // Force-load le rig joueur AVANT le 1er spawn_bot pour
-                // garantir un check explicite. Si ça échoue, on affiche
-                // un warn tonitruant pour orienter le diagnostic plutôt
-                // que de laisser spawn_bot bouncer N fois en silence.
-                self.ensure_player_rig_loaded();
-                if self.bot_rig.is_none() {
-                    warn!(
-                        "===========================================\n\
-                         BOTS DEMANDÉS ({n}) MAIS PAS DE PLAYER RIG\n\
-                         Le pak0.pk3 actif ne contient pas de modèle\n\
-                         joueur complet (lower.md3 + upper.md3 + head.md3)\n\
-                         dans models/players/<nom>/. Les bots seront\n\
-                         remplacés par des beams verticaux colorés en\n\
-                         attendant un asset complet.\n\
-                         ==========================================="
-                    );
-                }
-                let world_ok = self.world.as_ref().is_some();
-                let spawn_ok = self.world.as_ref().map_or(false, |w| {
-                    !w.spawn_points.is_empty() || w.player_start.is_some()
-                });
-                info!(
-                    "bot diagnostic: world_loaded={world_ok}, \
-                     spawn_points_or_player_start={spawn_ok}, \
-                     rig_loaded={}",
-                    self.bot_rig.is_some()
-                );
-                let before = self.bots.len();
-                for i in 0..n {
-                    let name = format!("bot{:02}", i + 1);
-                    self.spawn_bot(&name, Some(3));
-                }
-                info!(
-                    "solo: --bots {n} demandés → {} bots effectivement \
-                     présents dans self.bots (avant: {before})",
-                    self.bots.len()
-                );
-            }
+        // **Default map** (v0.9.5++) — BR supprimé, on ouvre direct le
+        // menu de sélection de map à l'arrivée si aucun `--map` n'est
+        // explicitement fourni en CLI.  Le joueur choisit sa map
+        // BSP depuis la liste.
+        let map_to_load = self.requested_map.clone();
+        if let Some(map_to_load) = map_to_load {
+            // CLI explicit → on charge direct.
+            self.menu.open = false;
+            self.load_map(&map_to_load);
             // Q3_SPAWN_BOTS=N : spawn N bots immédiatement après le chargement
             // de la map. Équivalent d'un `addbot` en console, utile pour les
             // tests CI où on veut un screenshot avec des adversaires visibles
@@ -7988,14 +11878,14 @@ impl ApplicationHandler for App {
                 }
             }
         } else {
-            // Sinon on laisse le menu principal ouvert (positionné à Root
-            // par `new`). Le joueur choisit sa map via l'UI, ou quitte —
-            // plus de fond noir déroutant.
-            info!(
-                "menu: {} maps disponibles dans le VFS",
-                self.menu.map_list.len()
-            );
+            // Pas de --map → menu reste ouvert (laisse le joueur choisir).
+            self.menu.open = true;
+            self.menu.open_root();
         }
+        info!(
+            "menu: {} maps disponibles dans le VFS",
+            self.menu.map_list.len()
+        );
 
         // Capture souris seulement si le menu n'est pas affiché — sinon
         // le joueur doit garder le curseur pour cliquer les items.
@@ -8053,7 +11943,20 @@ impl ApplicationHandler for App {
                     if let PhysicalKey::Code(code) = key_event.physical_key {
                         // Escape en jeu → ouvre le menu pause.
                         if pressed && code == KeyCode::Escape {
-                            self.menu.set_in_game(self.world.is_some());
+                            self.menu.set_in_game(self.world.is_some() || self.terrain.is_some());
+                            // Refresh la liste des fichiers music au cas
+                            // où l'utilisateur en a ajouté pendant le jeu.
+                            // Inclut maintenant les dossiers configurés
+                            // via `s_musicpath` (scan récursif).
+                            let extra = self.cvars.get_string("s_musicpath")
+                                .unwrap_or_default();
+                            let sep = if cfg!(windows) { ';' } else { ':' };
+                            let extra_paths: Vec<PathBuf> = extra
+                                .split(sep)
+                                .filter(|s: &&str| !s.trim().is_empty())
+                                .map(|s: &str| PathBuf::from(s.trim()))
+                                .collect();
+                            self.menu.set_music_tracks(list_music_files_with_extra(&extra_paths));
                             self.menu.open_root();
                             self.set_mouse_capture(false);
                             return;
@@ -8479,6 +12382,23 @@ impl ApplicationHandler for App {
                         self.view_kick = 0.0;
                     }
                 }
+                // **Punch angles decay** (v0.9.5++) — décroissance
+                // exponentielle plus rapide que `view_kick` (le pitch
+                // doit revenir vite, ~250 ms half-life, sinon ça
+                // perturbe trop l'aim long).  Yaw jitter décroît
+                // encore plus vite (~150 ms) pour éviter le drift.
+                if self.view_kick_pitch.abs() > 1e-3 {
+                    self.view_kick_pitch *= (-2.8 * dt).exp();
+                    if self.view_kick_pitch.abs() < 0.01 {
+                        self.view_kick_pitch = 0.0;
+                    }
+                }
+                if self.view_kick_yaw.abs() > 1e-3 {
+                    self.view_kick_yaw *= (-4.6 * dt).exp();
+                    if self.view_kick_yaw.abs() < 0.01 {
+                        self.view_kick_yaw = 0.0;
+                    }
+                }
 
                 // Draine les actions remontées depuis la console.
                 self.drain_pending(event_loop);
@@ -8614,6 +12534,11 @@ impl ApplicationHandler for App {
                         }
                         if let Some(world) = self.world.as_ref() {
                             self.player.tick_collide(cmd, physics, &world.collision);
+                        } else if let Some(terrain) = self.terrain.as_ref() {
+                            // **BR mode** — pas de BSP, route vers la
+                            // physics terrain heightmap (snap vertical
+                            // + slope cap, pas de slide BSP).
+                            self.player.tick_terrain(cmd, physics, terrain);
                         }
                         self.physics_accumulator -= PHYSICS_STEP;
                     }
@@ -8637,6 +12562,15 @@ impl ApplicationHandler for App {
                     // pas de dégâts, et avant le sfx_land pour que le pain
                     // et le "thud" sortent en cohérence.
                     self.tick_fall_damage(prev_vz);
+                    // **Viewmodel jump-kick trigger** (v0.9.5++) — quand
+                    // le joueur retouche le sol après être airborne, on
+                    // marque `player_last_land_at` pour que `queue_viewmodel`
+                    // ajoute un dip-and-spring à l'arme.  Seuil 100 unités
+                    // de vitesse verticale pour skip les marches d'escalier
+                    // (qui setent on_ground sans être un vrai saut).
+                    if !was_on_ground && self.player.on_ground && prev_vz < -100.0 {
+                        self.player_last_land_at = self.time_sec;
+                    }
                     // SFX : saut (edge press) + atterrissage (air → sol).
                     if let Some(snd) = self.sound.as_ref() {
                         if cmd.jump && was_on_ground && !self.player.on_ground {
@@ -8700,6 +12634,41 @@ impl ApplicationHandler for App {
 
                 self.time_sec += dt;
 
+                // **BR ring tick** (v0.9.5) — avance le ring shrink, log
+                // les transitions de phase, applique les dégâts hors-zone
+                // au joueur. Bots BR : TODO quand le bot path support
+                // terrain pur (cf. spawn_bot dépend de world).
+                if self.terrain.is_some() {
+                    let pois = self.terrain
+                        .as_ref()
+                        .map(|t| t.pois().to_vec())
+                        .unwrap_or_default();
+                    if let Some(ring) = self.br_ring.as_mut() {
+                        let transitioned = ring.tick(dt, &pois);
+                        if transitioned {
+                            if let Some(idx) = ring.phase_index() {
+                                info!(
+                                    "BR: phase {} commence (rayon {:.0}, dps {:.0})",
+                                    idx,
+                                    ring.current_radius(),
+                                    ring.dps_outside()
+                                );
+                            } else {
+                                info!("BR: ring fermé, match en mode endgame");
+                            }
+                        }
+                        if !self.player_health.is_dead() {
+                            let dmg_f = ring.damage_for(self.player.origin, dt);
+                            if dmg_f > 0.0 {
+                                let dmg_i = dmg_f.ceil() as i32;
+                                self.player_health.take_damage(dmg_i);
+                                // Pulse rouge HUD pour signaler l'hostile-zone.
+                                self.pain_flash_until = self.time_sec + 0.15;
+                            }
+                        }
+                    }
+                }
+
                 // Tick de chaque bot : IA (vision + LOS) → BotCmd → MoveCmd
                 // → physique. Les tirs hitscan retournent un total de dégâts
                 // à appliquer au joueur ce tick + une liste de rockets à
@@ -8711,6 +12680,23 @@ impl ApplicationHandler for App {
                 if let Some(world) = self.world.as_ref() {
                     let alive = !self.player_health.is_dead();
                     let invisible = self.is_powerup_active(PowerupKind::Invisibility);
+                    // **Bot item priority** : pré-build la liste des
+                    // pickups stratégiques avec leur score. Mega=10,
+                    // RA=8, YA=6, Quad/powerups=15, autres=2.
+                    let pickups_priority: Vec<(Vec3, f32, bool)> = self
+                        .pickups
+                        .iter()
+                        .map(|p| {
+                            let prio = match &p.kind {
+                                PickupKind::Health { max_cap: 200, .. } => 10.0,
+                                PickupKind::Armor { amount: 100 } => 8.0,
+                                PickupKind::Armor { amount: 50 } => 6.0,
+                                PickupKind::Powerup { .. } => 15.0,
+                                _ => 2.0,
+                            };
+                            (p.origin, prio, p.respawn_at.is_none())
+                        })
+                        .collect();
                     let bot_out = tick_bots(
                         &mut self.bots,
                         dt,
@@ -8721,6 +12707,7 @@ impl ApplicationHandler for App {
                         alive,
                         invisible,
                         &self.rocket_mesh,
+                        &pickups_priority,
                     );
                     // Ajoute les rockets bots au pool global. `tick_projectiles`
                     // les gérera comme celles du joueur (direct + splash).
@@ -8736,6 +12723,13 @@ impl ApplicationHandler for App {
                     // coupant au-delà d'un petit plafond (un rail par bot
                     // et par frame, max 8 bots = 8 entries par tick).
                     self.beams.extend(bot_out.rail_beams);
+                    // **Squad chatter** — flush des évènements collectés
+                    // pendant le tick. Le chatter passe par
+                    // `maybe_bot_chat` qui applique le random + cooldown
+                    // global pour respecter le rythme audio.
+                    for (idx, trigger) in bot_out.chatter_events {
+                        self.maybe_bot_chat(idx, trigger);
+                    }
                     let dmg = bot_out.damage;
                     let mg_damager = bot_out.last_mg_damager;
                     let mg_damager_idx = bot_out.last_mg_damager_idx;
@@ -8746,7 +12740,8 @@ impl ApplicationHandler for App {
                     // le traçage + SFX reste, seul l'impact HP disparaît.
                     // `tick_bots` a déjà consommé les munitions / cooldowns.
                     let player_invul = self.player_invul_until > self.time_sec;
-                    if dmg > 0 && alive && !player_invul {
+                    let godmode = self.cvars.get_i32("g_godmode").unwrap_or(0) != 0;
+                    if dmg > 0 && alive && !player_invul && !godmode {
                         // Armor absorbe la moitié des dégâts (modèle simplifié).
                         let absorbed = (dmg / 2).min(self.player_armor);
                         self.player_armor -= absorbed;
@@ -8805,11 +12800,230 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                } else if let Some(terrain) = self.terrain.as_ref() {
+                    // **Bots BR avec IA complète + tir** (v0.9.5) — FSM bot
+                    // (Idle/Roam/Combat) sur la heightmap, plus le tir
+                    // hitscan que le BSP path applique.  Modèle simplifié :
+                    //   * un seul "profile MG" générique (pas de switch
+                    //     SG/RL selon distance — viendra avec le ramassage
+                    //     d'items bot)
+                    //   * dégât appliqué directement sur le joueur si
+                    //     visible+LOS+cooldown OK
+                    use q3_bot::LosWorld;
+                    let los = TerrainLos(terrain.as_ref());
+                    let mut bot_dmg_total: i32 = 0;
+                    let mut last_bot_dmg_idx: Option<usize> = None;
+                    let player_eye = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+                    let alive = !self.player_health.is_dead();
+                    let now = self.time_sec;
+                    let dps = self.br_ring.as_ref().map(|r| r.dps_outside()).unwrap_or(0.0);
+                    let ring_center = self.br_ring.as_ref().map(|r| r.current_center());
+                    let ring_radius = self.br_ring.as_ref().map(|r| r.current_radius());
+                    // Cooldown générique tir bot BR (un par bot mais on ne
+                    // distingue pas l'arme — rafale toutes les 0.6s).
+                    const BR_BOT_FIRE_COOLDOWN: f32 = 0.6;
+                    const BR_BOT_HIT_DMG: i32 = 7; // dégât par burst (équiv MG burst)
+                    // **Bot pickup priority BR** — pré-build des
+                    // pickups disponibles avec leur tier/score, à
+                    // ré-injecter en waypoint si bot sans cible.
+                    let pickups_priority: Vec<(Vec3, f32, bool)> = self
+                        .pickups
+                        .iter()
+                        .map(|p| {
+                            let prio = match &p.kind {
+                                PickupKind::Health { max_cap: 200, .. } => 10.0,
+                                PickupKind::Armor { amount: 100 } => 8.0,
+                                PickupKind::Armor { amount: 50 } => 6.0,
+                                PickupKind::Powerup { .. } => 15.0,
+                                PickupKind::Weapon { .. } => 7.0,
+                                _ => 2.0,
+                            };
+                            (p.origin, prio, p.respawn_at.is_none())
+                        })
+                        .collect();
+                    for (idx, bd) in self.bots.iter_mut().enumerate() {
+                        if bd.health.is_dead() {
+                            continue;
+                        }
+                        // Item priority — bot sans cible va vers le
+                        // pickup le mieux scoré dans 2000u.
+                        if bd.bot.target_enemy.is_none() {
+                            let need_health = bd.health.current < 70;
+                            let bp = bd.body.origin;
+                            let mut best: Option<(f32, Vec3)> = None;
+                            for &(pos, mut prio, available) in &pickups_priority {
+                                if !available { continue; }
+                                let dd = (pos - bp).length();
+                                if dd > 2000.0 || dd < 1.0 { continue; }
+                                if !need_health && prio < 5.0 {
+                                    prio *= 0.3;
+                                }
+                                let score = prio / (dd * 0.001 + 1.0);
+                                if best.map_or(true, |(s, _)| score > s) {
+                                    best = Some((score, pos));
+                                }
+                            }
+                            if let Some((_, pos)) = best {
+                                let already = bd.bot.waypoints
+                                    .first()
+                                    .map(|w| (*w - pos).length() < 64.0)
+                                    .unwrap_or(false);
+                                if !already {
+                                    bd.bot.waypoints.insert(0, pos);
+                                }
+                            }
+                        }
+                        // Vision : portée + LOS terrain.  FOV simplifié
+                        // (les bots BR ne sont pas encore aussi sophistiqués
+                        // que les BSP — pas de cone d'orientation).
+                        let bot_eye = bd.body.origin + Vec3::Z * BOT_EYE_HEIGHT;
+                        let to_player = player_eye - bot_eye;
+                        let dist = to_player.length();
+                        let visible = alive
+                            && dist > 1.0
+                            && dist < BOT_SIGHT_RANGE
+                            && los.is_clear(bot_eye, player_eye);
+                        if visible {
+                            bd.bot.target_enemy = Some(player_eye);
+                            bd.last_saw_player_at = Some(now);
+                            if bd.first_seen_player_at.is_none() {
+                                bd.first_seen_player_at = Some(now);
+                            }
+                        } else if let Some(t) = bd.last_saw_player_at {
+                            if now - t > BOT_MEMORY_SEC {
+                                bd.bot.target_enemy = None;
+                                bd.last_saw_player_at = None;
+                                bd.first_seen_player_at = None;
+                            }
+                        }
+                        bd.bot.position = bd.body.origin;
+
+                        // FSM tick avec LOS terrain.
+                        let bc = bd.bot.tick(dt, &los);
+
+                        // BotCmd → MoveCmd : on mappe forward/right/jump
+                        // sur le pmove. `right_move` Q3 → `side` MoveCmd.
+                        let cmd = MoveCmd {
+                            forward: bc.forward_move,
+                            side: bc.right_move,
+                            up: 0.0,
+                            jump: bc.up_move > 0.5,
+                            crouch: false,
+                            walk: false,
+                            slide_pressed: false,
+                            dash_pressed: false,
+                            delta_time: dt,
+                        };
+                        // Réoriente le bot dans la direction du `bot.view_angles`.
+                        bd.body.view_angles = bc.view_angles;
+                        bd.body.tick_terrain(cmd, self.params, terrain);
+
+                        // **Bot fire BR** — si l'IA a décidé `fire`,
+                        // qu'on a la LOS et que le cooldown est échu,
+                        // on applique un burst de dégâts au joueur.
+                        // Aim error proba miss selon skill.
+                        let skill = bd.bot.skill;
+                        let reacted = bd
+                            .first_seen_player_at
+                            .map(|t| now - t >= skill.reaction_time_sec())
+                            .unwrap_or(false);
+                        if bc.fire && visible && reacted && now >= bd.next_fire_at {
+                            let miss_prob =
+                                (skill.aim_error_deg() / 15.0).min(0.80);
+                            let missed = rand_unit_01() < miss_prob;
+                            if !missed {
+                                bot_dmg_total += BR_BOT_HIT_DMG;
+                                last_bot_dmg_idx = Some(idx);
+                            }
+                            bd.next_fire_at =
+                                now + BR_BOT_FIRE_COOLDOWN * skill.fire_cooldown_mult();
+                            bd.last_fire_at = now;
+                            // SFX tir : utilise le sample MG si chargé.
+                            if let Some(snd) = self.sound.as_ref() {
+                                if let Some((_, h)) = self
+                                    .sfx_fire
+                                    .iter()
+                                    .find(|(w, _)| *w == WeaponId::Machinegun)
+                                {
+                                    let from = bd.body.origin
+                                        + Vec3::Z * BOT_CENTER_HEIGHT;
+                                    play_at(snd, *h, from, Priority::Weapon);
+                                }
+                            }
+                        }
+
+                        // Damage hors-zone du ring.
+                        if dps > 0.0 {
+                            if let (Some(c), Some(r)) = (ring_center, ring_radius) {
+                                let d = (bd.body.origin - c).truncate().length();
+                                if d > r {
+                                    let outside = (d - r) / r.max(1.0);
+                                    let factor = (1.0 + outside.min(2.0)).max(1.0);
+                                    let dmg_f = dps * dt * factor;
+                                    let dmg_i = dmg_f.ceil() as i32;
+                                    bd.health.take_damage(dmg_i);
+                                    if bd.health.is_dead() {
+                                        info!("BR: bot '{}' éliminé hors-zone", bd.bot.name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // **Apply bot fire damage to player** — accumulated
+                    // pendant la boucle, appliqué en sortie pour ne pas
+                    // tenir borrow mut sur self.bots.
+                    let player_invul = self.player_invul_until > self.time_sec;
+                    if bot_dmg_total > 0 && alive && !player_invul {
+                        let absorbed = (bot_dmg_total / 2).min(self.player_armor);
+                        self.player_armor -= absorbed;
+                        if absorbed > 0 {
+                            self.armor_flash_until = self.time_sec + ARMOR_FLASH_SEC;
+                        }
+                        let dmg_after = bot_dmg_total - absorbed;
+                        let taken = self.player_health.take_damage(dmg_after);
+                        if taken > 0 {
+                            if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_pain_player) {
+                                play_at(snd, h, self.player.origin, Priority::High);
+                            }
+                            // Pain arrow indicateur direction.
+                            if let Some(i) = last_bot_dmg_idx {
+                                if let Some(bd) = self.bots.get(i) {
+                                    let from = bd.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
+                                    let d = player_eye - from;
+                                    let len = d.length();
+                                    if len > 1e-3 {
+                                        self.last_damage_dir = d / len;
+                                        self.last_damage_until =
+                                            self.time_sec + DAMAGE_DIR_SHOW_SEC;
+                                    }
+                                }
+                            }
+                            self.pain_flash_until = self.time_sec + PAIN_FLASH_SEC;
+                        }
+                        if taken > 0 && self.player_health.is_dead() {
+                            self.deaths = self.deaths.saturating_add(1);
+                            self.respawn_at = Some(self.time_sec + RESPAWN_DELAY_SEC);
+                            info!(
+                                "BR: joueur abattu par bot — respawn dans {RESPAWN_DELAY_SEC:.1}s (deaths={})",
+                                self.deaths
+                            );
+                        }
+                    }
                 }
                 } // fin du `if self.match_winner.is_none()`
 
                 // Tir joueur : hitscan sphère → bot le plus proche non occulté.
-                if self.input.fire
+                // Tir : LMB (primaire) OU RMB (secondaire) déclenche
+                // `fire_weapon`.  À l'intérieur, le flag `secondary_fire`
+                // détermine quels params consommer (cf. weapon.secondary_params).
+                // **Exception Railgun zoom** (v0.9.5++) : pour le railgun,
+                // RMB SEUL ne tire pas — c'est juste un zoom scope.  Pour
+                // tirer avec alt-params en zoom, le joueur appuie LMB
+                // pendant que RMB est tenu (UX standard sniper FPS).
+                let rail_zoom_only = self.active_weapon == WeaponId::Railgun
+                    && self.input.secondary_fire
+                    && !self.input.fire;
+                if (self.input.fire || (self.input.secondary_fire && !rail_zoom_only))
                     && !self.console.is_open()
                     && !self.player_health.is_dead()
                     && self.match_winner.is_none()
@@ -8862,6 +13076,8 @@ impl ApplicationHandler for App {
                 // d'abord un warn puis un end dans le même frame.
                 self.tick_powerup_warnings();
                 self.tick_regeneration(dt);
+                // Atmospheric lightning (BR uniquement).  No-op hors BR.
+                self.tick_atmosphere();
 
                 // Vérifie la fin de match après toutes les résolutions de
                 // ce tick. Idempotent — une fois le winner défini, no-op.
@@ -8890,6 +13106,10 @@ impl ApplicationHandler for App {
                 // visible → le flush décales du `render()` dessine sous
                 // tout le reste comme il se doit.
                 self.push_all_blob_shadows();
+
+                // Pre-compute valeurs qui dépendent de `&self` AVANT de
+                // prendre `self.renderer` en mut borrow (sinon E0502).
+                let railgun_zoom = self.railgun_zoom_ratio();
 
                 if let Some(r) = self.renderer.as_mut() {
                     // View-bob : on applique l'offset uniquement à la caméra,
@@ -8931,27 +13151,42 @@ impl ApplicationHandler for App {
                     } else {
                         self.view_crouch_offset += d.signum() * max_step;
                     }
-                    // Spectator follow-cam : quand le joueur est mort
-                    // mais que le match n'est pas terminé, on orbite
-                    // lentement autour du bot vivant le plus proche du
-                    // corps.  Donne au joueur quelque chose à regarder
-                    // pendant les 2 s de cooldown respawn, au lieu d'un
-                    // plan figé sur le sol.  Révèle aussi la position
-                    // des adversaires qui continuent le combat.
+                    // **Killcam** (V3d) — quand le joueur est mort, on
+                    // priorise la caméra sur le BOT QUI L'A TUÉ (cf.
+                    // `last_death_cause`). Si pas identifiable (mort
+                    // par environnement, suicide, tueur disparu) on
+                    // retombe sur le bot vivant le plus proche, comme
+                    // avant. Effet "killcam" cinéma sur la fenêtre
+                    // de respawn, donne du feedback "qui m'a tué".
                     let mut dead_cam: Option<(Vec3, Angles)> = None;
                     if self.player_health.is_dead() && self.match_winner.is_none() {
-                        let mut best: Option<(f32, Vec3)> = None;
-                        for bd in &self.bots {
-                            if bd.health.is_dead() {
-                                continue;
+                        // Tentative 1 : identifier le tueur par nom.
+                        let killer_target = match &self.last_death_cause {
+                            Some((KillActor::Bot(killer_name), _)) => self
+                                .bots
+                                .iter()
+                                .find(|b| {
+                                    !b.health.is_dead() && &b.bot.name == killer_name
+                                })
+                                .map(|b| b.body.origin),
+                            _ => None,
+                        };
+                        // Tentative 2 : bot vivant le plus proche.
+                        let target = killer_target.or_else(|| {
+                            let mut best: Option<(f32, Vec3)> = None;
+                            for bd in &self.bots {
+                                if bd.health.is_dead() {
+                                    continue;
+                                }
+                                let p = bd.body.origin;
+                                let d = (p - self.player.origin).length_squared();
+                                if best.map_or(true, |(bd2, _)| d < bd2) {
+                                    best = Some((d, p));
+                                }
                             }
-                            let p = bd.body.origin;
-                            let d = (p - self.player.origin).length_squared();
-                            if best.map_or(true, |(bd2, _)| d < bd2) {
-                                best = Some((d, p));
-                            }
-                        }
-                        if let Some((_, target)) = best {
+                            best.map(|(_, p)| p)
+                        });
+                        if let Some(target) = target {
                             let target_eye = target + Vec3::Z * (BOT_CENTER_HEIGHT as f32);
                             // Orbite : angle qui tourne à 20°/s, rayon
                             // 220 u, hauteur +80 u au-dessus de la cible.
@@ -9051,6 +13286,14 @@ impl ApplicationHandler for App {
                         // longues et simplifie les asserts de tests.
                         self.shake_intensity = 0.0;
                     }
+                    // **Punch angles** (v0.9.5++) — recul d'arme :
+                    // pitch up + jitter de yaw.  Appliqué SEULEMENT au
+                    // rendu de la caméra (pas à `view_angles` réel),
+                    // donc l'aim et la collision sont préservés.  Le
+                    // joueur voit son arme "pousser" sans que ses
+                    // tirs partent ailleurs.
+                    cam_angles.pitch -= self.view_kick_pitch; // pitch négatif = haut en Q3
+                    cam_angles.yaw += self.view_kick_yaw;
                     r.camera_mut().angles = cam_angles;
                     // FOV : `cg_fov` (cvar archivée) est interprété comme
                     // FOV horizontal à 4:3, conforme à la convention Q3.
@@ -9060,15 +13303,101 @@ impl ApplicationHandler for App {
                     // horizontalement avec l'aspect. Lu chaque frame —
                     // pas cher, et permet la modif live depuis la console.
                     let fov_cvar = self.cvars.get_f32("cg_fov").unwrap_or(90.0);
-                    r.camera_mut().set_horizontal_fov_4_3(fov_cvar);
+                    // **FOV punch** — additif au cg_fov, fade linéaire
+                    // sur FOV_PUNCH_DURATION.  Donne un kick visuel
+                    // momentané sur hit (3°) ou frag (5°).
+                    let fov_with_punch = if self.fov_punch_until > self.time_sec {
+                        let remaining = self.fov_punch_until - self.time_sec;
+                        let ratio = (remaining / FOV_PUNCH_DURATION).clamp(0.0, 1.0);
+                        fov_cvar + self.fov_punch_strength * ratio
+                    } else {
+                        fov_cvar
+                    };
+                    // **Railgun zoom scope** (v0.9.5++) — override le FOV
+                    // par cg_fov × zoom_ratio (par défaut 0.33 = 3× zoom).
+                    let fov_with_punch = if let Some(zoom) = railgun_zoom {
+                        fov_with_punch * zoom
+                    } else {
+                        fov_with_punch
+                    };
+                    // **FOV scaling mode** — Hor+ (0) ou Vert- (1).
+                    let fov_mode = match self.cvars.get_i32("cg_fovaspect").unwrap_or(0) {
+                        1 => q3_renderer::camera::FovMode::VertMinus,
+                        _ => q3_renderer::camera::FovMode::HorPlus,
+                    };
+                    r.camera_mut().set_fov_mode(fov_mode);
+                    r.camera_mut().set_horizontal_fov_4_3(fov_with_punch);
 
                     r.begin_frame();
+                    // **Light pillars sur powerups premium** (v0.9.5++) —
+                    // spawn dlight chaque frame au-dessus des Quad/Mega/RA
+                    // disponibles. Visible de loin → repère les zones
+                    // stratégiques sans HUD wallhack.
+                    //
+                    // **Fix v0.9.5++ (perf)** : lifetime ramené de 9999s
+                    // à 0.05s.  Avant, les pillar dlights persistaient
+                    // dans le buffer (cap = 64) et écrasaient les dlights
+                    // gameplay (muzzle, explosions, headshot sparkles).
+                    // Avec 0.05s ils expirent au tick suivant et sont
+                    // ré-armés à la frame d'après, libérant la queue
+                    // pour les transients critiques.
+                    for p in &self.pickups {
+                        if p.respawn_at.is_some() { continue; }
+                        let (color, intensity, premium) = match &p.kind {
+                            PickupKind::Powerup { powerup: PowerupKind::QuadDamage, .. } =>
+                                ([0.45, 0.55, 1.00], 4.0, true),
+                            PickupKind::Powerup { .. } =>
+                                ([1.00, 0.85, 0.40], 3.5, true),
+                            PickupKind::Health { max_cap: 200, .. } =>
+                                ([0.40, 1.00, 0.55], 3.0, true), // Mega
+                            PickupKind::Armor { amount: 100 } =>
+                                ([1.00, 0.30, 0.30], 3.0, true), // Red Armor
+                            _ => ([0.0; 3], 0.0, false),
+                        };
+                        if premium {
+                            for k in 0..3 {
+                                let z_off = 30.0 + k as f32 * 80.0;
+                                r.spawn_dlight(
+                                    p.origin + Vec3::Z * z_off,
+                                    260.0,
+                                    color,
+                                    intensity,
+                                    self.time_sec,
+                                    0.05, // refresh chaque frame
+                                );
+                            }
+                        }
+                    }
                     queue_pickups(
                         r,
                         &self.pickups,
                         self.time_sec,
                         &self.remote_unavailable_pickups,
                         self.net.mode.is_client(),
+                        self.ammo_crate_scale,
+                        self.quad_pickup_scale,
+                        self.health_pack_scale,
+                        self.railgun_pickup_scale,
+                        self.grenade_ammo_scale,
+                        self.rocket_ammo_scale,
+                        self.cell_ammo_scale,
+                        self.lg_ammo_scale,
+                        self.big_armor_scale,
+                        self.plasma_pickup_scale,
+                        self.railgun_ammo_scale,
+                        self.regen_pickup_scale,
+                        self.machinegun_pickup_scale,
+                        self.bfg_pickup_scale,
+                        self.lightninggun_pickup_scale,
+                        self.shotgun_pickup_scale,
+                        self.grenadelauncher_pickup_scale,
+                        self.gauntlet_pickup_scale,
+                        self.shotgun_ammo_scale,
+                        self.bfg_ammo_scale,
+                        self.rocketlauncher_pickup_scale,
+                        self.combat_armor_scale,
+                        self.medkit_scale,
+                        self.armor_shard_scale,
                     );
                     queue_projectiles(r, &self.projectiles, self.time_sec);
                     // Purge les beams expirés, puis ré-émet les survivants
@@ -9108,10 +13437,9 @@ impl ApplicationHandler for App {
                                 r.push_beam_lightning(b.a, b.b, col, 4.0, 14, lg_seed);
                                 // Halo pâle blanc autour du tracé pour
                                 // simuler l'ionisation lumineuse.
-                                let mut halo = [1.0, 1.0, 1.0, col[3] * 0.55];
-                                let _ = &mut halo;
+                                let halo = [1.0, 1.0, 1.0, col[3] * 0.55];
                                 r.push_beam_lightning(
-                                    b.a, b.b, [1.0, 1.0, 1.0, col[3] * 0.55],
+                                    b.a, b.b, halo,
                                     1.5, 14, lg_seed.wrapping_add(7),
                                 );
                                 // Branches secondaires : on prend 2
@@ -9166,7 +13494,7 @@ impl ApplicationHandler for App {
                                 r.push_beam_spiral(b.a, col, b.b, tail, 4.0, 2.5, 96);
                                 // Inner core (blanc-bouillant). Alpha
                                 // boosté pour bien sortir au centre.
-                                let mut core = [1.0, 1.0, 1.0, col[3] * 1.0];
+                                let core = [1.0, 1.0, 1.0, col[3]];
                                 let mut core_tail = core;
                                 core_tail[3] *= 0.25;
                                 r.push_beam_spiral(
@@ -9214,8 +13542,66 @@ impl ApplicationHandler for App {
                             team: s.team,
                         });
                     }
+                    // **Drones BR** — orbites animées, transform monde
+                    // calculée par drone selon time_sec.  Avant queue_bots
+                    // pour que les bots dessinent par-dessus.
+                    // **Rochers de décor** — props static, transforms
+                    // pré-calculées au load. Frustum cull serait idéal
+                    // mais 400 drawcalls passent partout sur GPU récent.
+                    if !self.rocks.is_empty() {
+                        for rk in &self.rocks {
+                            let prop_name = rk.prop_name;
+                            let s = rk.scale;
+                            let cy = rk.yaw.cos();
+                            let sy = rk.yaw.sin();
+                            let model = [
+                                [cy * s,  sy * s, 0.0, 0.0],
+                                [0.0,     0.0,    s,   0.0],
+                                [sy * s, -cy * s, 0.0, 0.0],
+                                [rk.pos.x, rk.pos.y, rk.pos.z, 1.0],
+                            ];
+                            r.queue_prop(prop_name, model, rk.tint);
+                        }
+                    }
+
+                    if !self.drones.is_empty() {
+                        for d in &self.drones {
+                            let pos = d.position(self.time_sec);
+                            let yaw = d.yaw(self.time_sec);
+                            let cos_y = yaw.cos();
+                            let sin_y = yaw.sin();
+                            let s = d.scale;
+                            // **glTF Y-up → Q3 Z-up** : un GLB
+                            // standard a Y vers le haut. On compose
+                            // M = T * Rz(yaw) * RotY→Z * S avec
+                            // RotY→Z = swap Y et Z (rotation -90°
+                            // autour de X). Effet : ce qui pointait
+                            // vers Y+ dans le mesh pointe maintenant
+                            // vers Z+ dans le monde.
+                            //
+                            // Matrice résultante composée à la main
+                            // (column-major wgpu).
+                            // R_y_up_to_z_up = | 1  0  0 |
+                            //                  | 0  0 -1 |
+                            //                  | 0  1  0 |
+                            // R_z(yaw) = | cy -sy  0 |
+                            //            | sy  cy  0 |
+                            //            |  0   0  1 |
+                            // R_z * R_y_up_to_z_up = | cy   0  sy |
+                            //                       | sy   0 -cy |
+                            //                       |  0   1   0 |
+                            let model = [
+                                [cos_y * s,  sin_y * s, 0.0, 0.0],
+                                [0.0,        0.0,       s,   0.0],
+                                [sin_y * s, -cos_y * s, 0.0, 0.0],
+                                [pos.x,      pos.y,     pos.z, 1.0],
+                            ];
+                            r.queue_drone(model, d.tint);
+                        }
+                    }
+
                     if let Some(rig) = self.bot_rig.as_ref() {
-                        queue_bots(r, rig, &self.bots, self.time_sec);
+                        queue_bots(r, rig, &mut self.bots, self.time_sec);
                         queue_remote_players(
                             r,
                             rig,
@@ -9223,34 +13609,12 @@ impl ApplicationHandler for App {
                             self.time_sec,
                         );
                     } else {
-                        // **Fallback bot visibility** : si aucun rig
-                        // joueur n'a pu être chargé (pak0 partiel), on
-                        // dessine un beam vertical haut-coloré à chaque
-                        // position de bot pour que le joueur les voie.
-                        // Garantit qu'un `--bots 4` produit toujours un
-                        // signal visuel, même sans MD3 dispo.
-                        for (i, b) in self.bots.iter().enumerate() {
-                            if b.health.is_dead() {
-                                continue;
-                            }
-                            let foot = b.body.origin;
-                            let head = foot + Vec3::Z * 56.0;
-                            let col = bot_tint(i + 1);
-                            r.push_beam(foot, head, col);
-                            // Nameplate flottant.
-                            let lbl = format!("[BOT] {}", b.bot.name);
-                            r.push_text(
-                                head.x as f32, head.y as f32,
-                                2.0,
-                                col,
-                                &lbl,
-                            );
-                            // ^ NB : push_text est 2D screen-space, pas
-                            // worldspace. Sur un fallback ça donne un
-                            // texte fixe en haut-gauche (visible dans
-                            // tous les cas). Suffisant comme indicateur
-                            // "bot N existe" malgré l'absence de mesh.
-                        }
+                        // Fallback retiré v0.9.4 — quand le rig MD3 est
+                        // chargé (cas standard avec pak0 vanilla), pas
+                        // d'indicateur HUD position. Si le rig manque,
+                        // les bots sont juste invisibles, mais le banner
+                        // diagnostique alerte (cf. plus bas dans
+                        // l'overlay HUD `rig_missing_with_bots`).
                     }
                     // Remote projectiles : extrapolés depuis le dernier
                     // snapshot, rendus avec les meshes locaux. Vec passé
@@ -9283,6 +13647,49 @@ impl ApplicationHandler for App {
                             let eye = self.player.origin
                                 + Vec3::Z
                                     * (PLAYER_EYE_HEIGHT + bob_z + self.view_crouch_offset);
+                            // Parse cg_playertint "r,g,b" → vec3.
+                            let tint_str = self.cvars.get_string("cg_playertint")
+                                .unwrap_or_else(|| "1.0,1.0,1.0".to_string());
+                            let parts: Vec<&str> = tint_str.split(',').collect();
+                            let player_tint = if parts.len() == 3 {
+                                let r = parts[0].trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.5);
+                                let g = parts[1].trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.5);
+                                let b = parts[2].trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.5);
+                                [r, g, b]
+                            } else {
+                                [1.0, 1.0, 1.0]
+                            };
+                            // **Viewmodel sway** (v0.9.5++) — calcule
+                            // le delta angulaire frame-to-frame puis
+                            // l'easing exponentiel pour donner un poids
+                            // physique à l'arme.  Le sway emagasine le
+                            // delta puis décroît de 90 % par seconde →
+                            // mouvements rapides = swings net, mouvement
+                            // lent = sway quasi-nul.
+                            let yaw_delta = cam_angles.yaw - self.viewmodel_prev_yaw;
+                            let yaw_delta = if yaw_delta > 180.0 {
+                                yaw_delta - 360.0
+                            } else if yaw_delta < -180.0 {
+                                yaw_delta + 360.0
+                            } else {
+                                yaw_delta
+                            };
+                            let pitch_delta = cam_angles.pitch - self.viewmodel_prev_pitch;
+                            // Easing : sway nouveau = sway ancien × decay + impulse.
+                            let decay = (-dt * 6.0).exp(); // ~90 %/s
+                            self.viewmodel_sway[0] =
+                                self.viewmodel_sway[0] * decay + yaw_delta * 0.06;
+                            self.viewmodel_sway[1] =
+                                self.viewmodel_sway[1] * decay + pitch_delta * 0.04;
+                            // Clamp pour éviter les fly-aways (free-look brutal).
+                            self.viewmodel_sway[0] = self.viewmodel_sway[0].clamp(-3.0, 3.0);
+                            self.viewmodel_sway[1] = self.viewmodel_sway[1].clamp(-3.0, 3.0);
+                            self.viewmodel_prev_yaw = cam_angles.yaw;
+                            self.viewmodel_prev_pitch = cam_angles.pitch;
+                            // Speed XY pour modulé l'amplitude du bob.
+                            let v_xy = self.player.velocity.truncate().length();
+                            // Time depuis le dernier land (jump-kick window).
+                            let time_since_land = self.time_sec - self.player_last_land_at;
                             queue_viewmodel(
                                 r,
                                 wm,
@@ -9294,6 +13701,12 @@ impl ApplicationHandler for App {
                                 self.active_weapon,
                                 self.time_sec < self.muzzle_flash_until,
                                 self.view_kick,
+                                player_tint,
+                                self.bob_phase,
+                                v_xy,
+                                self.player.on_ground,
+                                time_since_land,
+                                self.viewmodel_sway,
                             );
                         }
                     }
@@ -9322,6 +13735,25 @@ impl ApplicationHandler for App {
                         None
                     } else {
                         Some(self.ammo[self.active_weapon.slot() as usize])
+                    };
+                    // **Low-ammo severity** (v0.9.5++) — calculé per-arme
+                    // pour que les armes spam (LG/PG/MG) déclenchent le
+                    // warning AVANT d'être à 5 munitions (= 0.5 s de fire),
+                    // tandis que les armes lentes (RL/GL/BFG/RG/SG) le
+                    // déclenchent au seuil "5 tirs" classique.
+                    // severity = 1 - ammo/threshold, clamped → 0 hors warning,
+                    // 1 à munitions vides. Drives le pulse rouge HUD.
+                    let low_ammo_severity = match ammo_shown {
+                        None => 0.0,
+                        Some(n) => {
+                            let threshold = match self.active_weapon {
+                                WeaponId::Lightninggun
+                                | WeaponId::Plasmagun
+                                | WeaponId::Machinegun => 20.0,
+                                _ => 5.0,
+                            };
+                            (1.0 - (n as f32) / threshold).clamp(0.0, 1.0)
+                        }
                     };
                     // Purge les entrées expirées du kill-feed, des chiffres
                     // de dégât flottants et des médailles avant dessin.
@@ -9359,6 +13791,344 @@ impl ApplicationHandler for App {
                             (name, frags, deaths, team)
                         })
                         .collect();
+                    // **Quad glow aura** (V2g) — dlight mauve attaché
+                    // au joueur quand il porte le Quad. Inline le check
+                    // powerup pour éviter le re-borrow de self quand
+                    // `r` (= &mut self.renderer) est déjà emprunté mut.
+                    let quad_idx = PowerupKind::QuadDamage.index();
+                    let quad_active = self.powerup_until[quad_idx]
+                        .map(|t| t > self.time_sec)
+                        .unwrap_or(false)
+                        && !self.player_health.is_dead();
+                    if quad_active {
+                        let pulse = 0.85 + 0.15 * (self.time_sec * 6.0).sin();
+                        let qpos = self.player.origin + Vec3::Z * 32.0;
+                        r.spawn_dlight(
+                            qpos,
+                            220.0,
+                            [0.55, 0.30, 1.0],
+                            2.0 * pulse,
+                            self.time_sec,
+                            0.05,
+                        );
+                    }
+                    // **Damage screen overlay** (V2c) — vignette rouge
+                    // pulsante quand HP bas. Plus le joueur est près
+                    // de la mort, plus la vignette est dense et
+                    // pulsée. Effet "battement de cœur" cinéma —
+                    // s'éteint au-dessus de 50 HP.
+                    let hp = self.player_health.current.max(0);
+                    if hp > 0 && hp < 50 && !self.player_health.is_dead() {
+                        let fw = r.width() as f32;
+                        let fh = r.height() as f32;
+                        // Plus l'HP baisse, plus l'effet est intense.
+                        // Map HP 50→0 sur intensity 0→1 quadratique.
+                        let lethality = ((50 - hp) as f32 / 50.0).clamp(0.0, 1.0);
+                        let intensity = lethality * lethality;
+                        // Pulse à 1.5 Hz (90 BPM) — rythme cardiaque
+                        // d'un joueur stressé.
+                        let pulse =
+                            0.5 + 0.5 * (self.time_sec * 9.42).sin();
+                        let alpha = intensity * (0.18 + 0.12 * pulse);
+                        // Bandes haut + bas (vignette horizontale)
+                        // pour ne pas masquer le HUD ou le crosshair.
+                        let band_h = fh * (0.10 + 0.10 * intensity);
+                        r.push_rect(0.0, 0.0, fw, band_h, [0.55, 0.05, 0.05, alpha]);
+                        r.push_rect(0.0, fh - band_h, fw, band_h, [0.55, 0.05, 0.05, alpha]);
+                        // Côtés gauche/droite légers — convergent vers
+                        // le centre quand HP < 20.
+                        let side_w = fw * (0.04 + 0.06 * intensity);
+                        let side_alpha = alpha * 0.8;
+                        r.push_rect(0.0, 0.0, side_w, fh, [0.55, 0.05, 0.05, side_alpha]);
+                        r.push_rect(fw - side_w, 0.0, side_w, fh, [0.55, 0.05, 0.05, side_alpha]);
+                    }
+                    // **BR ring overlay** (v0.9.5) — affiché uniquement
+                    // en mode terrain BR. Bande haute avec phase /
+                    // timer / rayon, et une teinte rouge en bordure
+                    // d'écran si le joueur est hors-zone.
+                    let fw = r.width() as f32;
+                    let fh = r.height() as f32;
+                    if let Some(ring) = self.br_ring.as_ref() {
+                        let phase_label = match ring.phase_index() {
+                            Some(i) => format!("PHASE {}", i + 1),
+                            None => "ENDGAME".to_string(),
+                        };
+                        let timer = ring.time_to_next_phase();
+                        let radius = ring.current_radius();
+                        let line = format!(
+                            "{}    next {:02}:{:02}    radius {:.0}u",
+                            phase_label,
+                            (timer as i32) / 60,
+                            (timer as i32) % 60,
+                            radius
+                        );
+                        let scale = 2.0_f32;
+                        let line_px = scale * 8.0 * line.len() as f32;
+                        let lx = (fw - line_px) * 0.5;
+                        // Décalé sous le compass (y=2..24) → margin
+                        // de 8px pour aérer la composition.
+                        let ly = 36.0_f32;
+                        // Pilule de fond — pulse rouge si shrink imminent
+                        // (< 10 s restantes pour la phase courante).
+                        let imminent = timer < 10.0 && ring.phase_index().is_some();
+                        let bg_color = if imminent {
+                            let pulse = 0.5 + 0.5 * (now * 8.0).sin();
+                            [0.18 + 0.10 * pulse, 0.04, 0.05, 0.85]
+                        } else {
+                            [0.05, 0.07, 0.10, 0.70]
+                        };
+                        let pad = 14.0_f32;
+                        r.push_rect(
+                            lx - pad,
+                            ly - 6.0,
+                            line_px + pad * 2.0,
+                            scale * 8.0 + 12.0,
+                            bg_color,
+                        );
+                        let bar_color = if imminent {
+                            [1.0, 0.20, 0.10, 0.95]
+                        } else {
+                            [1.0, 0.45, 0.10, 0.85]
+                        };
+                        r.push_rect(
+                            lx - pad,
+                            ly - 6.0,
+                            line_px + pad * 2.0,
+                            2.0,
+                            bar_color,
+                        );
+                        let text_color = if imminent {
+                            let pulse = 0.5 + 0.5 * (now * 8.0).sin();
+                            [1.0, 0.45 + 0.30 * pulse, 0.30, 1.0]
+                        } else {
+                            [1.0, 0.78, 0.40, 1.0]
+                        };
+                        r.push_text(lx + 1.0, ly + 1.0, scale, [0.0, 0.0, 0.0, 0.85], &line);
+                        r.push_text(lx, ly, scale, text_color, &line);
+
+                        // **Survivors counter** (v0.9.5++) — sous le bandeau
+                        // de phase. "ALIVE: N" en gros chiffres rouge profond
+                        // — style BR canonique (Apex/PUBG). Compte le joueur
+                        // s'il est vivant + bots non-dead.
+                        let alive_bots = self
+                            .bots
+                            .iter()
+                            .filter(|b| !b.health.is_dead())
+                            .count();
+                        let alive_total = alive_bots
+                            + if !self.player_health.is_dead() { 1 } else { 0 };
+
+                        // **Compass top edge** (v0.9.5++) — strip horizontal
+                        // 360° autour du yaw joueur, ticks tous les 30°,
+                        // labels cardinaux N/E/S/W aux 4 cardinaux, pip
+                        // jaune pour la direction du centre du ring.
+                        // Convention monde Q3 : yaw = 0 → +X (Est), +90 → +Y
+                        // (Nord), donc l'azimut "compass" = yaw - 90 pour
+                        // que N corresponde au yaw +90.
+                        let compass_w = 480.0_f32;
+                        let compass_h = 22.0_f32;
+                        let compass_x = (fw - compass_w) * 0.5;
+                        let compass_y = 2.0_f32;
+                        // Fond pilule semi-transparent.
+                        r.push_rect(
+                            compass_x,
+                            compass_y,
+                            compass_w,
+                            compass_h,
+                            [0.05, 0.07, 0.10, 0.55],
+                        );
+                        // Liseré bas orangé.
+                        r.push_rect(
+                            compass_x,
+                            compass_y + compass_h - 2.0,
+                            compass_w,
+                            2.0,
+                            [1.0, 0.55, 0.20, 0.85],
+                        );
+                        let yaw_deg = self.player.view_angles.yaw;
+                        // Mapping : on dessine 180° de FOV compass autour
+                        // du yaw courant ([yaw-90 .. yaw+90]).
+                        let compass_fov = 180.0_f32;
+                        let degrees_to_px =
+                            |angle: f32| -> Option<f32> {
+                                // Différence wrap-aware [-180..180].
+                                let mut diff = angle - yaw_deg + 90.0;
+                                while diff > 180.0 {
+                                    diff -= 360.0;
+                                }
+                                while diff < -180.0 {
+                                    diff += 360.0;
+                                }
+                                if diff.abs() > compass_fov * 0.5 + 5.0 {
+                                    return None;
+                                }
+                                let px = compass_x
+                                    + compass_w * 0.5
+                                    + (diff / compass_fov) * compass_w;
+                                Some(px)
+                            };
+                        // Ticks tous les 30°.
+                        for tick in (0..360).step_by(15) {
+                            let angle = tick as f32;
+                            let Some(px) = degrees_to_px(angle) else { continue };
+                            let major = tick % 90 == 0;
+                            let tick_h = if major { 8.0 } else { 4.0 };
+                            let tick_w = if major { 2.0 } else { 1.0 };
+                            r.push_rect(
+                                px - tick_w * 0.5,
+                                compass_y + compass_h - tick_h - 2.0,
+                                tick_w,
+                                tick_h,
+                                [1.0, 0.95, 0.85, 0.85],
+                            );
+                            // Labels cardinaux (N/E/S/W) aux multiples de 90°.
+                            if major {
+                                // yaw 0 → E (Est), 90 → N, 180 → W, 270 → S
+                                let label = match tick {
+                                    0 => "E",
+                                    90 => "N",
+                                    180 => "W",
+                                    270 => "S",
+                                    _ => continue,
+                                };
+                                let lscale = 1.2_f32;
+                                let lw = 8.0 * lscale;
+                                r.push_text(
+                                    px - lw * 0.5,
+                                    compass_y + 2.0,
+                                    lscale,
+                                    [1.0, 1.0, 1.0, 0.95],
+                                    label,
+                                );
+                            }
+                        }
+                        // **Pip ring center** — petit triangle jaune sous le
+                        // strip indiquant la direction vers le centre safe.
+                        let center = ring.current_center();
+                        let dx = center.x - self.player.origin.x;
+                        let dy = center.y - self.player.origin.y;
+                        if dx * dx + dy * dy > 4.0 {
+                            // atan2(y,x) en radians puis conversion deg.
+                            let center_yaw = dy.atan2(dx).to_degrees();
+                            if let Some(px) = degrees_to_px(center_yaw) {
+                                let pip_size = 6.0_f32;
+                                // Triangle approximé : 3 carrés stair-stepped
+                                // pointant vers le bas (le strip est au-dessus).
+                                for k in 0..pip_size as i32 {
+                                    let t = k as f32;
+                                    let half_w = pip_size - t;
+                                    r.push_rect(
+                                        px - half_w,
+                                        compass_y + compass_h + t,
+                                        half_w * 2.0,
+                                        1.0,
+                                        [1.0, 0.85, 0.20, 0.95],
+                                    );
+                                }
+                            }
+                        }
+                        // Pip joueur central — petit triangle blanc fixe.
+                        let center_px = compass_x + compass_w * 0.5;
+                        for k in 0..5 {
+                            let t = k as f32;
+                            let half_w = 5.0 - t;
+                            r.push_rect(
+                                center_px - half_w,
+                                compass_y - t - 1.0,
+                                half_w * 2.0,
+                                1.0,
+                                [1.0, 1.0, 1.0, 0.95],
+                            );
+                        }
+
+                        let survivors_line = format!("ALIVE: {alive_total}");
+                        let s_scale = 1.6_f32;
+                        let s_px = s_scale * 8.0 * survivors_line.len() as f32;
+                        let s_x = (fw - s_px) * 0.5;
+                        let s_y = ly + scale * 8.0 + 16.0;
+                        // Couleur rouge → orange selon densité — 1 = endgame
+                        // critique, 10+ = early game tranquille.
+                        let s_color = if alive_total <= 3 {
+                            // Pulse à la fin : "tu peux gagner"
+                            let p = 0.5 + 0.5 * (now * 4.0).sin();
+                            [1.0, 0.30 + 0.20 * p, 0.20 + 0.10 * p, 1.0]
+                        } else if alive_total <= 8 {
+                            [1.0, 0.55, 0.20, 1.0]
+                        } else {
+                            [1.0, 0.85, 0.45, 1.0]
+                        };
+                        r.push_text(s_x + 1.0, s_y + 1.0, s_scale, [0.0, 0.0, 0.0, 0.85], &survivors_line);
+                        r.push_text(s_x, s_y, s_scale, s_color, &survivors_line);
+
+                        // POI markers monde **retirés** (v0.9.5+) —
+                        // l'utilisateur préfère un terrain "propre"
+                        // sans labels flottants. Les POI restent actifs
+                        // côté gameplay (spawn joueur/bots, items, ring
+                        // shrink), juste plus de UI tag dessus.
+
+                        // Bord rouge si hors-zone — feedback "tu prends
+                        // des dégâts" même sans regarder le HUD.
+                        if !ring.contains(self.player.origin) {
+                            let border = 30.0_f32;
+                            let pulse = 0.30 + 0.20 * (now * 4.0).sin().abs();
+                            r.push_rect(0.0, 0.0, fw, border, [0.85, 0.10, 0.10, pulse]);
+                            r.push_rect(0.0, fh - border, fw, border, [0.85, 0.10, 0.10, pulse]);
+                            r.push_rect(0.0, 0.0, border, fh, [0.85, 0.10, 0.10, pulse]);
+                            r.push_rect(fw - border, 0.0, border, fh, [0.85, 0.10, 0.10, pulse]);
+
+                            // **Safe-zone arrow** (v0.9.5++) — flèche jaune
+                            // au centre haut indiquant le cap à prendre pour
+                            // rentrer dans la zone.  Direction = (ring.center
+                            // - player.origin) projetée sur le plan horizontal,
+                            // puis transformée en angle relatif au yaw joueur.
+                            let center = ring.current_center();
+                            let dx = center.x - self.player.origin.x;
+                            let dy = center.y - self.player.origin.y;
+                            let dist = (dx * dx + dy * dy).sqrt();
+                            if dist > 1.0 {
+                                let world_angle = dy.atan2(dx); // angle absolu
+                                let yaw_rad = self.player.view_angles.yaw.to_radians();
+                                // Angle relatif : 0 = devant, π/2 = à droite,
+                                // -π/2 = à gauche, ±π = derrière.
+                                let mut rel = world_angle - yaw_rad;
+                                while rel > std::f32::consts::PI {
+                                    rel -= std::f32::consts::TAU;
+                                }
+                                while rel < -std::f32::consts::PI {
+                                    rel += std::f32::consts::TAU;
+                                }
+                                // On dessine une flèche à 45 % de la hauteur
+                                // depuis le haut, dont l'orientation suit
+                                // l'angle relatif (rotation autour du centre).
+                                let cx = fw * 0.5;
+                                let cy = fh * 0.20;
+                                // Triangle pointing in direction `rel` :
+                                // 3 segments stair-stepped.  Pour un push_rect
+                                // axis-aligned, on approxime avec une croix
+                                // radiale rotée — points à (cos, sin) * r.
+                                let ang = rel - std::f32::consts::FRAC_PI_2; // 0 = up
+                                let len = 24.0_f32;
+                                let alpha = 0.65 + 0.35 * (now * 3.0).sin().abs();
+                                let arrow_col = [1.0, 0.85, 0.20, alpha];
+                                // Pointe : 3 carrés stair-steppés vers l'avant.
+                                for k in 0..len as i32 {
+                                    let t = k as f32;
+                                    let px = cx + ang.cos() * t;
+                                    let py = cy + ang.sin() * t;
+                                    r.push_rect(px - 1.5, py - 1.5, 3.0, 3.0, arrow_col);
+                                }
+                                // Distance numérique sous la flèche.
+                                let dist_str = format!("{:.0}u", dist);
+                                let d_scale = 1.2_f32;
+                                let d_px = d_scale * 8.0 * dist_str.len() as f32;
+                                let d_x = cx - d_px * 0.5;
+                                let d_y = cy + len + 8.0;
+                                r.push_text(d_x + 1.0, d_y + 1.0, d_scale, [0.0, 0.0, 0.0, 0.85], &dist_str);
+                                r.push_text(d_x, d_y, d_scale, arrow_col, &dist_str);
+                            }
+                        }
+                    }
+
                     draw_hud(
                         r,
                         &self.console,
@@ -9411,7 +14181,19 @@ impl ApplicationHandler for App {
                         self.recent_dmg_last_at,
                         self.view_kick,
                         self.weapon_switch_at,
+                        self.kill_marker_until,
+                        self.powerup_flash_until,
+                        self.powerup_flash_color,
+                        self.lightning_flash_until,
+                        low_ammo_severity,
                     );
+                    // **Railgun scope overlay** (v0.9.5++) — vignette
+                    // circulaire + crosshair de précision quand zoom
+                    // actif (RMB tenu sur Railgun).  Utilise la valeur
+                    // pré-calculée pour éviter le double borrow.
+                    if railgun_zoom.is_some() {
+                        draw_railgun_scope_overlay(r, now);
+                    }
                     // Pastille de statut réseau + VR, en haut-gauche.
                     // Affichée seulement quand utile (pas en solo/sans VR)
                     // pour ne pas encombrer le HUD du mode classique.
@@ -9452,58 +14234,81 @@ impl ApplicationHandler for App {
                     if self.show_perf_overlay {
                         draw_perf_overlay(r, &self.frame_times);
                     }
-                    // **Bot diagnostic banner** — voyant, toujours
-                    // visible, contient l'état complet pour diag à
-                    // distance. Couleurs :
-                    // * jaune = bots OK (rig + alive)
-                    // * rouge = problème (rig manquant OR bot count=0)
-                    let alive = self
-                        .bots
-                        .iter()
-                        .filter(|b| !b.health.is_dead())
-                        .count();
-                    let rig_status = if self.bot_rig.is_some() {
-                        "OK"
-                    } else {
-                        "MISSING"
-                    };
-                    let banner = if self.bots.is_empty() {
-                        format!(
-                            "[DIAG] NO BOTS in self.bots | pending={} | rig={} | world={}",
-                            self.pending_local_bots,
-                            rig_status,
-                            if self.world.is_some() { "OK" } else { "NONE" }
-                        )
-                    } else {
-                        format!(
-                            "[DIAG] BOTS {}/{} alive | rig={} | players_visible_3D={}",
-                            alive,
-                            self.bots.len(),
-                            rig_status,
-                            if self.bot_rig.is_some() { "TRUE (MD3)" } else { "FALSE (beam fallback)" }
-                        )
-                    };
-                    let scale = HUD_SCALE * 1.2;
-                    let bw = banner.len() as f32 * 8.0 * scale;
-                    let fw = r.width() as f32;
-                    let bx = (fw - bw) * 0.5;
-                    let by = 6.0;
-                    let bg = if self.bots.is_empty() || self.bot_rig.is_none() {
-                        [0.45, 0.05, 0.05, 0.92] // rouge dense
-                    } else {
-                        [0.04, 0.20, 0.10, 0.85] // vert
-                    };
-                    r.push_rect(
-                        0.0, 0.0, fw, 8.0 * scale + 16.0, bg,
-                    );
-                    push_text_shadow(
-                        r,
-                        bx,
-                        by,
-                        scale,
-                        if self.bots.is_empty() { COL_YELLOW } else { COL_WHITE },
-                        &banner,
-                    );
+                    // **Mini-map** (V3a) — toujours affichée en jeu.
+                    // Zone top-left, n'interfère pas avec les autres
+                    // panneaux. Pas de drapeaux CTF côté client ; le
+                    // serveur ferait foi en multi mais ici en solo
+                    // les flags ne sont pas spawnés.
+                    if !self.menu.open && !self.player_health.is_dead() {
+                        // Snapshot ring + POI pour le minimap si on est en BR.
+                        let mm_ring = self.br_ring.as_ref().map(|ring| {
+                            (ring.current_center(), ring.current_radius())
+                        });
+                        let mm_pois: Vec<(Vec3, u8)> = self
+                            .terrain
+                            .as_ref()
+                            .map(|t| {
+                                t.pois()
+                                    .iter()
+                                    .map(|p| (Vec3::new(p.x, p.y, 0.0), p.tier))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        draw_minimap(
+                            r,
+                            self.player.origin,
+                            self.player.view_angles.yaw,
+                            &self.bots,
+                            None,
+                            None,
+                            mm_ring,
+                            &mm_pois,
+                        );
+                    }
+                    // **Stats live overlay** (V3f) — toggle F8.
+                    if self.show_stats_overlay {
+                        let time_alive = self.time_sec - self.last_respawn_time;
+                        let match_elapsed =
+                            (self.time_sec - self.match_start_at).max(0.0);
+                        draw_stats_live(
+                            r,
+                            self.frags,
+                            self.deaths,
+                            self.total_shots,
+                            self.total_hits,
+                            time_alive,
+                            match_elapsed,
+                        );
+                    }
+                    // Banner diagnostique bot — affiché UNIQUEMENT si
+                    // l'état est anormal (bots demandés via --bots N
+                    // mais 0 spawnés, OU rig MD3 manquant). Sinon
+                    // silencieux pour ne pas polluer le HUD. Le bug
+                    // historique « no bot » de v0.7-v0.9 a été résolu
+                    // par le drain centralisé dans `load_map`, mais
+                    // on garde ce filet de sécurité pour orienter le
+                    // diag de futures régressions.
+                    let rig_missing_with_bots =
+                        !self.bots.is_empty() && self.bot_rig.is_none();
+                    if rig_missing_with_bots {
+                        let banner = format!(
+                            "WARNING: rig MD3 manquant — bots dessinés en fallback beam ({})",
+                            self.bots.len()
+                        );
+                        let scale = HUD_SCALE;
+                        let bw = banner.len() as f32 * 8.0 * scale;
+                        let fw = r.width() as f32;
+                        let bx = (fw - bw) * 0.5;
+                        let by = 6.0;
+                        r.push_rect(
+                            bx - 8.0,
+                            by - 4.0,
+                            bw + 16.0,
+                            8.0 * scale + 8.0,
+                            [0.45, 0.05, 0.05, 0.85],
+                        );
+                        push_text_shadow(r, bx, by, scale, COL_YELLOW, &banner);
+                    }
                     // Roue de chat rapide (touche V). Rendue après le HUD
                     // mais avant le menu pour qu'elle disparaisse en
                     // ouvrant les options. La fenêtre d'animation
@@ -9525,6 +14330,30 @@ impl ApplicationHandler for App {
                     if self.menu.open {
                         let fw = r.width() as f32;
                         let fh = r.height() as f32;
+                        // **Map downloader status refresh** — pousse le
+                        // status courant du job (downloaded %, error,
+                        // done) dans le menu pour affichage live.
+                        let st = self.map_dl.status_snapshot();
+                        let status_str = match st {
+                            crate::map_dl::DownloadStatus::Idle => String::new(),
+                            crate::map_dl::DownloadStatus::Downloading { id, received, total } => {
+                                if total > 0 {
+                                    let pct = (received as f64 / total as f64 * 100.0) as u32;
+                                    format!("{} {}%", id, pct)
+                                } else {
+                                    format!("{} {}KB", id, received / 1024)
+                                }
+                            }
+                            crate::map_dl::DownloadStatus::Verifying { id } =>
+                                format!("{} verifying", id),
+                            crate::map_dl::DownloadStatus::Extracting { id } =>
+                                format!("{} extracting", id),
+                            crate::map_dl::DownloadStatus::Done { id, .. } =>
+                                format!("{} OK", id),
+                            crate::map_dl::DownloadStatus::Error { id, message } =>
+                                format!("{} ERR: {}", id, message),
+                        };
+                        self.menu.set_mapdl_status(status_str);
                         self.menu.draw(r, &self.cvars, fw, fh);
                     }
                     if let Err(e) = r.render(now) {
@@ -9617,7 +14446,15 @@ impl ApplicationHandler for App {
             // L'ancien code avait `pitch -= my * sens` → inversé. Corrigé :
             // + m_pitch. Pour restaurer l'inversion "mouse up = look down"
             // (Tribes / simulateurs de vol), il suffit de `m_pitch -0.022`.
-            let sens = self.cvars.get_f32("sensitivity").unwrap_or(5.0).max(0.0);
+            let sens_base = self.cvars.get_f32("sensitivity").unwrap_or(5.0).max(0.0);
+            // **Railgun zoom** : scale la sens proportionnellement au
+            // zoom (FOV/3 → sens/3).  Sans ça le mvt souris devient
+            // trop violent par rapport au champ de vision réduit.
+            let sens = if let Some(zoom) = self.railgun_zoom_ratio() {
+                sens_base * zoom
+            } else {
+                sens_base
+            };
             let m_pitch = self.cvars.get_f32("m_pitch").unwrap_or(0.022);
             let m_yaw = self.cvars.get_f32("m_yaw").unwrap_or(0.022);
             // Cap défensif : si l'OS délivre un burst (alt-tab, mouse
@@ -9667,36 +14504,148 @@ const CHAT_WHEEL_MESSAGES: [(&str, &str); 8] = [
 /// en bas à gauche pour ne pas concurrencer la stats panel (haut-droite)
 /// ni le chat feed (bas-gauche, mais au-dessus de nous — le watermark
 /// perf est collé au sol).  Toggle par F9.
+/// **Railgun zoom scope overlay** (v0.9.5++) — vignette circulaire
+/// noire avec un cercle clair au centre + crosshair de précision +
+/// petites graduations.  Évoque une lunette de sniper sans toucher
+/// au shader (juste des `push_rect`).
+///
+/// Géométrie :
+///   - Cercle clair de rayon `R = 0.42·h` au centre
+///   - Vignette extérieure : 4 rectangles noirs aux 4 coins, plus
+///     8 quadrants intermédiaires pour approximer un cercle
+///   - Crosshair : 2 lignes fines horizontale/verticale + 4 ticks
+///     courts sur chaque axe (graduations sniper)
+///   - Mil dot central : un petit point noir au pixel central pour
+///     visée ultra-précise
+fn draw_railgun_scope_overlay(r: &mut Renderer, time_sec: f32) {
+    let w = r.width() as f32;
+    let h = r.height() as f32;
+    let cx = w * 0.5;
+    let cy = h * 0.5;
+    // Vignette externe : on assombrit tout sauf un disque central via
+    // 8 anneaux extérieurs concentriques.  Approximation polygonale
+    // suffisamment dense pour que l'œil voie un cercle.
+    let r_clear = h * 0.42; // rayon du disque visible
+    // Couleur vignette = noir presque opaque.
+    let v = [0.0, 0.0, 0.0, 0.96];
+    // 4 quadrants extérieurs au cercle :
+    //   - Top (au-dessus du cercle)
+    //   - Bottom
+    //   - Left
+    //   - Right
+    let band_top = cy - r_clear;
+    let band_bot = h - (cy + r_clear);
+    r.push_rect(0.0, 0.0, w, band_top, v);                 // top band
+    r.push_rect(0.0, cy + r_clear, w, band_bot, v);        // bottom band
+    r.push_rect(0.0, band_top, cx - r_clear, 2.0 * r_clear, v); // left
+    r.push_rect(cx + r_clear, band_top, cx - r_clear, 2.0 * r_clear, v); // right
+    // Approximation circulaire : on grise les 4 coins du carré
+    // restant au centre via 16 trapèzes (segments d'arc).  Pour
+    // simplifier, on fait juste un dégradé en empilant des bandes
+    // horizontales de plus en plus larges aux extrémités du cercle.
+    let n_strips = 32;
+    for i in 0..n_strips {
+        let t = i as f32 / n_strips as f32;
+        let theta = t * std::f32::consts::PI;
+        let y_frac = -theta.cos();           // [-1, 1]
+        let x_frac = theta.sin();            // [0, 1]
+        // Pour chaque bande horizontale autour du cercle, on
+        // calcule la "largeur clair" et on dessine deux rects
+        // noirs à gauche/droite de cette largeur.
+        let strip_y = cy + y_frac * r_clear;
+        let strip_h = (2.0 * r_clear) / n_strips as f32 + 1.0;
+        let clear_w = x_frac * r_clear;
+        let left_w = cx - clear_w - (cx - r_clear);
+        if left_w > 0.5 {
+            r.push_rect(cx - r_clear, strip_y, left_w, strip_h, v);
+            r.push_rect(cx + clear_w, strip_y, left_w, strip_h, v);
+        }
+    }
+    // **Crosshair de précision** — fines lignes 1 px au centre.
+    let cross_color = [0.0, 0.0, 0.0, 0.85];
+    let line_thick = 1.0;
+    let line_len = r_clear * 0.95;
+    // Horizontale (interrompue au centre pour ne pas masquer la cible).
+    let gap = 8.0;
+    r.push_rect(cx - line_len, cy - line_thick * 0.5, line_len - gap, line_thick, cross_color);
+    r.push_rect(cx + gap, cy - line_thick * 0.5, line_len - gap, line_thick, cross_color);
+    // Verticale.
+    r.push_rect(cx - line_thick * 0.5, cy - line_len, line_thick, line_len - gap, cross_color);
+    r.push_rect(cx - line_thick * 0.5, cy + gap, line_thick, line_len - gap, cross_color);
+    // **Graduations** : petits ticks de chaque côté du centre, espacés.
+    let tick_thick = 1.0;
+    let tick_len = 6.0;
+    for k in 1..=4 {
+        let dx = k as f32 * 24.0;
+        // Ticks horizontaux (sur la ligne verticale, en haut + bas).
+        r.push_rect(cx - tick_len * 0.5, cy - dx, tick_len, tick_thick, cross_color);
+        r.push_rect(cx - tick_len * 0.5, cy + dx, tick_len, tick_thick, cross_color);
+        // Ticks verticaux (sur la ligne horizontale, à gauche + droite).
+        r.push_rect(cx - dx, cy - tick_len * 0.5, tick_thick, tick_len, cross_color);
+        r.push_rect(cx + dx, cy - tick_len * 0.5, tick_thick, tick_len, cross_color);
+    }
+    // **Mil-dot central** : petit point noir pour visée ultra-précise.
+    r.push_rect(cx - 1.5, cy - 1.5, 3.0, 3.0, [0.0, 0.0, 0.0, 0.95]);
+    // **Liseré du cercle** — léger anneau bleu-cyan pour l'esthétique
+    // "lentille high-tech".  Utilise sin(time) pour un pulse subtil.
+    let pulse = 0.5 + 0.5 * (time_sec * std::f32::consts::TAU * 0.7).sin();
+    let ring_color = [0.45, 0.85, 1.0, 0.20 + 0.10 * pulse];
+    let ring_thick = 2.0;
+    // 4 segments fins le long des bords visibles du cercle.
+    r.push_rect(cx - r_clear, cy - 1.0, ring_thick, 2.0, ring_color); // l
+    r.push_rect(cx + r_clear - ring_thick, cy - 1.0, ring_thick, 2.0, ring_color); // r
+    r.push_rect(cx - 1.0, cy - r_clear, 2.0, ring_thick, ring_color); // t
+    r.push_rect(cx - 1.0, cy + r_clear - ring_thick, 2.0, ring_thick, ring_color); // b
+}
+
 fn draw_perf_overlay(r: &mut Renderer, frame_times: &[f32]) {
     let w = r.width() as f32;
     let h = r.height() as f32;
-    // Agrégation : moyenne, min, max.  On ignore les slots à 0.0 (buffer
-    // pas encore plein au boot).
-    let mut sum = 0.0f32;
-    let mut n = 0u32;
-    let mut lo = f32::INFINITY;
-    let mut hi = 0.0f32;
-    for &dt in frame_times {
-        if dt <= 0.0 {
-            continue;
-        }
-        sum += dt;
-        n += 1;
-        if dt < lo { lo = dt; }
-        if dt > hi { hi = dt; }
-    }
-    if n == 0 {
+    // Collecte des frame times valides (> 0) dans un buffer trié pour
+    // calculer les percentiles (1% low / 0.1% low — métriques modernes
+    // qui révèlent les stutters cachés par la moyenne).
+    let mut sorted: Vec<f32> = frame_times.iter().copied().filter(|&t| t > 0.0).collect();
+    if sorted.is_empty() {
         return;
     }
-    let avg = sum / n as f32;
+    let mut sum = 0.0f32;
+    for &t in &sorted { sum += t; }
+    let n = sorted.len() as f32;
+    let avg = sum / n;
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let lo = sorted[0];
+    let hi = sorted[sorted.len() - 1];
+    // **1% low** : moyenne des 1% pires frames (= ~tail 1% du tri trié
+    // ascendant → on prend les indices [0.99·n .. n)).  Métrique
+    // standard reviewers / OCAT / FrameView.  Si le buffer est trop
+    // petit (<100 frames), on retombe sur le pire individuel.
+    let p1_lo_avg = {
+        let cut = (sorted.len() as f32 * 0.99).floor() as usize;
+        let tail = &sorted[cut..];
+        if tail.is_empty() { hi } else {
+            let s: f32 = tail.iter().sum();
+            s / tail.len() as f32
+        }
+    };
+    // **0.1% low** : moyenne des 0.1% pires frames.  Capture les hitches
+    // (loading texture, GC, etc.) que les 1% lows manquent.
+    let p01_lo_avg = {
+        let cut = (sorted.len() as f32 * 0.999).floor() as usize;
+        let tail = &sorted[cut..];
+        if tail.is_empty() { hi } else {
+            let s: f32 = tail.iter().sum();
+            s / tail.len() as f32
+        }
+    };
     let fps_avg = 1.0 / avg;
     let fps_min = 1.0 / hi;
     let fps_max = 1.0 / lo;
+    let fps_p1 = 1.0 / p1_lo_avg;
+    let fps_p01 = 1.0 / p01_lo_avg;
     let ms_avg = avg * 1000.0;
-    // Panel : 180 × 64, bas-gauche, 8 px de marge.  Assez large pour
-    // trois lignes (fps avg, min/max, ms) + une petite courbe.
-    let panel_w = 200.0;
-    let panel_h = 72.0;
+    // Panel élargi pour accueillir 1% / 0.1% lows.
+    let panel_w = 220.0;
+    let panel_h = 92.0;
     let px = 8.0;
     let py = h - panel_h - 8.0;
     push_panel(r, px, py, panel_w, panel_h);
@@ -9711,13 +14660,23 @@ fn draw_perf_overlay(r: &mut Renderer, frame_times: &[f32]) {
     };
     let line1 = format!("{:>5.1} FPS", fps_avg);
     push_text_shadow(r, px + 10.0, py + 6.0, HUD_SCALE * 1.2, fps_color, &line1);
-    // Ligne 2 : min/max + ms.  Plus petite, couleur froide.
-    let line2 = format!("min {:>3.0}  max {:>3.0}  {:>4.1} ms", fps_min, fps_max, ms_avg);
-    push_text_shadow(r, px + 10.0, py + 26.0, HUD_SCALE * 0.8, COL_GRAY, &line2);
+    // Ligne 2 : 1% low + 0.1% low (métriques perçues par les joueurs).
+    let line2 = format!("1% {:>3.0}  .1% {:>3.0}", fps_p1, fps_p01);
+    let lo_color = if fps_p1 >= fps_avg * 0.85 {
+        [0.7, 0.95, 0.7, 1.0] // perfs stables (1% low proche de l'avg)
+    } else if fps_p1 >= fps_avg * 0.6 {
+        [1.0, 0.85, 0.4, 1.0]
+    } else {
+        [1.0, 0.4, 0.3, 1.0] // gros stutters
+    };
+    push_text_shadow(r, px + 10.0, py + 26.0, HUD_SCALE * 0.85, lo_color, &line2);
+    // Ligne 3 : min/max + ms moyenne (info brute).
+    let line3 = format!("min {:>3.0}  max {:>3.0}  {:>4.1} ms", fps_min, fps_max, ms_avg);
+    push_text_shadow(r, px + 10.0, py + 44.0, HUD_SCALE * 0.75, COL_GRAY, &line3);
     // Histogramme : chaque frametime mappé à une barre verticale.  On
     // scale par rapport à 50 ms (20 fps) — au-delà la barre sature.
     let graph_x = px + 10.0;
-    let graph_y = py + 44.0;
+    let graph_y = py + 64.0;
     let graph_w = panel_w - 20.0;
     let graph_h = 20.0;
     r.push_rect(graph_x, graph_y, graph_w, graph_h, [0.02, 0.03, 0.05, 0.75]);
@@ -9780,45 +14739,58 @@ fn draw_weapon_crosshair(r: &mut Renderer, cx: f32, cy: f32, slot: u8, spread: f
     let arm = 5.0;
     let base_gap = 2.0;
     let gap = base_gap + spread;
-    // 4-arm avec paramètres donnés — factorisé car plusieurs profils
-    // en dérivent (machinegun, shotgun, lightning).
+    // **Tint par arme** (v0.9.5+) — identité visuelle immédiate de
+    // l'arme courante. Cyan plasma, rose railgun, vert BFG, etc.
+    let weapon_col: [f32; 4] = match slot {
+        2 => [1.00, 0.95, 0.80, 1.0], // MG : ivoire chaud
+        3 => [1.00, 0.85, 0.40, 1.0], // SG : orange poudre
+        4 => [1.00, 0.65, 0.20, 1.0], // GL : orange chaud
+        5 => [1.00, 0.55, 0.30, 1.0], // RL : rouge orangé
+        6 => [0.55, 0.85, 1.00, 1.0], // LG : bleu électrique
+        7 => [1.00, 0.30, 0.55, 1.0], // RG : rose magenta
+        8 => [0.40, 0.85, 1.00, 1.0], // PG : cyan glacial
+        9 => [0.45, 1.00, 0.55, 1.0], // BFG : vert saturé
+        _ => COL_WHITE,
+    };
     let push_cross = |r: &mut Renderer, arm_len: f32, thick: f32, g: f32, col: [f32; 4]| {
         r.push_rect(cx - g - arm_len, cy - thick * 0.5, arm_len, thick, col);
         r.push_rect(cx + g, cy - thick * 0.5, arm_len, thick, col);
         r.push_rect(cx - thick * 0.5, cy - g - arm_len, thick, arm_len, col);
         r.push_rect(cx - thick * 0.5, cy + g, thick, arm_len, col);
     };
+    let _ = weapon_col;
     match slot {
         // Gauntlet : anneau épais, évoque une portée « aura melee ».
         1 => {
-            push_ring(r, cx, cy, 9.0, 2.0, COL_WHITE);
-            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, COL_WHITE);
+            push_ring(r, cx, cy, 9.0, 2.0, weapon_col);
+            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, weapon_col);
         }
         // Shotgun : arms courts, gap de base large → spread implicite
         // même sans recul appliqué.
         3 => {
-            push_cross(r, 4.0, t, gap + 4.0, COL_WHITE);
-            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, COL_WHITE);
+            push_cross(r, 4.0, t, gap + 4.0, weapon_col);
+            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, weapon_col);
         }
         // Grenade launcher : dot + anneau fin (indicateur de tir arqué).
         4 => {
-            push_ring(r, cx, cy, 8.0, 1.0, COL_WHITE);
-            r.push_rect(cx - 1.5, cy - 1.5, 3.0, 3.0, COL_WHITE);
+            push_ring(r, cx, cy, 8.0, 1.0, weapon_col);
+            r.push_rect(cx - 1.5, cy - 1.5, 3.0, 3.0, weapon_col);
         }
         // Rocket : dot central + anneau épais (warning explosif proche).
         5 => {
-            push_ring(r, cx, cy, 10.0, 2.0, COL_WHITE);
-            r.push_rect(cx - 1.5, cy - 1.5, 3.0, 3.0, COL_WHITE);
+            push_ring(r, cx, cy, 10.0, 2.0, weapon_col);
+            r.push_rect(cx - 1.5, cy - 1.5, 3.0, 3.0, weapon_col);
         }
         // Lightning gun : cross fin + dot central, pas de spread (beam).
         6 => {
-            push_cross(r, 6.0, 1.0, base_gap, COL_WHITE);
-            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, COL_WHITE);
+            push_cross(r, 6.0, 1.0, base_gap, weapon_col);
+            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, weapon_col);
         }
         // Railgun : dot seul + anneau très fin (sniping, viser juste).
         7 => {
-            push_ring(r, cx, cy, 5.0, 1.0, [1.0, 1.0, 1.0, 0.55]);
-            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, COL_WHITE);
+            let mut soft = weapon_col; soft[3] = 0.55;
+            push_ring(r, cx, cy, 5.0, 1.0, soft);
+            r.push_rect(cx - 1.0, cy - 1.0, 2.0, 2.0, weapon_col);
         }
         // Plasma : petit X (diagonales) + dot central, suggère le tir rapide.
         8 => {
@@ -10087,6 +15059,284 @@ fn find_lock_target(
     best.map(|(_, i)| i)
 }
 
+/// **Stats live overlay** (V3f) — bottom-right, K/D + accuracy +
+/// time alive + frags/min. Toggle F8.
+fn draw_stats_live(
+    r: &mut Renderer,
+    frags: u32,
+    deaths: u32,
+    total_shots: u32,
+    total_hits: u32,
+    time_alive: f32,
+    match_elapsed: f32,
+) {
+    let lines = [
+        format!("FRAGS    {frags}"),
+        format!("DEATHS   {deaths}"),
+        format!(
+            "K/D      {:.2}",
+            if deaths == 0 { frags as f32 } else { frags as f32 / deaths as f32 }
+        ),
+        format!(
+            "ACC      {}%",
+            if total_shots > 0 {
+                ((total_hits as f32 / total_shots as f32) * 100.0).round() as i32
+            } else {
+                0
+            }
+        ),
+        format!("ALIVE    {:.0}s", time_alive),
+        format!(
+            "F/MIN    {:.1}",
+            if match_elapsed > 1.0 { frags as f32 * 60.0 / match_elapsed } else { 0.0 }
+        ),
+    ];
+    let scale = HUD_SCALE * 0.85;
+    let char_w = 8.0 * scale;
+    let line_h = 8.0 * scale + 2.0;
+    let panel_w = 14.0 * char_w + 16.0;
+    let panel_h = lines.len() as f32 * line_h + 12.0;
+    let fw = r.width() as f32;
+    let fh = r.height() as f32;
+    let x = fw - panel_w - 12.0;
+    let y = fh - panel_h - 220.0; // au-dessus du panel ammo
+    r.push_rect(x, y, panel_w, panel_h, [0.04, 0.05, 0.08, 0.78]);
+    r.push_rect(x, y, 2.0, panel_h, [0.30, 0.55, 0.85, 0.95]);
+    for (i, line) in lines.iter().enumerate() {
+        push_text_shadow(
+            r,
+            x + 8.0,
+            y + 6.0 + i as f32 * line_h,
+            scale,
+            COL_GRAY,
+            line,
+        );
+    }
+}
+
+/// **Mini-map dynamique** (V3a) — top-left, 180×180 px, top-down view
+/// de la map. Affiche le joueur (jaune, flèche orientée yaw), bots
+/// (couleur tint), et drapeaux CTF si actifs. Échelle adaptative : on
+/// fit la bounding box des positions joueur+bots dans le carré.
+#[allow(clippy::too_many_arguments)]
+fn draw_minimap(
+    r: &mut Renderer,
+    player_pos: Vec3,
+    player_yaw: f32,
+    bots: &[BotDriver],
+    ctf_red: Option<Vec3>,
+    ctf_blue: Option<Vec3>,
+    // BR : (centre ring, rayon ring). `None` = mode BSP (pas de ring).
+    br_ring: Option<(Vec3, f32)>,
+    // BR : POIs avec leur tier 1..=4. Vide hors BR.
+    pois: &[(Vec3, u8)],
+) {
+    // **Minimap v0.9.5++** — refonte largement améliorée :
+    //  * Position : top-right (top-left était occupé par status pos)
+    //  * Taille  : 240 px (vs 180 avant) → plus lisible
+    //  * Auto-zoom : en BR le minimap encadre le ring (zoom-out auto) ;
+    //    en BSP zoom fixe 1024 u
+    //  * Cadre stylé : double-bordure cyan + coin marker
+    //  * Ring BR dessiné : cercle pointillé montrant la zone safe
+    //  * POI markers : losanges colorés par tier (tier 4 = doré, tier 3
+    //    = orange, tier 2 = gris bleu, tier 1 = ignoré)
+    //  * Compass NESW marqués sur les 4 bords intérieurs
+    //  * Rose des vents : N en haut (Y+ = nord), E droite (X+)
+    //  * Hors-zone : flèche directionnelle vers le centre safe
+    let mm_size = 240.0_f32;
+    // Top-right : on suppose un écran 1920×1080 minimum (sinon le
+    // panneau stats top-right reculera).  L'ancrage à droite via le
+    // renderer width.
+    let screen_w = r.width() as f32;
+    let mm_x = screen_w - mm_size - 16.0;
+    let mm_y = 16.0_f32;
+
+    // ─── Auto-zoom ───
+    // En BR : on veut voir le ring entier + un peu de marge.
+    // En BSP : zoom fixe Q3 typique (1024 u).
+    let world_extent = match br_ring {
+        Some((center, radius)) => {
+            // Distance joueur ↔ centre + rayon, plafond doux pour ne
+            // pas trop dézoomer si le ring est énorme (premières phases).
+            let d = (player_pos.truncate() - center.truncate()).length();
+            (d + radius * 1.2).max(1024.0).min(15000.0)
+        }
+        None => 1024.0,
+    };
+    let to_screen = |w: Vec3| -> (f32, f32) {
+        let dx = w.x - player_pos.x;
+        let dy = w.y - player_pos.y;
+        let sx = mm_x + mm_size * 0.5 + (dx / world_extent) * (mm_size * 0.5);
+        let sy = mm_y + mm_size * 0.5 - (dy / world_extent) * (mm_size * 0.5);
+        (sx, sy)
+    };
+
+    // ─── Fond + cadre ───
+    // Halo extérieur cyan-bleu (style Apex Legends).
+    r.push_rect(mm_x - 4.0, mm_y - 4.0, mm_size + 8.0, mm_size + 8.0,
+        [0.20, 0.40, 0.70, 0.30]);
+    r.push_rect(mm_x - 2.0, mm_y - 2.0, mm_size + 4.0, mm_size + 4.0,
+        [0.30, 0.55, 0.85, 0.65]);
+    r.push_rect(mm_x, mm_y, mm_size, mm_size, [0.04, 0.06, 0.10, 0.88]);
+    // 4 coin markers (L-shape) pour un look "tactique".
+    let corner_len = 14.0_f32;
+    let corner_thick = 2.0_f32;
+    let corner_col = [0.40, 0.75, 1.0, 0.95];
+    // Top-left
+    r.push_rect(mm_x, mm_y, corner_len, corner_thick, corner_col);
+    r.push_rect(mm_x, mm_y, corner_thick, corner_len, corner_col);
+    // Top-right
+    r.push_rect(mm_x + mm_size - corner_len, mm_y, corner_len, corner_thick, corner_col);
+    r.push_rect(mm_x + mm_size - corner_thick, mm_y, corner_thick, corner_len, corner_col);
+    // Bottom-left
+    r.push_rect(mm_x, mm_y + mm_size - corner_thick, corner_len, corner_thick, corner_col);
+    r.push_rect(mm_x, mm_y + mm_size - corner_len, corner_thick, corner_len, corner_col);
+    // Bottom-right
+    r.push_rect(mm_x + mm_size - corner_len, mm_y + mm_size - corner_thick, corner_len, corner_thick, corner_col);
+    r.push_rect(mm_x + mm_size - corner_thick, mm_y + mm_size - corner_len, corner_thick, corner_len, corner_col);
+
+    // ─── Compass NESW sur bords intérieurs ───
+    let cardinal_col = [0.85, 0.92, 1.0, 0.90];
+    let cardinal_scale = 1.0_f32;
+    let cw = 8.0 * cardinal_scale;
+    // N en haut centre
+    r.push_text(mm_x + mm_size * 0.5 - cw * 0.5, mm_y + 3.0,
+                cardinal_scale, cardinal_col, "N");
+    // S en bas centre
+    r.push_text(mm_x + mm_size * 0.5 - cw * 0.5, mm_y + mm_size - 8.0 * cardinal_scale - 3.0,
+                cardinal_scale, cardinal_col, "S");
+    // E à droite milieu
+    r.push_text(mm_x + mm_size - cw - 3.0, mm_y + mm_size * 0.5 - 4.0 * cardinal_scale,
+                cardinal_scale, cardinal_col, "E");
+    // W à gauche milieu
+    r.push_text(mm_x + 3.0, mm_y + mm_size * 0.5 - 4.0 * cardinal_scale,
+                cardinal_scale, cardinal_col, "W");
+
+    // Helper : test si un screen pos est dans le minimap.
+    let in_mm = |sx: f32, sy: f32| -> bool {
+        sx >= mm_x + 4.0 && sx <= mm_x + mm_size - 4.0
+            && sy >= mm_y + 4.0 && sy <= mm_y + mm_size - 4.0
+    };
+
+    // ─── Ring BR ───
+    // Cercle pointillé (32 segments) pour la zone safe courante.
+    if let Some((ring_center, ring_radius)) = br_ring {
+        let (cx, cy) = to_screen(ring_center);
+        // Rayon en pixels minimap.
+        let r_px = ring_radius * (mm_size * 0.5) / world_extent;
+        let segments = 48;
+        let dot_size = 1.5_f32;
+        for k in 0..segments {
+            // 32 segments, pointillé : on ne dessine que les segments pairs.
+            if k % 2 != 0 { continue; }
+            let theta = (k as f32) * std::f32::consts::TAU / (segments as f32);
+            let dx = theta.cos() * r_px;
+            let dy = theta.sin() * r_px;
+            let sx = cx + dx;
+            let sy = cy - dy; // -dy car nord en haut
+            if in_mm(sx, sy) {
+                r.push_rect(sx - dot_size, sy - dot_size,
+                            dot_size * 2.0, dot_size * 2.0,
+                            [0.20, 1.0, 0.60, 0.90]);
+            }
+        }
+        // Voile très léger à l'intérieur du ring (zone safe = vert).
+        // Approximé par un point plus gros au centre du ring (pas un
+        // vrai disque WGSL mais rappel visuel).
+        if in_mm(cx, cy) {
+            r.push_rect(cx - 3.0, cy - 3.0, 6.0, 6.0, [0.20, 1.0, 0.60, 0.40]);
+        }
+    }
+
+    // ─── POI markers ───
+    // Losanges colorés par tier. Tier 1 (basique) ignoré pour ne pas
+    // saturer ; tier 2/3/4 affichés.
+    for (pos, tier) in pois {
+        if *tier < 2 { continue; }
+        let (sx, sy) = to_screen(*pos);
+        if !in_mm(sx, sy) { continue; }
+        let (color, size) = match tier {
+            4 => ([1.0, 0.85, 0.20, 0.95], 5.0_f32),  // gold
+            3 => ([1.0, 0.55, 0.20, 0.90], 4.0),       // orange
+            _ => ([0.60, 0.75, 1.0, 0.80], 3.0),       // blue-grey
+        };
+        // Approximé en losange : 4 mini-rects centrés.
+        r.push_rect(sx - size, sy - 1.0, size * 2.0, 2.0, color);
+        r.push_rect(sx - 1.0, sy - size, 2.0, size * 2.0, color);
+    }
+
+    // ─── Joueur (rendered last, top of stack) ───
+    let (px, py) = to_screen(player_pos);
+    let yaw_rad = player_yaw.to_radians();
+    // Triangle directionnel : 3 points stair-stepped.
+    let arrow_len = 12.0_f32;
+    let arrow_back = 6.0_f32;
+    let cos_y = yaw_rad.cos();
+    let sin_y = yaw_rad.sin();
+    // Pointe avant
+    let tip_x = px + cos_y * arrow_len;
+    let tip_y = py - sin_y * arrow_len;
+    // Pour un look "flèche", on dessine 3 carrés stair-steppés depuis
+    // le centre vers la pointe, avec décroissance.
+    let steps = arrow_len as i32;
+    for k in 0..steps {
+        let t = k as f32 / steps as f32;
+        let x = px + cos_y * (k as f32);
+        let y = py - sin_y * (k as f32);
+        let half = (1.0 - t) * 3.0 + 1.0;
+        r.push_rect(x - half, y - half, half * 2.0, half * 2.0, [1.0, 0.92, 0.30, 1.0]);
+    }
+    // Tail dot (un peu derrière le centre).
+    let tail_x = px - cos_y * arrow_back;
+    let tail_y = py + sin_y * arrow_back;
+    r.push_rect(tail_x - 1.5, tail_y - 1.5, 3.0, 3.0, [1.0, 0.70, 0.10, 0.85]);
+    // Centre du joueur — point central plus opaque pour contraster.
+    r.push_rect(px - 2.0, py - 2.0, 4.0, 4.0, [1.0, 1.0, 0.50, 1.0]);
+    let _ = tip_x; let _ = tip_y;
+
+    // ─── Hors-zone : flèche vers centre safe ───
+    if let Some((ring_center, ring_radius)) = br_ring {
+        let dx = ring_center.x - player_pos.x;
+        let dy = ring_center.y - player_pos.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > ring_radius {
+            // Joueur hors zone — dessine une flèche directionnelle
+            // depuis le joueur vers le ring center, sur le bord du minimap.
+            let theta = dy.atan2(dx);
+            let edge_radius = mm_size * 0.45; // proche du bord
+            let ex = mm_x + mm_size * 0.5 + theta.cos() * edge_radius;
+            let ey = mm_y + mm_size * 0.5 - theta.sin() * edge_radius;
+            // Triangle clignotant rouge.
+            for k in 0..6 {
+                let t = k as f32 / 6.0;
+                let x = ex - theta.cos() * (k as f32 * 1.5);
+                let y = ey + theta.sin() * (k as f32 * 1.5);
+                let half = (1.0 - t) * 4.0 + 1.0;
+                r.push_rect(x - half, y - half, half * 2.0, half * 2.0,
+                            [1.0, 0.20, 0.20, 0.95]);
+            }
+        }
+    }
+
+    // Bots (radar) intentionnellement non rendus — pas de wallhack
+    // visuel sur le minimap.  Le slot reste pour usage CTF futur.
+    let _ = bots;
+
+    // Drapeaux CTF si fournis.
+    if let Some(p) = ctf_red {
+        let (fx, fy) = to_screen(p);
+        if in_mm(fx, fy) {
+            r.push_rect(fx - 4.0, fy - 4.0, 8.0, 8.0, [1.0, 0.30, 0.30, 1.0]);
+        }
+    }
+    if let Some(p) = ctf_blue {
+        let (fx, fy) = to_screen(p);
+        if in_mm(fx, fy) {
+            r.push_rect(fx - 4.0, fy - 4.0, 8.0, 8.0, [0.40, 0.55, 1.0, 1.0]);
+        }
+    }
+}
+
 /// Logique pure de cycle follow-cam. Sortie : nouveau `follow_slot`.
 ///
 /// * `current` : slot actuellement suivi (ou `None`).
@@ -10234,6 +15484,23 @@ fn draw_hud(
     // de drop/raise du panel ammo.  `f32::NEG_INFINITY` = aucun swap
     // n'a eu lieu, offset nul.
     weapon_switch_at: f32,
+    // Deadline du grand X de kill-confirm.  Si > `now`, on dessine un
+    // X rouge vif autour du crosshair dont l'alpha fade en fin de
+    // fenêtre.  Distinct du `hit_marker` (4 segments diagonaux gris).
+    kill_marker_until: f32,
+    // Deadline du flash full-screen powerup.  Si > `now`, on dessine
+    // un voile teinté du powerup acquis (Quad bleu, Haste orange…),
+    // alpha fade-out rapide (POWERUP_FLASH_SEC).
+    powerup_flash_until: f32,
+    powerup_flash_color: [f32; 4],
+    // Deadline du flash d'éclair atmosphérique BR.  Si > `now`, on
+    // dessine un voile blanc-bleuté full-screen avec fade exponentiel
+    // rapide pour évoquer un strike de foudre proche.
+    lightning_flash_until: f32,
+    // Sévérité de la situation munitions [0..1]. 0 = OK, 1 = empty.
+    // Pilote un liseré orange-rouge pulsant en bas d'écran pour
+    // que le joueur sente venir le moment où il faudra switch.
+    low_ammo_severity: f32,
 ) {
     let w = r.width() as f32;
     let h = r.height() as f32;
@@ -10291,6 +15558,30 @@ fn draw_hud(
         r.push_rect(w - thick, thick, thick, h - 2.0 * thick, col);
     }
 
+    // ─── Low-ammo edge pulse ──────────────────────────────────────
+    // Liseré orange-rouge en bas d'écran qui pulse à 2 Hz quand
+    // `low_ammo_severity > 0`. L'épaisseur et l'alpha augmentent avec
+    // la sévérité (linéaire). Distinct des flashes armor/pain (cadre
+    // complet) en restant cantonné au bord bas → ne mange pas le
+    // champ visuel mais reste périphériquement lisible.
+    // Gaté par !is_spectator (pas d'arme à équiper) et !respawn_remaining
+    // (joueur mort n'a pas besoin de cette info pendant la fenêtre
+    // d'intermission/death cam).
+    if low_ammo_severity > 0.001 && !is_spectator && respawn_remaining.is_none() {
+        let pulse = 0.6 + 0.4 * (now * std::f32::consts::TAU * 2.0).sin().abs();
+        let s = low_ammo_severity;
+        let thick = 6.0 + 16.0 * s;
+        let alpha = (0.30 + 0.45 * s) * pulse;
+        // Couleur : ambre à severity faible, rouge vif à severity haute.
+        let col = [
+            1.0,
+            0.55 - 0.40 * s,
+            0.15 - 0.10 * s,
+            alpha,
+        ];
+        r.push_rect(0.0, h - thick, w, thick, col);
+    }
+
     // ─── Pain vignette ─────────────────────────────────────────────
     // Cadre rouge légèrement plus épais que le flash armure, fade
     // linéaire sur `PAIN_FLASH_SEC`.  Dessiné APRÈS l'armor flash pour
@@ -10310,6 +15601,52 @@ fn draw_hud(
         r.push_rect(w - thick, thick, thick, h - 2.0 * thick, col);
         // Voile central subtil (n'obscurcit pas le combat).
         r.push_rect(0.0, 0.0, w, h, [0.4, 0.0, 0.0, ratio * 0.10]);
+    }
+
+    // ─── Powerup acquisition flash ─────────────────────────────────
+    // Voile full-screen teinté de la couleur du powerup acquis,
+    // alpha en fade-out type easing-out (ratio² → décroît vite).
+    // Pas de cadre épais comme la pain vignette : ici on veut un
+    // "wash" cinématique global qui s'efface en ~0.5 s sans gêner
+    // la vision continue de l'environnement.
+    // Gaté par !is_spectator (les spectateurs ne ramassent rien).
+    if powerup_flash_until > now && !is_spectator {
+        let remaining = powerup_flash_until - now;
+        let ratio = (remaining / POWERUP_FLASH_SEC).clamp(0.0, 1.0);
+        // Easing : ratio² fade rapide en fin → flash bref qui n'occulte
+        // pas le combat post-pickup.
+        let alpha = ratio * ratio * 0.45;
+        let col = [
+            powerup_flash_color[0],
+            powerup_flash_color[1],
+            powerup_flash_color[2],
+            alpha,
+        ];
+        r.push_rect(0.0, 0.0, w, h, col);
+        // Liseré plus opaque — donne un effet "transition" périphérique
+        // distinct du wash central, sans masquer le HUD.
+        let edge_alpha = ratio * 0.65;
+        let edge_col = [col[0], col[1], col[2], edge_alpha];
+        let edge_thick = 18.0;
+        r.push_rect(0.0, 0.0, w, edge_thick, edge_col);
+        r.push_rect(0.0, h - edge_thick, w, edge_thick, edge_col);
+        r.push_rect(0.0, edge_thick, edge_thick, h - 2.0 * edge_thick, edge_col);
+        r.push_rect(w - edge_thick, edge_thick, edge_thick, h - 2.0 * edge_thick, edge_col);
+    }
+
+    // ─── Lightning flash atmosphérique (BR) ───────────────────────
+    // Voile blanc-bleuté full-screen avec fade exponentiel rapide
+    // (ratio³) — l'œil voit "flash → noir" presque instantané, façon
+    // strike d'orage.  Synchronisé avec un dlight haut perché
+    // (cf. tick_atmosphere) qui éclaire la scène pendant la même
+    // fenêtre — le coup d'œil sur le HUD et le coup d'œil sur le
+    // monde s'accordent naturellement.
+    if lightning_flash_until > now {
+        let remaining = lightning_flash_until - now;
+        let ratio = (remaining / LIGHTNING_FLASH_SEC).clamp(0.0, 1.0);
+        // Easing ratio³ → fade très rapide. Alpha max ~0.55.
+        let alpha = ratio * ratio * ratio * 0.55;
+        r.push_rect(0.0, 0.0, w, h, [0.92, 0.95, 1.00, alpha]);
     }
 
     // Ligne d'état permanente en haut à gauche — version discrète (debug
@@ -10489,102 +15826,98 @@ fn draw_hud(
     // vers le haut avec le temps, on fade alpha sur les derniers 40%.
     // Jaune = dégât infligé à un bot (hit confirm), rouge = dégât subi
     // par le joueur (pain flash).
-    let dmg_scale = HUD_SCALE * 1.2;
-    let dmg_char_w = 8.0 * dmg_scale;
-    let dmg_line_h = 8.0 * dmg_scale;
+    //
+    // **v0.9.5 polish** :
+    // * scale par distance (les hits lointains restent lisibles)
+    // * couleur par tier de dégât (gris < 25, jaune < 60, orange < 100,
+    //   rouge ≥ 100) pour repérer instantanément un crit ou un splash
+    // * léger drift latéral pour que des chiffres simultanés (SG 11
+    //   pellets) ne se collent pas en pile illisible
+    let dmg_base_scale = HUD_SCALE * 1.4;
     for d in floating_damages {
         let remaining = (d.expire_at - now).max(0.0);
         let life = d.lifetime.max(1e-3);
         let elapsed_ratio = (1.0 - remaining / life).clamp(0.0, 1.0);
-        // Montée verticale dans le monde — plus lisible qu'un offset écran
-        // pur (suit la géométrie Q3 Z-up).
-        let rise = DAMAGE_NUMBER_RISE * elapsed_ratio;
+        // Frag confirms montent plus haut (×1.5) que les damage numbers
+        // pour qu'ils sortent plus du chaos visuel post-frag.
+        let rise = if d.is_frag {
+            DAMAGE_NUMBER_RISE * 1.5 * elapsed_ratio
+        } else {
+            DAMAGE_NUMBER_RISE * elapsed_ratio
+        };
         let world_pos = d.origin + Vec3::Z * rise;
         let Some((sx, sy)) = r.project_to_screen(world_pos) else {
             continue;
         };
-        // Fade : plein alpha pendant 60% de la vie, puis tombe linéairement.
+        // Distance world → scale facteur. À 200u : 1.0×, à 1500u :
+        // 1.6×. Au-delà, capé pour ne pas avoir un texte plein écran.
+        let dist = (world_pos - *player_origin).length();
+        let dist_scale = (1.0 + ((dist - 200.0) / 1500.0).max(0.0)).min(1.7);
+        // Frags affichés ~1.6× plus grand que les damage numbers — le
+        // joueur lit "FRAG" au coup d'œil sans confondre avec un chiffre.
+        let scale_mul = if d.is_frag { 1.6 } else { 1.0 };
+        let dmg_scale = dmg_base_scale * dist_scale * scale_mul;
+        let dmg_char_w = 8.0 * dmg_scale;
+        let dmg_line_h = 8.0 * dmg_scale;
+
         let alpha = if elapsed_ratio < 0.6 {
             1.0
         } else {
             ((1.0 - elapsed_ratio) / 0.4).clamp(0.0, 1.0)
         };
-        let color = if d.to_player {
-            [1.0, 0.35, 0.25, alpha]
+        // Frag confirm : couleur fixe gold-orange, texte "+1 FRAG".
+        // Damage : tier-coloré selon le nombre.
+        let (color, text) = if d.is_frag {
+            // Pop d'intensité au début (1.0×) qui se calme rapidement.
+            let pop = if elapsed_ratio < 0.15 {
+                1.0 + (1.0 - elapsed_ratio / 0.15) * 0.4
+            } else {
+                1.0
+            };
+            ([1.0, 0.65 * pop, 0.20 * pop, alpha], "+1 FRAG".to_string())
+        } else if d.to_player {
+            // Player hit : rouge dégradé selon sévérité.
+            let c = if d.damage >= 50 {
+                [1.0, 0.20, 0.15, alpha] // rouge vif (gros hit)
+            } else {
+                [1.0, 0.45, 0.30, alpha] // rouge plus doux
+            };
+            (c, format!("{}", d.damage))
         } else {
-            [1.0, 0.95, 0.2, alpha]
+            // Damage to bot : tier-coloré.
+            let c = if d.damage >= 100 {
+                [1.0, 0.30, 0.20, alpha] // rouge orangé (rocket/splash gros)
+            } else if d.damage >= 60 {
+                [1.0, 0.55, 0.15, alpha] // orange (crit)
+            } else if d.damage >= 25 {
+                [1.0, 0.95, 0.20, alpha] // jaune standard
+            } else {
+                [0.85, 0.85, 0.85, alpha] // gris clair (mini-hit)
+            };
+            (c, format!("{}", d.damage))
         };
-        let text = format!("{}", d.damage);
-        // Centrage horizontal + léger remontage vertical pour que le
-        // chiffre ne "sorte" pas sous la tête du bot à t=0.
-        let tx = sx - (text.len() as f32 * dmg_char_w) * 0.5;
+        // Drift latéral : décalé selon hash du timestamp pour
+        // séparer les chiffres synchrones (SG pellets).  Frags ne
+        // driftent pas (centrés sur la cible morte).
+        let drift = if d.is_frag {
+            0.0
+        } else {
+            let bits = d.expire_at.to_bits();
+            (((bits >> 8) & 0xff) as f32 / 255.0 - 0.5) * 30.0
+        };
+        let tx = sx - (text.len() as f32 * dmg_char_w) * 0.5 + drift;
         let ty = sy - dmg_line_h * 0.5;
+        // Ombre portée pour lisibilité sur ciel/terrain clair.
+        r.push_text(tx + 1.5, ty + 1.5, dmg_scale, [0.0, 0.0, 0.0, alpha * 0.6], &text);
         r.push_text(tx, ty, dmg_scale, color, &text);
     }
 
-    // Nameplates bots : au-dessus de chaque bot vivant dans le champ de
-    // vue, affiche nom + mini-barre de santé.  Pas de LOS test — ce fork
-    // solo vise le training contre IA, voir les PV à travers un mur est
-    // plus utile que gênant.  Fade en fonction de la distance pour
-    // éviter le spam de texte à longue portée.
-    {
-        const NAMEPLATE_MAX_DIST: f32 = 1800.0;
-        let plate_scale = HUD_SCALE * 0.9;
-        let plate_char = 8.0 * plate_scale;
-        let plate_h = 8.0 * plate_scale;
-        let bar_w = 60.0;
-        let bar_h = 4.0;
-        for bd in bots {
-            if bd.health.is_dead() {
-                continue;
-            }
-            let head = bd.body.origin + Vec3::Z * (BOT_CENTER_HEIGHT as f32 * 1.2);
-            let dist = (head - *player_origin).length();
-            if dist > NAMEPLATE_MAX_DIST {
-                continue;
-            }
-            let Some((sx, sy)) = r.project_to_screen(head) else {
-                continue;
-            };
-            // Fade linéaire au-delà de 80 % de la distance max.
-            let fade = if dist < NAMEPLATE_MAX_DIST * 0.8 {
-                1.0
-            } else {
-                ((NAMEPLATE_MAX_DIST - dist) / (NAMEPLATE_MAX_DIST * 0.2))
-                    .clamp(0.0, 1.0)
-            };
-            let name = &bd.bot.name;
-            let text_w = name.len() as f32 * plate_char;
-            let tx = sx - text_w * 0.5;
-            let ty = sy - plate_h - 14.0;
-            // Ombre + texte couleur bot.
-            r.push_text(tx + 1.0, ty + 1.0, plate_scale, [0.0, 0.0, 0.0, 0.8 * fade], name);
-            r.push_text(
-                tx,
-                ty,
-                plate_scale,
-                [bd.tint[0], bd.tint[1], bd.tint[2], fade],
-                name,
-            );
-            // Barre de santé juste sous le nom.
-            let hp = bd.health.current.max(0);
-            let max = bd.health.max.max(1);
-            let ratio = (hp as f32 / max as f32).clamp(0.0, 1.0);
-            let bx = sx - bar_w * 0.5;
-            let by = ty + plate_h + 2.0;
-            // Fond sombre.
-            r.push_rect(bx, by, bar_w, bar_h, [0.0, 0.0, 0.0, 0.7 * fade]);
-            // Remplissage vert → rouge selon santé.
-            let fill_col = if ratio > 0.5 {
-                [0.3, 0.9, 0.3, fade]
-            } else if ratio > 0.25 {
-                [1.0, 0.85, 0.15, fade]
-            } else {
-                [1.0, 0.25, 0.2, fade]
-            };
-            r.push_rect(bx + 1.0, by + 1.0, (bar_w - 2.0) * ratio, bar_h - 2.0, fill_col);
-        }
-    }
+    // Nameplates bots **retirés** (v0.9.5) — l'utilisateur ne veut aucun
+    // indicateur de position ennemi sur le HUD (zéro wallhack visuel).
+    // L'identification visuelle passe désormais uniquement par le tint
+    // appliqué au MD3 du bot (cf. `BotDriver::tint`) et le nom dans
+    // le kill-feed après un frag.
+    let _ = (player_origin, bots);
 
     // Kill feed : liste chronologique des N derniers kills. Une entrée
     // fade alpha sur la dernière seconde avant expiration. Style :
@@ -10778,6 +16111,33 @@ fn draw_hud(
         r.push_rect(cx + off, cy + off - 1.0, sz, 2.0, hm);
     }
 
+    // Kill-marker X : grand X rouge vif autour du réticule quand la
+    // dernière volée a tué la cible.  Distinct du hit-marker (plus
+    // gros, plus brillant, true diagonal au lieu d'horizontal) pour
+    // qu'un kill-confirm soit lisible "à l'œil" même sans regarder
+    // le score.  Chaque branche du X = série de petits carrés 2×2
+    // stair-steppés le long de la diagonale (push_rect ne sait pas
+    // tourner).  Alpha fade linéaire sur la durée totale.
+    if now < kill_marker_until {
+        let remain = (kill_marker_until - now).max(0.0);
+        let alpha = (remain / KILL_MARKER_DURATION_SEC).clamp(0.0, 1.0);
+        // Easing : pop puissant au début, fade lent en fin → on garde
+        // l'alpha visuel haut sur la 1ère moitié.
+        let alpha = alpha.sqrt();
+        let col = [1.0, 0.18, 0.12, alpha];
+        let inner = 9.0_f32; // gap centre → début de la branche
+        let len = 16_i32; // longueur en pixels diagonaux
+        for k in 0..len {
+            let f = k as f32;
+            // Top-left → bottom-right diagonale (\)
+            r.push_rect(cx - inner - f, cy - inner - f, 2.0, 2.0, col);
+            r.push_rect(cx + inner + f, cy + inner + f, 2.0, 2.0, col);
+            // Top-right → bottom-left diagonale (/)
+            r.push_rect(cx + inner + f, cy - inner - f, 2.0, 2.0, col);
+            r.push_rect(cx - inner - f, cy + inner + f, 2.0, 2.0, col);
+        }
+    }
+
     // Combo counter : cumul de dégâts infligés sur la fenêtre récente.
     // Affiché sous le crosshair, fade sur la dernière 0.3 s de la
     // fenêtre.  Couleur : blanc → jaune → orange → rouge selon la
@@ -10941,20 +16301,20 @@ fn draw_hud(
         }
     }
 
-    // Radar / minimap : carré en haut-centre-gauche (sous le chrono du
-    // match) qui situe le joueur + bots vivants dans un rayon de ~2000
-    // unités world.  "Up" sur le radar = direction regardée par le
-    // joueur — la map tourne autour du joueur, pas l'inverse.  Utile en
-    // DM chargé pour repérer qui te tourne autour.
+    // **Radar bot dots retirés** (v0.9.5+) — l'utilisateur ne veut
+    // aucun indicateur de position des bots sur le HUD.  Les bots
+    // restent invisibles tant qu'ils ne sont pas en LOS direct, ce
+    // qui pousse au jeu d'écoute (pas/tirs) au lieu du wallhack
+    // visuel.
     {
         const RADAR_WORLD_RANGE: f32 = 2000.0;
         let radar_size = 140.0_f32;
         let radar_x = 8.0;
-        let radar_y = 90.0; // sous la ligne d'info top-gauche
+        let radar_y = 90.0;
         let cx_r = radar_x + radar_size * 0.5;
         let cy_r = radar_y + radar_size * 0.5;
         let scale = (radar_size * 0.5) / RADAR_WORLD_RANGE;
-        // Fond semi-opaque + liseré.
+        // Fond semi-opaque + liseré (cadre vide, pas de dots ennemis).
         r.push_rect(radar_x, radar_y, radar_size, radar_size, [0.0, 0.0, 0.0, 0.55]);
         let border = 2.0;
         r.push_rect(radar_x, radar_y, radar_size, border, [0.7, 0.7, 0.8, 0.6]);
@@ -10973,39 +16333,11 @@ fn draw_hud(
             radar_size,
             [0.7, 0.7, 0.8, 0.6],
         );
-        // Base de direction joueur pour rotation 2D.
         let basis = view_angles.to_vectors();
-        let fwd_x = basis.forward.x;
-        let fwd_y = basis.forward.y;
-        let rgt_x = basis.right.x;
-        let rgt_y = basis.right.y;
-        // Dots bots.
-        for bd in bots {
-            if bd.health.is_dead() {
-                continue;
-            }
-            let dx = bd.body.origin.x - player_origin.x;
-            let dy = bd.body.origin.y - player_origin.y;
-            let dist2 = dx * dx + dy * dy;
-            if dist2 > RADAR_WORLD_RANGE * RADAR_WORLD_RANGE {
-                continue;
-            }
-            // Projection sur (forward, right) du joueur.
-            let local_fwd = dx * fwd_x + dy * fwd_y;
-            let local_rgt = dx * rgt_x + dy * rgt_y;
-            // Map : forward → écran haut (-y), right → écran droit (+x).
-            let px = cx_r + local_rgt * scale;
-            let py = cy_r - local_fwd * scale;
-            // Petit dot 5×5 avec ombre noire 7×7.
-            r.push_rect(px - 3.5, py - 3.5, 7.0, 7.0, [0.0, 0.0, 0.0, 0.8]);
-            r.push_rect(
-                px - 2.5,
-                py - 2.5,
-                5.0,
-                5.0,
-                [bd.tint[0], bd.tint[1], bd.tint[2], 1.0],
-            );
-        }
+        // On garde les variables consommées plus bas (drapeaux CTF /
+        // joueur) pour ne pas casser le reste du radar.
+        let _ = (basis, scale);
+        let _ = bots;
         // Joueur : triangle-ish (3 rects concentriques) au centre, couleur
         // verte — toujours "up".
         r.push_rect(cx_r - 4.0, cy_r - 6.0, 8.0, 2.0, [0.2, 1.0, 0.2, 1.0]);
@@ -11039,55 +16371,22 @@ fn draw_hud(
         r.push_rect(0.0, 0.0, w, h, [rgb[0], rgb[1], rgb[2], alpha]);
     }
 
-    // Overlay Quad Damage spécialisé : en plus du tint de base,
-    // bandeaux de vignette haut/bas en bleu saturé + pulse x2 Hz,
-    // pour le feedback "je suis surpuissant" caractéristique de Q3.
-    // 4 bandes empilées (top + bottom, chacune en deux fines bandes
-    // pour simuler un dégradé linéaire sans shader).
-    if let Some(remaining) = powerup_remaining[PowerupKind::QuadDamage.index()] {
-        let pulse = 0.5 + 0.5 * (now * std::f32::consts::TAU * 2.0).sin();
-        let fade = remaining.min(0.8) / 0.8; // fondu dans la dernière 0.8 s
-        let strong = 0.45 * pulse * fade;
-        let soft = 0.18 * pulse * fade;
-        let quad = [0.35, 0.55, 1.0];
-        let band_outer = (h * 0.06).max(18.0);
-        let band_inner = (h * 0.05).max(14.0);
-        // Haut : bande extérieure (opaque) + bande intérieure (légère)
-        r.push_rect(0.0, 0.0, w, band_outer, [quad[0], quad[1], quad[2], strong]);
-        r.push_rect(
-            0.0,
-            band_outer,
-            w,
-            band_inner,
-            [quad[0], quad[1], quad[2], soft],
-        );
-        // Bas : miroir.
-        r.push_rect(
-            0.0,
-            h - band_outer,
-            w,
-            band_outer,
-            [quad[0], quad[1], quad[2], strong],
-        );
-        r.push_rect(
-            0.0,
-            h - band_outer - band_inner,
-            w,
-            band_inner,
-            [quad[0], quad[1], quad[2], soft],
-        );
-        // Liseré très fin au milieu des bords gauche/droit pour encadrer
-        // légèrement sans obstruer le champ de vision central.
-        let side_w = 3.0;
-        r.push_rect(0.0, 0.0, side_w, h, [quad[0], quad[1], quad[2], strong]);
-        r.push_rect(
-            w - side_w,
-            0.0,
-            side_w,
-            h,
-            [quad[0], quad[1], quad[2], strong],
-        );
-    }
+    // **Overlay Quad Damage** SUPPRIMÉ (v0.9.5++ user request) — l'effet
+    // multi-couches précédent (vignette + sparkles + bandeaux) était
+    // distrayant.  On laisse uniquement le SFX de pickup + la jauge HUD
+    // (chrono powerup en bas-droite) pour signaler que le Quad est actif.
+    // Le tint sur le viewmodel reste également discret côté
+    // `queue_viewmodel` via `player_tint`.
+
+    // ─── Haste ─────────────────────────────────────────────────────
+    // **Speed lines périphériques SUPPRIMÉES** (v0.9.5++ user request) —
+    // jugées trop intrusives.  Feedback restant : SFX de pickup +
+    // chrono HUD + cadence de tir / vitesse course visiblement boostée.
+
+    // ─── Battle Suit ───────────────────────────────────────────────
+    // **Crackle énergétique SUPPRIMÉ** (v0.9.5++ user request idem
+    // Quad/Haste).  Feedback restant : SFX de pickup + chrono HUD +
+    // immunité dégât environnemental sentie en gameplay.
 
     // Overlay spectator : bandeau haut avec l'état (FREE-FLY ou FOLLOWING
     // <name>) + hint clavier discret. Affiché uniquement en mode
@@ -11132,6 +16431,25 @@ fn draw_hud(
     // rappelle qui/quoi a fraggé le joueur — utile en DM chargé où le
     // kill-feed défile trop vite pour être lu pendant la mort.
     if let Some(remaining) = respawn_remaining {
+        // **Death overlay** — voile rouge sombre full-screen + dégradé
+        // vers les bords, alpha modulé pour fade-in (0.3 s) → stay
+        // jusqu'à respawn.  Donne une lecture "drama" forte : le monde
+        // s'assombrit autour du cadavre.  Indépendant du panneau
+        // texte qui suit (le voile passe DESSOUS le panneau).
+        let elapsed_dead = (RESPAWN_DELAY_SEC - remaining).max(0.0);
+        let fade_in = (elapsed_dead / 0.30).clamp(0.0, 1.0);
+        let dim_alpha = 0.42 * fade_in;
+        // Wash global : noir-rougeâtre, écrase la couleur du monde.
+        r.push_rect(0.0, 0.0, w, h, [0.18, 0.02, 0.02, dim_alpha]);
+        // Bordure plus opaque : effet "tunnel" périphérique.
+        let edge_thick = 60.0;
+        let edge_alpha = 0.55 * fade_in;
+        let edge = [0.45, 0.05, 0.05, edge_alpha];
+        r.push_rect(0.0, 0.0, w, edge_thick, edge);
+        r.push_rect(0.0, h - edge_thick, w, edge_thick, edge);
+        r.push_rect(0.0, edge_thick, edge_thick, h - 2.0 * edge_thick, edge);
+        r.push_rect(w - edge_thick, edge_thick, edge_thick, h - 2.0 * edge_thick, edge);
+
         let msg = format!("YOU DIED — respawn in {remaining:.1}s");
         let msg_w = msg.len() as f32 * char_w * 2.0;
         let cx = (w - msg_w) * 0.5;
@@ -11222,30 +16540,89 @@ fn draw_hud(
     // Intermission : bandeau plein écran + gros titre. Dessiné après le
     // scoreboard pour le recouvrir proprement, mais avant la console.
     if let Some(winner) = match_winner {
-        // Voile sombre + deux liserés accent horizontaux pour encadrer le
-        // titre sans occulter le scoreboard (lisibilité des chiffres
-        // finaux).  Remplace le rectangle monochrome par un cadre « boss
-        // battle over » qui sent le fin-de-round moderne.
-        r.push_rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
-        r.push_rect(0.0, h * 0.12, w, 3.0, COL_PANEL_EDGE);
-        r.push_rect(0.0, h * 0.32, w, 3.0, COL_PANEL_EDGE);
-        let scale = HUD_SCALE * 3.0;
-        let winner_label = winner.label();
-        let line1 = "MATCH OVER";
-        let line2 = format!("WINNER: {winner_label}");
+        // **BR victory screen** (v0.9.5) — distingue VICTORY (player
+        // gagne) / DEFEAT (un bot gagne) / DRAW (égalité ring) avec
+        // teintes contrastées et un sub-title qui nomme le vainqueur.
+        let (banner, banner_col, sub) = match winner {
+            KillActor::Player => (
+                "VICTORY",
+                [0.30, 1.0, 0.45, 1.0],
+                "LAST ONE STANDING".to_string(),
+            ),
+            KillActor::Bot(name) => (
+                "DEFEAT",
+                [1.0, 0.30, 0.30, 1.0],
+                format!("WINNER: {name}"),
+            ),
+            KillActor::World => (
+                "DRAW",
+                [0.85, 0.85, 0.85, 1.0],
+                "WIPED BY THE STORM".to_string(),
+            ),
+        };
+        // Voile sombre + double liseré.
+        r.push_rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.65]);
+        r.push_rect(0.0, h * 0.12, w, 3.0, banner_col);
+        r.push_rect(0.0, h * 0.32, w, 3.0, banner_col);
+        let scale = HUD_SCALE * 4.0;
         let big_char_w = 8.0 * scale;
         let big_line_h = 8.0 * scale;
-        let l1_w = line1.len() as f32 * big_char_w;
-        let l2_w = line2.len() as f32 * big_char_w;
+        let l1_w = banner.len() as f32 * big_char_w;
         let cy = h * 0.18;
-        push_text_shadow(r, (w - l1_w) * 0.5, cy, scale, COL_YELLOW, line1);
+        // Big banner (VICTORY/DEFEAT/DRAW) en couleur du résultat.
+        push_text_shadow(r, (w - l1_w) * 0.5, cy, scale, banner_col, banner);
+        // Sous-titre nom vainqueur en blanc.
+        let sub_scale = HUD_SCALE * 2.0;
+        let sub_w = sub.len() as f32 * 8.0 * sub_scale;
         push_text_shadow(
             r,
-            (w - l2_w) * 0.5,
-            cy + big_line_h * 1.4,
-            scale,
+            (w - sub_w) * 0.5,
+            cy + big_line_h * 1.2,
+            sub_scale,
             COL_WHITE,
-            &line2,
+            &sub,
+        );
+        // **Match end stats panel** (v0.9.5++ #41) — K/D + accuracy +
+        // streak max sous le banner.  Donne au joueur un retour
+        // numérique sur sa partie quand le match se termine.
+        let kd = if deaths == 0 {
+            frags as f32
+        } else {
+            frags as f32 / deaths as f32
+        };
+        let acc = if total_shots > 0 {
+            (total_hits as f32 / total_shots as f32) * 100.0
+        } else {
+            0.0
+        };
+        let stats = [
+            format!("FRAGS    {:>4}", frags),
+            format!("DEATHS   {:>4}", deaths),
+            format!("K/D      {:>5.2}", kd),
+            format!("ACCURACY {:>5.1}%", acc),
+            format!("SHOTS    {:>4}", total_shots),
+            format!("HITS     {:>4}", total_hits),
+        ];
+        let stats_scale = HUD_SCALE * 1.5;
+        let stats_line_h = 8.0 * stats_scale + 6.0;
+        let stats_y0 = h * 0.42;
+        for (i, line) in stats.iter().enumerate() {
+            let line_w = line.len() as f32 * 8.0 * stats_scale;
+            let lx = (w - line_w) * 0.5;
+            let ly = stats_y0 + i as f32 * stats_line_h;
+            push_text_shadow(r, lx, ly, stats_scale, [0.85, 0.85, 0.92, 0.95], line);
+        }
+        // Hint return to menu — repoussé en bas pour ne pas chevaucher les stats.
+        let hint = "ESC  RETURN TO MENU";
+        let hint_scale = HUD_SCALE * 1.0;
+        let hint_w = hint.len() as f32 * 8.0 * hint_scale;
+        push_text_shadow(
+            r,
+            (w - hint_w) * 0.5,
+            h - 60.0,
+            hint_scale,
+            [0.7, 0.78, 0.88, 0.95],
+            hint,
         );
     }
 
@@ -11855,7 +17232,7 @@ fn try_load_sfx(vfs: &Vfs, snd: &Arc<SoundSystem>, path: &str) -> Option<SoundHa
     }
 }
 
-fn play_at(snd: &Arc<SoundSystem>, handle: SoundHandle, origin: Vec3, priority: Priority) {
+fn play_at(snd: &Arc<SoundSystem>, handle: SoundHandle, origin: Vec3, priority: Priority) -> bool {
     snd.play_3d(
         handle,
         Emitter3D {
@@ -11865,7 +17242,7 @@ fn play_at(snd: &Arc<SoundSystem>, handle: SoundHandle, origin: Vec3, priority: 
             volume: 1.0,
             priority,
         },
-    );
+    )
 }
 
 /// Joue le hitsound « dans l'oreille » du joueur : on place l'émetteur à
@@ -11928,7 +17305,28 @@ fn play_medal(snd: &Arc<SoundSystem>, handle: SoundHandle, listener: Vec3) {
 /// `far_box`. Les erreurs (registre absent, aucun shader sky, cubemap
 /// manquante) sont loggées mais jamais propagées — on retombe sur le ciel
 /// procédural par défaut.
-fn resolve_and_load_sky(r: &mut Renderer, vfs: &Arc<Vfs>, bsp: &Bsp) {
+///
+/// Si `override_path` est `Some(...)`, on l'utilise direct au lieu de
+/// chercher dans le BSP (cvar `r_skybox` user, force la skybox custom
+/// pour TOUTES les maps).
+fn resolve_and_load_sky(
+    r: &mut Renderer,
+    vfs: &Arc<Vfs>,
+    bsp: &Bsp,
+    override_path: Option<&str>,
+) {
+    // Override user > BSP shader.
+    if let Some(base) = override_path {
+        if !base.trim().is_empty() {
+            info!("sky: cubemap forcée via r_skybox = '{}'", base);
+            if let Err(e) = r.load_sky_cubemap(vfs, base) {
+                warn!("sky cubemap '{base}' KO: {e} — essai BSP fallback");
+                // Continue vers le fallback BSP ci-dessous.
+            } else {
+                return;
+            }
+        }
+    }
     // Snapshot des noms candidats : on ne peut pas garder de `&ShaderRegistry`
     // vivant pendant qu'on appelle `load_sky_cubemap` (mutable borrow).
     let candidate = {
@@ -11993,6 +17391,11 @@ struct BotTickOut {
     /// vient de sniper depuis l'autre bout de la map quand plusieurs
     /// bots sont en vue.
     rail_beams: Vec<ActiveBeam>,
+    /// **Squad chatter events** (v0.9.5) — collecte les triggers de
+    /// chatter détectés pendant le tick. Flushés par App après le
+    /// tick (App::maybe_bot_chat ne peut pas être appelé depuis ici
+    /// car tick_bots ne tient pas `&mut self`).
+    chatter_events: Vec<(usize, ChatTrigger)>,
 }
 
 /// Profil de tir hitscan bot : détermine quelle arme est utilisée selon
@@ -12056,6 +17459,11 @@ fn tick_bots(
     player_alive: bool,
     player_invisible: bool,
     rocket_mesh: &Option<Arc<Md3Gpu>>,
+    // **Bot item priority** (G4c) — pickups stratégiques que les bots
+    // priorisent. Format `(pos, prio_score, available)`. `available=
+    // false` = en respawn, on ignore. `prio_score` distingue MH/RA/
+    // Quad/etc. → les bots vont chercher Quad avant MH.
+    pickups_priority: &[(Vec3, f32, bool)],
 ) -> BotTickOut {
     use q3_collision::Contents;
     let player_eye = player_origin + Vec3::Z * PLAYER_EYE_HEIGHT;
@@ -12067,9 +17475,59 @@ fn tick_bots(
         last_hitscan_weapon: None,
         wall_marks: Vec::new(),
         rail_beams: Vec::new(),
+        chatter_events: Vec::new(),
     };
 
     for (idx, d) in bots.iter_mut().enumerate() {
+        // **Yaw turn detection** (v0.9.5++) — si le bot pivote rapidement
+        // alors qu'il est stationnaire, déclenche LEGS_TURN.  Seuil :
+        // 8°/frame (≈ 480°/s à 60fps) → détecte les hard turns d'agro
+        // sans déclencher pour les microcorrections.
+        let yaw_now = d.body.view_angles.yaw;
+        let mut delta = (yaw_now - d.prev_yaw).abs();
+        // Wrap-around 359° ↔ 1°
+        if delta > 180.0 { delta = 360.0 - delta; }
+        if delta > 8.0 {
+            d.last_turn_at = now;
+        }
+        d.prev_yaw = yaw_now;
+
+        // **Bot item priority** (G4c) — si le bot n'a pas de cible
+        // ennemie ET son HP/armor justifient un pickup (HP<70 → MH/health,
+        // armor<50 → RA/YA, ou n'importe quel bot va vers Quad), on
+        // insère un waypoint vers le pickup le plus prioritaire dans
+        // un rayon de 2000u. Le score combine type × 1/distance pour
+        // que Quad au loin l'emporte sur MH proche, mais Quad très
+        // loin ne batte pas MH proche.
+        if d.bot.target_enemy.is_none() && !d.health.is_dead() {
+            let need_health = d.health.current < 70;
+            let bot_pos = d.body.origin;
+            let mut best: Option<(f32, Vec3)> = None;
+            for &(pos, mut prio, available) in pickups_priority {
+                if !available { continue; }
+                let dist = (pos - bot_pos).length();
+                if dist > 2000.0 || dist < 1.0 { continue; }
+                // Health items dévalués si HP plein.
+                if !need_health && prio < 5.0 {
+                    prio *= 0.3;
+                }
+                let score = prio / (dist * 0.001 + 1.0);
+                if best.map_or(true, |(s, _)| score > s) {
+                    best = Some((score, pos));
+                }
+            }
+            if let Some((_, pos)) = best {
+                // Insère ce waypoint EN TÊTE de queue si pas déjà
+                // proche (évite re-insertion à chaque tick).
+                let already_close = d.bot.waypoints
+                    .first()
+                    .map(|w| (*w - pos).length() < 64.0)
+                    .unwrap_or(false);
+                if !already_close {
+                    d.bot.waypoints.insert(0, pos);
+                }
+            }
+        }
         // Bot mort → la logique de respawn s'en occupe ailleurs, on skip.
         if d.health.is_dead() {
             continue;
@@ -12120,19 +17578,93 @@ fn tick_bots(
         } else {
             BOT_MEMORY_SEC
         };
-        if visible {
+        // **Bot retreat** (G4d) — quand HP bas, on bypass le combat
+        // et on insère un waypoint OPPOSÉ au joueur pour fuir vers
+        // une zone safe. Le bot revient en Roam (target_enemy=None)
+        // → ne tire plus → mouvement vers waypoint évasion. Quand
+        // HP remonte (pickup health) le comportement normal reprend.
+        let low_hp = d.health.current < 25;
+        if visible && !low_hp {
+            // **Spotted chatter** : si on vient juste d'acquérir la
+            // cible (transition None→Some), pousse un trigger Spotted.
+            // Le cooldown par-bot est géré côté App pour ne pas
+            // saturer la radio.
+            let just_spotted = d.first_seen_player_at.is_none();
             d.bot.target_enemy = Some(player_eye);
             d.last_saw_player_at = Some(now);
-            // Front montant : on vient juste de re-repérer le joueur
-            // après une fenêtre d'oubli → on arme le délai de réaction.
-            if d.first_seen_player_at.is_none() {
+            if just_spotted {
                 d.first_seen_player_at = Some(now);
+                if (now - d.last_chatter_at) >= CHATTER_COOLDOWN_SEC {
+                    out.chatter_events.push((idx, ChatTrigger::Spotted));
+                    d.last_chatter_at = now;
+                }
+            }
+        } else if visible && low_hp {
+            // Fuite : insère un waypoint à 800u DOS au joueur.
+            // Pas de pathfinding — l'anti-stuck IA fera le reste si
+            // ça tape un mur.
+            d.bot.target_enemy = None;
+            d.last_saw_player_at = None;
+            d.first_seen_player_at = None;
+            // Chatter LowHp — sur transition vers fuite.
+            if (now - d.last_chatter_at) >= CHATTER_COOLDOWN_SEC {
+                out.chatter_events.push((idx, ChatTrigger::LowHp));
+                d.last_chatter_at = now;
+            }
+            let from_player = (d.body.origin - player_eye).truncate();
+            if from_player.length_squared() > 1.0 {
+                let dir = from_player.normalize();
+                let escape =
+                    d.body.origin + Vec3::new(dir.x * 800.0, dir.y * 800.0, 0.0);
+                if d.bot.waypoints.is_empty()
+                    || (d.bot.waypoints[0] - escape).length() > 200.0
+                {
+                    d.bot.waypoints.insert(0, escape);
+                }
             }
         } else if let Some(t) = d.last_saw_player_at {
             if now - t > memory {
                 d.bot.target_enemy = None;
                 d.last_saw_player_at = None;
                 d.first_seen_player_at = None;
+            }
+        }
+
+        // **Sound awareness** (v0.9.5) — si le bot a entendu le joueur
+        // récemment ET qu'il n'a pas de cible visible, il insère la
+        // position du bruit comme waypoint d'enquête.  Combiné avec le
+        // FOV/LOS test ci-dessus, ça donne :
+        //   1. joueur tire derrière un mur → bots dans BOT_HEARING_RADIUS
+        //      reçoivent last_heard_pos
+        //   2. ils convergent vers cette position
+        //   3. arrivés en LOS, le combat normal prend le relais
+        // Le waypoint expire avec la mémoire auditive (cf. `now - heard`).
+        if d.bot.target_enemy.is_none() && !d.health.is_dead() {
+            if let Some(heard) = d.last_heard_pos {
+                if now - d.last_heard_at <= BOT_HEARING_MEMORY_SEC {
+                    let dist_to_noise = (d.body.origin - heard).length();
+                    // Skip si déjà sur place — sinon le bot tournerait
+                    // en rond sur la position du dernier bruit.
+                    if dist_to_noise > 100.0 {
+                        let already = d.bot.waypoints
+                            .first()
+                            .map(|w| (*w - heard).length() < 64.0)
+                            .unwrap_or(false);
+                        if !already {
+                            d.bot.waypoints.insert(0, heard);
+                            // Chatter "j'ai entendu un truc" — rare
+                            // (CHAT_TRIGGER_PROB * 0.30) pour ne pas
+                            // confirmer chaque planque acoustique.
+                            if (now - d.last_chatter_at) >= CHATTER_COOLDOWN_SEC {
+                                out.chatter_events.push((idx, ChatTrigger::Heard));
+                                d.last_chatter_at = now;
+                            }
+                        }
+                    }
+                } else {
+                    // Mémoire expirée → on oublie.
+                    d.last_heard_pos = None;
+                }
             }
         }
 
@@ -12363,74 +17895,183 @@ fn tick_bots(
 /// en sinusoïde cyan-blanc pour signaler l'état au joueur — sans ça, un
 /// tir qui passe à travers un bot invul paraîtrait buggé. La pulsation à
 /// ~3 Hz reste lisible à l'œil mais pas distrayante.
-fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &[BotDriver], time_sec: f32) {
+fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_sec: f32) {
     use glam::{Mat4 as GMat4, Quat, Vec3 as GVec3};
 
     // Seuils de la machine d'états — en secondes depuis l'évènement.
-    // Gardés courts pour que l'anim ne « colle » pas (dans Q3 TORSO_ATTACK
-    // dure 15 frames à 15 fps soit ~1.0s, mais on raccourcit pour que
-    // des bursts rapprochés aient un retour visuel distinct par tir).
-    const ATTACK_WINDOW_SEC: f32 = 0.25;
+    const ATTACK_WINDOW_SEC: f32 = 0.40;
     const PAIN_WINDOW_SEC: f32 = 0.20;
     const LAND_WINDOW_SEC: f32 = 0.15;
+    const TURN_WINDOW_SEC: f32 = 0.25;
+    const GESTURE_DURATION_SEC: f32 = 2.7; // 40 frames à 15 fps
     // Vitesse XY au-dessus de laquelle on considère que le bot « court »
     // plutôt qu'il traîne sur place — 40 u/s ≈ vitesse de walk Q3.
     const RUN_SPEED_SQ: f32 = 40.0 * 40.0;
+
+    // **Anim lookup** : `rig.anims` (animation.cfg parsé) en priorité,
+    // fallback sur les constants `bot_anims::*` si la cfg est absente.
+    let anim = |name: &'static str, fallback: AnimRange| -> AnimRange {
+        rig.anims.get(name).copied().unwrap_or(fallback)
+    };
+    let a_both_death1 = anim("BOTH_DEATH1", bot_anims::BOTH_DEATH1);
+    let a_both_dead1  = anim("BOTH_DEAD1",  bot_anims::BOTH_DEAD1);
+    let a_both_death2 = anim("BOTH_DEATH2", bot_anims::BOTH_DEATH2);
+    let a_both_dead2  = anim("BOTH_DEAD2",  bot_anims::BOTH_DEAD2);
+    let a_both_death3 = anim("BOTH_DEATH3", bot_anims::BOTH_DEATH3);
+    let a_both_dead3  = anim("BOTH_DEAD3",  bot_anims::BOTH_DEAD3);
+    let a_torso_gesture = anim("TORSO_GESTURE", bot_anims::TORSO_GESTURE);
+    let a_torso_attack  = anim("TORSO_ATTACK",  bot_anims::TORSO_ATTACK);
+    let a_torso_stand   = anim("TORSO_STAND",   bot_anims::TORSO_STAND);
+    let a_torso_pain    = anim("TORSO_PAIN1",   bot_anims::TORSO_PAIN1);
+    let a_legs_walk = anim("LEGS_WALK", bot_anims::LEGS_WALK);
+    let a_legs_run  = anim("LEGS_RUN",  bot_anims::LEGS_RUN);
+    let a_legs_back = anim("LEGS_BACK", bot_anims::LEGS_BACK);
+    let a_legs_jump = anim("LEGS_JUMP", bot_anims::LEGS_JUMP);
+    let a_legs_land = anim("LEGS_LAND", bot_anims::LEGS_LAND);
+    let a_legs_jumpb = anim("LEGS_JUMPB", bot_anims::LEGS_JUMPB);
+    let a_legs_landb = anim("LEGS_LANDB", bot_anims::LEGS_LANDB);
+    let a_legs_idle = anim("LEGS_IDLE", bot_anims::LEGS_IDLE);
+    let a_legs_turn = anim("LEGS_TURN", bot_anims::LEGS_TURN);
 
     let nf_lower = rig.lower.num_frames();
     let nf_upper = rig.upper.num_frames();
     let nf_head = rig.head.num_frames();
 
     for d in bots {
+        // --- Bot mort : on joue BOTH_DEATH puis on freeze sur BOTH_DEAD.
+        // Variation 0/1/2 selon `death_variant` pour casser l'uniformité
+        // (3 anims de mort distinctes en Q3).
         if d.health.is_dead() {
+            let Some(death_at) = d.death_started_at else {
+                // Pas encore enregistré : skip (pas mort la frame courante).
+                continue;
+            };
+            let phase = time_sec - death_at;
+            // Death dure 30 frames à 25 fps = 1.2 s.  Au-delà, freeze
+            // sur la dernière frame (pose cadavre).
+            let (death_range, dead_range) = match d.death_variant % 3 {
+                0 => (a_both_death1, a_both_dead1),
+                1 => (a_both_death2, a_both_dead2),
+                _ => (a_both_death3, a_both_dead3),
+            };
+            let active = if phase < 1.2 { death_range } else { dead_range };
+            let (fa_l, fb_l, lerp_l) = active.sample(phase, nf_lower);
+            let (fa_u, fb_u, lerp_u) = active.sample(phase, nf_upper);
+            let o = d.body.origin;
+            // Cadavre : on le laisse tomber au sol, pas de yaw spinning.
+            let rot = Quat::from_rotation_z(d.body.view_angles.yaw.to_radians());
+            let scale_idx = d.bot.name.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+                as usize;
+            let s = bot_scale(scale_idx);
+            let lower_m = GMat4::from_scale_rotation_translation(
+                GVec3::new(s, s, s), rot, GVec3::new(o.x, o.y, o.z),
+            );
+            let ident = GMat4::IDENTITY;
+            let torso_local = rig.lower.tag_transform(fa_l, fb_l, lerp_l, "tag_torso").unwrap_or(ident);
+            let upper_m = lower_m * torso_local;
+            let head_local = rig.upper.tag_transform(fa_u, fb_u, lerp_u, "tag_head").unwrap_or(ident);
+            let head_m = upper_m * head_local;
+            // Tint plus sombre pour signaler "mort" (corps qui se fige).
+            let dead_tint = [d.tint[0] * 0.55, d.tint[1] * 0.55, d.tint[2] * 0.55, d.tint[3]];
+            let head_tint = bot_head_tint(dead_tint);
+            r.draw_md3_animated(rig.lower.clone(), lower_m, dead_tint, fa_l, fb_l, lerp_l);
+            r.draw_md3_animated(rig.upper.clone(), upper_m, dead_tint, fa_u, fb_u, lerp_u);
+            r.draw_md3_animated(rig.head.clone(),  head_m,  head_tint, 0, 0, 0.0);
             continue;
         }
 
         // --- Sélection d'anim côté jambes (lower) + torse (upper).
-        // On dérive l'état en lecture seule depuis les horodatages
-        // tenus à jour par le code de combat et la physique.
         let v_xy_sq = d.body.velocity.x * d.body.velocity.x
             + d.body.velocity.y * d.body.velocity.y;
+        let v_xy = v_xy_sq.sqrt();
         let moving = v_xy_sq > RUN_SPEED_SQ;
         let recently_fired = (time_sec - d.last_fire_at) < ATTACK_WINDOW_SEC;
         let recently_hurt = (time_sec - d.last_damage_at) < PAIN_WINDOW_SEC;
         let recently_landed = (time_sec - d.last_land_at) < LAND_WINDOW_SEC;
+        let recently_turned = (time_sec - d.last_turn_at) < TURN_WINDOW_SEC;
         let airborne = !d.body.on_ground;
+        // Mouvement vers l'arrière : projection vélocité sur forward < 0.
+        let yaw_rad = d.body.view_angles.yaw.to_radians();
+        let fwd_x = yaw_rad.cos();
+        let fwd_y = yaw_rad.sin();
+        let forward_speed = d.body.velocity.x * fwd_x + d.body.velocity.y * fwd_y;
+        let moving_backward = moving && forward_speed < -20.0;
+        // Gesture (taunt) actif ?
+        let gesturing = d.gesture_started_at
+            .map(|t| time_sec - t < GESTURE_DURATION_SEC)
+            .unwrap_or(false);
 
-        // Torso (upper) : priorité pain > attack > stand. La pain anim
-        // n'existe pas dans Q3 animation.cfg standard (c'est typiquement
-        // juste un mini burst de gesture/stand avec un tint) — on
-        // rejoue TORSO_GESTURE pour ce rôle.
+        // **Upper anim** — priorité : pain > gesture > attack > stand.
+        // Weapon-aware : Gauntlet utilise TORSO_ATTACK2 (swing mêlée).
+        // v0.9.5++ : pain joue TORSO_PAIN1 au lieu de TORSO_GESTURE
+        // (le bot ne se moque plus en se prenant des balles).
         let upper_range = if recently_hurt {
-            bot_anims::TORSO_GESTURE
+            a_torso_pain
+        } else if gesturing {
+            a_torso_gesture
         } else if recently_fired {
-            bot_anims::TORSO_ATTACK
+            a_torso_attack
         } else {
-            bot_anims::TORSO_STAND
+            a_torso_stand
         };
-        // Legs (lower) : airborne > landing > moving > idle.
+        // **Lower anim** — priorité : airborne > land > move > turn > idle.
         let lower_range = if airborne {
-            bot_anims::LEGS_JUMP
+            if forward_speed < -20.0 { a_legs_jumpb } else { a_legs_jump }
         } else if recently_landed {
-            bot_anims::LEGS_LAND
+            if forward_speed < -20.0 { a_legs_landb } else { a_legs_land }
+        } else if moving_backward {
+            a_legs_back
         } else if moving {
-            if v_xy_sq > 200.0 * 200.0 {
-                bot_anims::LEGS_RUN
-            } else {
-                bot_anims::LEGS_WALK
-            }
+            // **Seuil run/walk** baissé de 200 → 120 u/s (v0.9.5++ —
+            // était trop élevé : la plupart des bots à vitesse
+            // soutenue ~150 u/s jouaient WALK au lieu de RUN, ce qui
+            // donnait une impression molle).  120 u/s correspond à
+            // la convention Q3 historique (`cg.predicted_player_state`).
+            if v_xy_sq > 120.0 * 120.0 { a_legs_run } else { a_legs_walk }
+        } else if recently_turned {
+            a_legs_turn
         } else {
-            bot_anims::LEGS_IDLE
+            a_legs_idle
         };
 
-        // Phase locale à chaque anim : on utilise `time_sec` directement
-        // comme phase (les anims cycliques prennent `rem_euclid`, les non-
-        // cycliques clamp à la fin — elles se stabilisent donc sur leur
-        // frame terminale tant qu'on y reste).  Cette approche évite de
-        // muter `BotDriver` depuis `queue_bots`.
-        let phase = time_sec;
-        let (fa_l, fb_l, lerp_l) = lower_range.sample(phase, nf_lower);
-        let (fa_u, fb_u, lerp_u) = upper_range.sample(phase, nf_upper);
+        // **Per-bot phase offset** (v0.9.5) — hash du nom donne un
+        // décalage stable [0, 1] secondes pour que deux bots côte à
+        // côte ne lèvent pas le pied en même temps. Sans ça, l'IA
+        // a un effet "ballet militaire" très immersion-breaking.
+        let name_hash = d.bot.name.bytes()
+            .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+        let phase_offset = (name_hash & 0xff) as f32 / 255.0;
+
+        // **Speed-modulated walk/run rate** — quand le bot court à
+        // pleine vitesse Q3 (320 u/s) le cycle joue à la fps standard.
+        // À la moitié, fps × 0.5.  Donne un rendu cohérent même en
+        // décélération ou strafing dur.
+        let is_locomotion = lower_range.start == a_legs_run.start
+            || lower_range.start == a_legs_walk.start
+            || lower_range.start == a_legs_back.start;
+        let speed_factor = if is_locomotion {
+            (v_xy / 320.0).clamp(0.5, 1.5)
+        } else {
+            1.0
+        };
+        // **Phase rebase on anim change** (v0.9.5++) — quand la
+        // `lower_range` change (run → idle, jump → land, etc.) on
+        // remet à 0 le timer pour que l'anim démarre à sa frame de
+        // début au lieu de téléporter au milieu du cycle.  Idem
+        // pour upper.  Le `phase_offset` reste appliqué pour décaler
+        // les bots entre eux (anti-ballet militaire).
+        if d.lower_anim_start != lower_range.start {
+            d.lower_anim_start = lower_range.start;
+            d.lower_anim_started_at = time_sec;
+        }
+        if d.upper_anim_start != upper_range.start {
+            d.upper_anim_start = upper_range.start;
+            d.upper_anim_started_at = time_sec;
+        }
+        let phase_l = (time_sec - d.lower_anim_started_at) * speed_factor + phase_offset;
+        let phase_u = (time_sec - d.upper_anim_started_at) + phase_offset;
+        let (fa_l, fb_l, lerp_l) = lower_range.sample(phase_l, nf_lower);
+        let (fa_u, fb_u, lerp_u) = upper_range.sample(phase_u, nf_upper);
         // La tête ne s'anime pas en Q3 : on la rend sur la première
         // frame (les meshes head.md3 sont statiques).
         let (fa_h, fb_h, lerp_h) = (0usize, 0usize, 0.0_f32);
@@ -12438,10 +18079,51 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &[BotDriver], time_sec: f
 
         let o = d.body.origin;
         let rot = Quat::from_rotation_z(d.body.view_angles.yaw.to_radians());
+        // Scale par bot — 5 valeurs ±10 % pour distinguer les silhouettes
+        // sur le même rig partagé (gain visuel sans coût mémoire).
+        // L'index utilisé est dérivé du nom (hash léger) plutôt que du
+        // slot pour rester stable d'un match à l'autre si le bot reste
+        // — c'est plus subtil mais ça ancre une "identité" par bot.
+        let scale_idx = d.bot.name.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
+            as usize;
+        let s = bot_scale(scale_idx);
+
+        // **Idle breath bob** (v0.9.5) — sinusoïde Z 1u amplitude
+        // quand le bot est au sol et immobile. Suffisant pour que la
+        // silhouette ne paraisse pas figée comme un piquet.  Décalée
+        // par phase_offset pour que les bots ne respirent pas en
+        // synchro.
+        let idle_bob = if !airborne && !moving {
+            ((time_sec * 1.4 + phase_offset * std::f32::consts::TAU).sin()) * 1.2
+        } else {
+            0.0
+        };
+
+        // **Body lean on strafe** (v0.9.5) — quand le bot strafe en
+        // vitesse, on incline légèrement le torse dans le sens du
+        // mouvement.  Calculé par projection de la vélocité sur le
+        // vecteur "right" du bot (basé sur son yaw).
+        let yaw_rad = d.body.view_angles.yaw.to_radians();
+        let right_x = -yaw_rad.sin();
+        let right_y = yaw_rad.cos();
+        let strafe_speed = d.body.velocity.x * right_x + d.body.velocity.y * right_y;
+        let lean_rad = (strafe_speed / 320.0).clamp(-0.18, 0.18); // ~10° max
+        let lean_quat = Quat::from_axis_angle(
+            GVec3::new(yaw_rad.cos(), yaw_rad.sin(), 0.0), // axe forward
+            -lean_rad,
+        );
+        let combined_rot = lean_quat * rot;
+
+        // **Hull → feet offset** (v0.9.5++ fix lévitation) — `body.origin`
+        // pointe sur le CENTRE du hull (Q3 convention : PLAYER_MINS.z = -24).
+        // Le lower.md3 a son pivot aux pieds, donc on doit translater de
+        // -24 pour que les pieds atterrissent sur le sol.  Avant ce fix
+        // les bots flottaient ~24u au-dessus du sol.
+        let feet_z = o.z + PLAYER_HULL_MIN_Z;
         let lower_m = GMat4::from_scale_rotation_translation(
-            GVec3::ONE,
-            rot,
-            GVec3::new(o.x, o.y, o.z),
+            GVec3::new(s, s, s),
+            combined_rot,
+            GVec3::new(o.x, o.y, feet_z + idle_bob),
         );
         // Tint : pulsation invul si applicable, + flash rouge très léger
         // sur pain pour renforcer le retour visuel sans dépendre d'une
@@ -12469,11 +18151,45 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &[BotDriver], time_sec: f
             .upper
             .tag_transform(fa_u, fb_u, lerp_u, "tag_head")
             .unwrap_or(ident);
-        let head_m = upper_m * head_local;
+        let mut head_m = upper_m * head_local;
 
-        r.draw_md3_animated(rig.lower.clone(), lower_m, tint, fa_l, fb_l, lerp_l);
-        r.draw_md3_animated(rig.upper.clone(), upper_m, tint, fa_u, fb_u, lerp_u);
-        r.draw_md3_animated(rig.head.clone(),  head_m,  tint, fa_h, fb_h, lerp_h);
+        // **Headlook IK** (G1d) — quand le bot a une cible, la tête
+        // suit la direction de la cible en yaw seul (clamp ±45°).
+        // Pitch ignoré pour ne pas casser les frames du head MD3 qui
+        // n'a généralement qu'un seul frame statique.
+        if let Some(target) = d.bot.target_enemy {
+            let head_world =
+                Vec3::new(head_m.col(3).x, head_m.col(3).y, head_m.col(3).z);
+            let to = target - head_world;
+            if to.length_squared() > 1.0 {
+                let look_yaw = to.y.atan2(to.x).to_degrees();
+                let body_yaw = d.body.view_angles.yaw;
+                let mut delta = look_yaw - body_yaw;
+                while delta > 180.0 {
+                    delta -= 360.0;
+                }
+                while delta < -180.0 {
+                    delta += 360.0;
+                }
+                let clamped = delta.clamp(-45.0, 45.0);
+                let extra_rot = Quat::from_rotation_z(clamped.to_radians());
+                let extra_m = GMat4::from_quat(extra_rot);
+                let p = head_world;
+                let to_origin =
+                    GMat4::from_translation(GVec3::new(-p.x, -p.y, -p.z));
+                let from_origin =
+                    GMat4::from_translation(GVec3::new(p.x, p.y, p.z));
+                head_m = from_origin * extra_m * to_origin * head_m;
+            }
+        }
+
+        // Head tint distinct (plus clair) — différencie visuellement la
+        // tête du torse, et accentue la lecture du headshot quand le
+        // joueur vise le casque clair sur silhouette colorée.
+        let head_tint = bot_head_tint(tint);
+        r.draw_md3_animated(rig.lower.clone(), lower_m, tint,      fa_l, fb_l, lerp_l);
+        r.draw_md3_animated(rig.upper.clone(), upper_m, tint,      fa_u, fb_u, lerp_u);
+        r.draw_md3_animated(rig.head.clone(),  head_m,  head_tint, fa_h, fb_h, lerp_h);
     }
 }
 
@@ -12836,17 +18552,285 @@ fn queue_remote_projectiles(
     }
 }
 
+/// **Prop GLB de décor BR** (v0.9.5+) — entrée générique du pool de
+/// décors statiques (rocks, statues, buildings, etc.). Le `prop_name`
+/// désigne le mesh GLB enregistré dans le pipeline drone.
+///
+/// (Anciennement `RockProp` avec encoding hack via signe/grandeur du
+/// scale ; refactor v0.9.5++ pour proprement supporter N props.)
+struct RockProp {
+    pos: Vec3,
+    yaw: f32,
+    scale: f32,
+    tint: [f32; 4],
+    /// Clé de prop dans `Renderer::queue_prop` — "rock", "statue",
+    /// "building", "tropical", etc.
+    prop_name: &'static str,
+}
+
+/// **Drone aérien BR** (v0.9.5) — vaisseau GLB qui orbite à grande
+/// altitude au-dessus de la zone de combat.  Purement cosmétique :
+/// pas de damage, pas d'IA, pas de collision.  Donne de la vie à la
+/// skybox.
+struct Drone {
+    /// Centre de l'orbite (typiquement le centre de la map ou un POI).
+    orbit_center: Vec3,
+    /// Rayon de l'orbite XY.
+    orbit_radius: f32,
+    /// Altitude du drone (Z monde).
+    altitude: f32,
+    /// Vitesse angulaire en rad/s.  Signe = sens de rotation.
+    angular_speed: f32,
+    /// Phase initiale en radians (décalage par drone pour qu'ils ne
+    /// soient pas tous au même point de l'orbite).
+    phase: f32,
+    /// Échelle de rendu (chaque drone est légèrement différent).
+    scale: f32,
+    /// Tint RGBA — bleu pâle / blanc / orange selon les drones.
+    tint: [f32; 4],
+}
+
+impl Drone {
+    /// Position monde au temps `t`.
+    fn position(&self, t: f32) -> Vec3 {
+        let theta = self.angular_speed * t + self.phase;
+        Vec3::new(
+            self.orbit_center.x + self.orbit_radius * theta.cos(),
+            self.orbit_center.y + self.orbit_radius * theta.sin(),
+            self.altitude
+                + (theta * 0.7).sin() * 200.0, // léger bobbing vertical
+        )
+    }
+    /// Yaw (rad) tangent à l'orbite — drone face à la direction du mouvement.
+    fn yaw(&self, t: f32) -> f32 {
+        // Tangente = dérivée de la position : (-sin θ, cos θ).
+        let theta = self.angular_speed * t + self.phase;
+        // Atan2(dy/dt, dx/dt) = atan2(angular_speed*cos, -angular_speed*sin)
+        // = atan2(cos, -sin) (sign respecté par angular_speed).
+        let dy = self.angular_speed * theta.cos();
+        let dx = -self.angular_speed * theta.sin();
+        dy.atan2(dx)
+    }
+}
+
+/// **Adapter Terrain → LosWorld** (v0.9.5) — permet aux bots de
+/// passer le LOS sur la heightmap BR via le trait abstrait défini
+/// dans q3-bot, sans introduire de dépendance entre q3-bot et
+/// q3-terrain. L'adapter est un wrapper léger qui appelle
+/// `Terrain::trace_ray` et compare la fraction comme le BSP path.
+struct TerrainLos<'a>(&'a q3_terrain::Terrain);
+
+impl<'a> q3_bot::LosWorld for TerrainLos<'a> {
+    fn is_clear(&self, start: q3_math::Vec3, end: q3_math::Vec3) -> bool {
+        let tr = self.0.trace_ray(start, end);
+        tr.fraction >= 0.999
+    }
+}
+
+/// **BR Réunion fallback** — synthétise un terrain procédural quand
+/// les assets disque ne sont pas présents.  Reproduit la silhouette
+/// caractéristique de l'île volcanique :
+/// * dôme central élevé (sommets Piton des Neiges + Piton de la Fournaise)
+/// * pentes douces vers la côte
+/// * océan en bordure (z = 0)
+/// * variations multi-octaves pour un relief riche
+///
+/// Pas équivalent à un vrai SRTM, mais bien plus qu'un terrain plat —
+/// le joueur peut grimper, voir des sommets, sentir l'échelle.  Le
+/// pipeline Python `tools/dem_to_terrain.py` reste recommandé pour la
+/// vraie heightmap.
+fn synthesize_reunion_fallback() -> q3_terrain::Terrain {
+    use q3_terrain::TerrainMeta;
+    let meta = TerrainMeta::reunion_default();
+    let w = meta.width;
+    let h = meta.height;
+    let cx = w as f32 * 0.5;
+    let cy = h as f32 * 0.5;
+
+    // Générateur de bruit pseudo-aléatoire déterministe (hash 2D simple).
+    fn noise(x: f32, y: f32, seed: u32) -> f32 {
+        let xi = (x * 1.0).to_bits().wrapping_add(seed);
+        let yi = (y * 1.0).to_bits().wrapping_add(seed.wrapping_mul(2654435761));
+        let h = xi
+            .wrapping_mul(73856093)
+            .wrapping_add(yi.wrapping_mul(19349663));
+        ((h >> 16) as f32 / 32768.0) - 1.0
+    }
+    fn smooth_noise(x: f32, y: f32, seed: u32) -> f32 {
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let fx = x - x0;
+        let fy = y - y0;
+        let n00 = noise(x0, y0, seed);
+        let n10 = noise(x0 + 1.0, y0, seed);
+        let n01 = noise(x0, y0 + 1.0, seed);
+        let n11 = noise(x0 + 1.0, y0 + 1.0, seed);
+        let lx0 = n00 * (1.0 - fx) + n10 * fx;
+        let lx1 = n01 * (1.0 - fx) + n11 * fx;
+        lx0 * (1.0 - fy) + lx1 * fy
+    }
+
+    // Ridge noise — `1 - |2n - 1|` puis squared : crêtes pointues
+    // façon chaîne volcanique jeune.
+    fn ridge_noise(x: f32, y: f32, seed: u32) -> f32 {
+        let n = smooth_noise(x, y, seed);
+        let r = 1.0 - (n.abs() * 2.0 - 1.0).abs();
+        r * r
+    }
+
+    let mut samples = Vec::with_capacity(w * h);
+    let mut splat = Vec::with_capacity(w * h);
+
+    let z_range = meta.z_max - meta.z_min;
+    let max_radius = (cx.min(cy)) as f32;
+
+    // 2 massifs : Piton des Neiges (centre île ~ grid 1200,1100) et
+    // Piton de la Fournaise (~est de l'île).
+    let neiges = (1200.0_f32, 1100.0_f32);
+    let fournaise = (1630.0_f32, 1057.0_f32);
+
+    for j in 0..h {
+        for i in 0..w {
+            let x = i as f32;
+            let y = j as f32;
+
+            // Enveloppe radiale (océan plein hors-île).
+            let dx = (x - cx) / max_radius;
+            let dy = (y - cy) / max_radius;
+            let r = (dx * dx + dy * dy).sqrt().min(1.6);
+            let dome_envelope = (1.0 - r * 0.78).max(0.0).powi(2);
+
+            // Pics centrés sur les 2 massifs.
+            let d_neiges =
+                ((x - neiges.0).powi(2) + (y - neiges.1).powi(2)).sqrt() / 600.0;
+            let d_fournaise =
+                ((x - fournaise.0).powi(2) + (y - fournaise.1).powi(2)).sqrt() / 500.0;
+            let peak_neiges = (1.0 - d_neiges).max(0.0).powi(2);
+            let peak_fournaise = (1.0 - d_fournaise).max(0.0).powi(2) * 0.85;
+            let altitude_base =
+                (dome_envelope * 0.4 + peak_neiges + peak_fournaise * 0.85).min(1.0);
+
+            // Ridge noise multi-octaves → crêtes acérées.
+            let r1 = ridge_noise(x * 0.012, y * 0.012, 11);
+            let r2 = ridge_noise(x * 0.030, y * 0.030, 12);
+            let r3 = ridge_noise(x * 0.080, y * 0.080, 13);
+            let ridges = r1 * 0.6 + r2 * 0.3 + r3 * 0.1;
+
+            // Vallées via value noise basse fréquence.
+            let v1 = smooth_noise(x * 0.020, y * 0.020, 21);
+            let v2 = smooth_noise(x * 0.060, y * 0.060, 22);
+            let valleys = v1 * 0.7 + v2 * 0.3;
+
+            let mountain_relief = if altitude_base > 0.3 {
+                ridges * 0.55 + valleys * 0.25
+            } else {
+                valleys * 0.4 + ridges * 0.1
+            };
+            // Carving radial (cirques) — basse fréquence inversée.
+            let carve = (smooth_noise(x * 0.005, y * 0.005, 31) * 0.5 + 0.5) * 0.30;
+
+            let alt_norm = if altitude_base > 0.001 {
+                (altitude_base * (0.55 + mountain_relief * 0.55)
+                    - carve * altitude_base)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let u16_val = if altitude_base <= 0.001 {
+                let base = (-meta.z_min / z_range).clamp(0.0, 1.0);
+                (base * 65535.0) as u16
+            } else {
+                let world_z = alt_norm * (meta.z_max - 0.0);
+                let norm = ((world_z - meta.z_min) / z_range).clamp(0.0, 1.0);
+                (norm * 65535.0) as u16
+            };
+            samples.push(u16_val);
+
+            // Splat raffiné par altitude (en mètres réels — z_max = 1228
+            // unités ≈ 307 m réels après scale 1/10).
+            let world_z = alt_norm * (meta.z_max - 0.0);
+            let urban_factor = if r > 0.55 && r < 0.85 && valleys > 0.55 {
+                200u8
+            } else {
+                5u8
+            };
+            let (rock, sand, veg, urban): (u8, u8, u8, u8) =
+                if altitude_base <= 0.001 {
+                    (120, 90, 0, 0)
+                } else if world_z < 50.0 {
+                    (10, 230, 15, urban_factor.min(40))
+                } else if world_z < 200.0 {
+                    (15, 30, 220, urban_factor)
+                } else if world_z < 500.0 {
+                    (60, 5, 200, (urban_factor / 2).min(60))
+                } else if world_z < 900.0 {
+                    (140, 5, 110, 0)
+                } else if world_z < 1500.0 {
+                    (210, 0, 40, 0)
+                } else {
+                    (245, 5, 0, 0)
+                };
+            splat.push([rock, sand, veg, urban]);
+        }
+    }
+
+    q3_terrain::Terrain {
+        width: w,
+        height: h,
+        samples,
+        splat,
+        meta,
+    }
+}
+
 /// Tint cyclique pour distinguer les bots visuellement.
 fn bot_tint(idx: usize) -> [f32; 4] {
+    // Palette élargie v0.9.5 — 12 teintes distinctes pour différencier
+    // visuellement les bots dans une partie >6.  Ordre choisi pour que
+    // 2 bots consécutifs n'aient jamais des couleurs proches (cycle
+    // alternant chaud/froid).
     const PALETTE: &[[f32; 4]] = &[
-        [1.0, 0.6, 0.6, 1.0], // rouge doux
-        [0.6, 0.8, 1.0, 1.0], // bleu doux
-        [0.7, 1.0, 0.7, 1.0], // vert doux
-        [1.0, 0.9, 0.5, 1.0], // jaune doux
-        [1.0, 0.7, 1.0, 1.0], // magenta
-        [0.7, 1.0, 1.0, 1.0], // cyan
+        [1.00, 0.55, 0.55, 1.0], // rouge corail
+        [0.55, 0.78, 1.00, 1.0], // bleu acier
+        [0.70, 1.00, 0.65, 1.0], // vert lime
+        [1.00, 0.85, 0.40, 1.0], // jaune doré
+        [1.00, 0.65, 1.00, 1.0], // magenta vif
+        [0.55, 1.00, 0.95, 1.0], // cyan glacial
+        [1.00, 0.50, 0.20, 1.0], // orange sang
+        [0.65, 0.55, 1.00, 1.0], // violet améthyste
+        [0.90, 0.95, 0.55, 1.0], // jaune lime
+        [0.55, 0.95, 0.55, 1.0], // vert émeraude
+        [1.00, 0.75, 0.85, 1.0], // rose pastel
+        [0.85, 0.55, 0.30, 1.0], // bronze sienna
     ];
     PALETTE[idx % PALETTE.len()]
+}
+
+/// Variation de scale par index — donne 5 silhouettes distinctes
+/// (petits / grands) sur le même rig MD3 partagé. Sans dupliquer le
+/// rig en mémoire, on obtient une variété visuelle « instant ». Les
+/// valeurs restent dans ±10 % pour ne pas casser la hitbox Q3 (le
+/// trace_capsule reste dimensionné sur la taille std).
+fn bot_scale(idx: usize) -> f32 {
+    // Multiplier global appliqué à toutes les variantes — bump à 1.30
+    // (user request : "bots trop petits").  Les ratios entre variantes
+    // sont conservés pour la diversité visuelle.
+    const GLOBAL_MULT: f32 = 1.30;
+    const SCALES: &[f32] = &[0.93, 1.00, 1.06, 0.97, 1.03];
+    SCALES[idx % SCALES.len()] * GLOBAL_MULT
+}
+
+/// Tint distinct pour la tête — base un peu plus claire (mix vers le
+/// blanc) que le corps. Donne au bot un look "casque clair" et facilite
+/// la distinction visuelle du headshot.
+fn bot_head_tint(body_tint: [f32; 4]) -> [f32; 4] {
+    [
+        (body_tint[0] * 0.65 + 0.35).min(1.0),
+        (body_tint[1] * 0.65 + 0.35).min(1.0),
+        (body_tint[2] * 0.65 + 0.35).min(1.0),
+        body_tint[3],
+    ]
 }
 
 /// Retourne le chemin de `q3config.cfg` dans le répertoire de préférences
@@ -12861,6 +18845,117 @@ fn bot_tint(idx: usize) -> [f32; 4] {
 ///
 /// On évite volontairement d'ajouter la crate `dirs` pour garder le
 /// graphe de deps léger — ces variables couvrent 99 % des installations.
+/// **Asset search bases** (v0.9.5+) — retourne la liste des
+/// répertoires racine où chercher les assets disque (GLB, music,
+/// terrain).  Permet à l'utilisateur de lancer `cargo run` depuis
+/// le workspace OU `target/release/q3.exe` directement sans casser
+/// la résolution.
+fn resolve_asset_search_bases() -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    // 1. CWD courant
+    if let Ok(cwd) = std::env::current_dir() {
+        bases.push(cwd);
+    }
+    // 2. Dossier de l'exécutable (utile quand l'user lance .exe direct)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            bases.push(parent.to_path_buf());
+            // 3. Parents successifs de l'exe (target/release → target → workspace)
+            if let Some(p2) = parent.parent() {
+                bases.push(p2.to_path_buf());
+                if let Some(p3) = p2.parent() {
+                    bases.push(p3.to_path_buf());
+                }
+            }
+        }
+    }
+    bases
+}
+
+/// **Music player** (v0.9.5+) — liste les fichiers audio jouables
+/// trouvés dans :
+///   1. `assets/music/` (relatif au CWD — bundle développeur)
+///   2. `<USERPROFILE>/Music/` ou `$HOME/Music/` (dossier utilisateur)
+///   3. `<userconfig>/q3-rust/music/` (à côté de q3config.cfg)
+///
+/// Extensions acceptées : .wav, .ogg, .mp3 (mp3 nécessite la feature
+/// rodio "mp3" — pour l'instant on liste mais le décodage peut échouer).
+fn list_music_files() -> Vec<PathBuf> {
+    list_music_files_with_extra(&[])
+}
+
+/// Liste tous les fichiers audio jouables dans :
+///   1. `assets/music/` et `music/` (relatif au CWD)
+///   2. `<userconfig>/q3-rust/music/` (à côté de q3config.cfg)
+///   3. `~/Music/` et `~/Downloads/`  (Windows + Unix)
+///   4. `extra_paths` fournis par l'appelant (cvar `s_musicpath` —
+///      semi-colon separated sur Windows, colon-separated sinon)
+///
+/// Scan **récursif** (dlevel 4 max — évite l'explosion combinatoire
+/// sur dossiers Music géants), extensions filtrées (.wav/.ogg/.oga/
+/// .mp3/.flac).  Tri alphabétique pour stabilité.
+fn list_music_files_with_extra(extra_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    roots.push(PathBuf::from("assets/music"));
+    roots.push(PathBuf::from("music"));
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let home = PathBuf::from(home);
+        roots.push(home.join("Music"));
+        roots.push(home.join("Downloads"));
+        roots.push(home.join("OneDrive").join("Music"));
+        roots.push(home.join("Desktop"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        roots.push(home.join("Music"));
+        roots.push(home.join("Downloads"));
+    }
+    if let Some(cfg) = user_config_path() {
+        if let Some(parent) = cfg.parent() {
+            roots.push(parent.join("music"));
+        }
+    }
+    for p in extra_paths {
+        roots.push(p.clone());
+    }
+    for root in &roots {
+        scan_audio_recursive(root, 0, 4, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Scan récursif d'un dossier pour fichiers audio.  Limité à
+/// `max_depth` niveaux pour éviter de remonter `~/Music/` en entier.
+fn scan_audio_recursive(root: &std::path::Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > max_depth { return; }
+    let Ok(rd) = std::fs::read_dir(root) else { return; };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            // Skip dossiers cachés (.git, .Trash, etc.) pour ne pas
+            // scanner des arborescences inutiles.
+            let skip_hidden = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false);
+            if !skip_hidden {
+                scan_audio_recursive(&p, depth + 1, max_depth, out);
+            }
+        } else if p.is_file() {
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                let ext_lower = ext.to_ascii_lowercase();
+                if matches!(ext_lower.as_str(), "wav" | "ogg" | "oga" | "mp3" | "flac") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+}
+
 fn user_config_path() -> Option<PathBuf> {
     const SUBDIR: &str = "q3-rust";
     const FILE: &str = "q3config.cfg";
@@ -13022,19 +19117,447 @@ fn queue_pickups(
     time_sec: f32,
     unavailable_remote: &std::collections::HashSet<u16>,
     is_client: bool,
+    ammo_crate_scale: Option<f32>,
+    quad_pickup_scale: Option<f32>,
+    health_pack_scale: Option<f32>,
+    railgun_pickup_scale: Option<f32>,
+    grenade_ammo_scale: Option<f32>,
+    rocket_ammo_scale: Option<f32>,
+    cell_ammo_scale: Option<f32>,
+    lg_ammo_scale: Option<f32>,
+    big_armor_scale: Option<f32>,
+    plasma_pickup_scale: Option<f32>,
+    railgun_ammo_scale: Option<f32>,
+    regen_pickup_scale: Option<f32>,
+    machinegun_pickup_scale: Option<f32>,
+    bfg_pickup_scale: Option<f32>,
+    lightninggun_pickup_scale: Option<f32>,
+    shotgun_pickup_scale: Option<f32>,
+    grenadelauncher_pickup_scale: Option<f32>,
+    gauntlet_pickup_scale: Option<f32>,
+    shotgun_ammo_scale: Option<f32>,
+    bfg_ammo_scale: Option<f32>,
+    rocketlauncher_pickup_scale: Option<f32>,
+    combat_armor_scale: Option<f32>,
+    medkit_scale: Option<f32>,
+    armor_shard_scale: Option<f32>,
 ) {
     use glam::{Mat4, Quat, Vec3 as GVec3};
     let spin = (time_sec * 120.0).to_radians();
     let bob = (time_sec * 2.0).sin() * 3.0;
+    let mg_slot = WeaponId::Machinegun.slot() as usize;
+    let gl_slot = WeaponId::Grenadelauncher.slot() as usize;
+    let sg_slot = WeaponId::Shotgun.slot() as usize;
+    let rl_slot = WeaponId::Rocketlauncher.slot() as usize;
+    let pg_slot = WeaponId::Plasmagun.slot() as usize;
+    let lg_slot = WeaponId::Lightninggun.slot() as usize;
+    let has_ammo_crate = r.has_prop("ammo_crate") && ammo_crate_scale.is_some();
+    let has_quad = r.has_prop("quad_pickup") && quad_pickup_scale.is_some();
+    let has_health_pack = r.has_prop("health_pack") && health_pack_scale.is_some();
+    let has_railgun_pickup = r.has_prop("railgun_pickup") && railgun_pickup_scale.is_some();
+    let has_grenade_ammo = r.has_prop("grenade_ammo") && grenade_ammo_scale.is_some();
+    let has_rocket_ammo = r.has_prop("rocket_ammo") && rocket_ammo_scale.is_some();
+    let has_cell_ammo = r.has_prop("cell_ammo") && cell_ammo_scale.is_some();
+    let has_lg_ammo = r.has_prop("lg_ammo") && lg_ammo_scale.is_some();
+    let has_big_armor = r.has_prop("big_armor") && big_armor_scale.is_some();
+    let has_plasma_pickup = r.has_prop("plasma_pickup") && plasma_pickup_scale.is_some();
+    let has_railgun_ammo = r.has_prop("railgun_ammo") && railgun_ammo_scale.is_some();
+    let has_regen_pickup = r.has_prop("regen_pickup") && regen_pickup_scale.is_some();
+    let has_machinegun_pickup = r.has_prop("machinegun_pickup") && machinegun_pickup_scale.is_some();
+    let has_bfg_pickup = r.has_prop("bfg_pickup") && bfg_pickup_scale.is_some();
+    let has_lightninggun_pickup = r.has_prop("lightninggun_pickup") && lightninggun_pickup_scale.is_some();
+    let has_shotgun_pickup = r.has_prop("shotgun_pickup") && shotgun_pickup_scale.is_some();
+    let has_grenadelauncher_pickup = r.has_prop("grenadelauncher_pickup") && grenadelauncher_pickup_scale.is_some();
+    let has_gauntlet_pickup = r.has_prop("gauntlet_pickup") && gauntlet_pickup_scale.is_some();
+    let has_shotgun_ammo = r.has_prop("shotgun_ammo") && shotgun_ammo_scale.is_some();
+    let has_bfg_ammo = r.has_prop("bfg_ammo") && bfg_ammo_scale.is_some();
+    let bfg_slot = WeaponId::Bfg.slot() as usize;
+    let has_rocketlauncher_pickup = r.has_prop("rocketlauncher_pickup") && rocketlauncher_pickup_scale.is_some();
+    let has_combat_armor = r.has_prop("combat_armor") && combat_armor_scale.is_some();
+    let has_medkit = r.has_prop("medkit") && medkit_scale.is_some();
+    let has_armor_shard = r.has_prop("armor_shard") && armor_shard_scale.is_some();
+    let rg_slot = WeaponId::Railgun.slot() as usize;
+
+    // Helper local pour produire la matrice transform Y-up→Z-up + spin.
+    let make_glb_model = |s: f32, yaw: f32, trans: GVec3| -> [[f32; 4]; 4] {
+        let cy = yaw.cos();
+        let sy = yaw.sin();
+        [
+            [cy * s,  sy * s, 0.0, 0.0],
+            [0.0,     0.0,    s,   0.0],
+            [sy * s, -cy * s, 0.0, 0.0],
+            [trans.x, trans.y, trans.z, 1.0],
+        ]
+    };
+
+    // Pulse luminance pour les dlights de pickup — phase ≈ 1.7 Hz,
+    // [0.7, 1.0] pour un battement net mais pas hypnotique.
+    let pulse = 0.85 + 0.15 * (time_sec * 10.7).sin();
     for p in pickups {
-        if p.respawn_at.is_some() {
-            continue; // ramassé localement (mode solo), en cooldown
-        }
-        if is_client && unavailable_remote.contains(&p.entity_index) {
-            continue; // ramassé côté serveur, masqué côté client
-        }
+        if p.respawn_at.is_some() { continue; }
+        if is_client && unavailable_remote.contains(&p.entity_index) { continue; }
         let trans = GVec3::new(p.origin.x, p.origin.y, p.origin.z + bob);
         let rot = Quat::from_rotation_z(spin + p.angles.yaw.to_radians());
+        let yaw = spin + p.angles.yaw.to_radians();
+        // **Pickup pulse glow** — dlight respawné chaque frame avec
+        // une lifetime ~2 frames, ce qui donne un éclairage continu
+        // et pulsé.  Couleur dérivée du `PickupKind` :
+        //   - Health : vert
+        //   - Armor : cyan
+        //   - Weapon : jaune
+        //   - Ammo : ocre
+        //   - Powerup : couleur du powerup (Quad bleu, Haste orange…)
+        //   - Holdable / Inert : blanc neutre
+        // Radius modeste (160u) pour ne pas inonder une pièce ; fait
+        // que les items se "voient" même dans un coin sombre sans
+        // muter en spotlight.
+        let glow = match p.kind {
+            PickupKind::Health { .. } => [0.30, 1.00, 0.40],
+            PickupKind::Armor { .. } => [0.40, 0.85, 1.00],
+            PickupKind::Weapon { .. } => [1.00, 0.85, 0.30],
+            PickupKind::Ammo { .. } => [1.00, 0.65, 0.20],
+            PickupKind::Powerup { powerup, .. } => {
+                let c = powerup.pickup_fx_color();
+                [c[0], c[1], c[2]]
+            }
+            PickupKind::Holdable { .. } | PickupKind::Inert => [0.90, 0.90, 0.90],
+        };
+        // Centre la light sur l'item bobbé (y compris le bob vertical).
+        let light_pos = q3_math::Vec3::new(trans.x, trans.y, trans.z + 8.0);
+        r.spawn_dlight(
+            light_pos,
+            160.0,
+            glow,
+            1.6 * pulse, // intensité battue
+            time_sec,
+            0.05,        // lifetime ≈ 3 frames @ 60 fps → re-armé en continu
+        );
+
+        // **Quad pickup GLB** — remplace l'icone MD3 du Quad Damage.
+        if has_quad
+            && matches!(
+                p.kind,
+                PickupKind::Powerup { powerup: PowerupKind::QuadDamage, .. }
+            )
+        {
+            let s = quad_pickup_scale.unwrap();
+            r.queue_prop("quad_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Regen pickup GLB** — remplace l'icone MD3 du Regeneration.
+        if has_regen_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Powerup { powerup: PowerupKind::Regeneration, .. }
+            )
+        {
+            let s = regen_pickup_scale.unwrap();
+            r.queue_prop("regen_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Machine Gun pickup GLB** — pickup d'ARME Machinegun.
+        // Doit passer AVANT la branche ammo_crate qui matchait aussi
+        // l'arme MG.  Distinct du Machinegun ammo qui reste sur
+        // ammo_crate (cf. branche suivante).
+        if has_machinegun_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Machinegun, .. }
+            )
+        {
+            let s = machinegun_pickup_scale.unwrap();
+            r.queue_prop("machinegun_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Ammo crate GLB** — MG ammo + weapon MG pickup en fallback
+        // si machinegun_pickup pas disponible.
+        let is_mg_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == mg_slot
+        ) || matches!(
+            p.kind,
+            PickupKind::Weapon { weapon: WeaponId::Machinegun, .. }
+        );
+        if is_mg_ammo && has_ammo_crate {
+            let s = ammo_crate_scale.unwrap();
+            r.queue_prop("ammo_crate", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Health pack GLB** — toutes variantes item_health* (small,
+        // medium, large, mega).  Le mesh unique sert pour les 4 tiers
+        // (la valeur de soin reste différente — c'est un détail
+        // gameplay, pas visuel).
+        if has_health_pack
+            && matches!(p.kind, PickupKind::Health { .. })
+        {
+            let s = health_pack_scale.unwrap();
+            r.queue_prop("health_pack", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Railgun pickup GLB** — pickup au sol (le viewmodel 1ère
+        // personne utilise aussi `railgun_pickup` via `queue_viewmodel`
+        // avec un muzzle flash hardcoded à la place de `tag_flash`).
+        if has_railgun_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Railgun, .. }
+            )
+        {
+            let s = railgun_pickup_scale.unwrap();
+            r.queue_prop("railgun_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Railgun ammo (slugs) GLB** — boîte de slugs pour le RG
+        // (item_slugs).  Distinct de l'arme RG ci-dessus (railgun_pickup).
+        if has_railgun_ammo
+            && matches!(
+                p.kind,
+                PickupKind::Ammo { slot, .. } if slot as usize == rg_slot
+            )
+        {
+            let s = railgun_ammo_scale.unwrap();
+            r.queue_prop("railgun_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Grenade Launcher pickup GLB** — pickup d'ARME Grenadelauncher.
+        // Doit passer AVANT la branche grenade_ammo qui matchait aussi
+        // l'arme GL.  Les munitions grenades restent sur grenade_ammo.
+        if has_grenadelauncher_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Grenadelauncher, .. }
+            )
+        {
+            let s = grenadelauncher_pickup_scale.unwrap();
+            r.queue_prop(
+                "grenadelauncher_pickup",
+                make_glb_model(s, yaw, trans),
+                [1.0, 1.0, 1.0, 1.0],
+            );
+            continue;
+        }
+
+        // **Grenade ammo box GLB** — boîte de munitions grenades
+        // (item_grenades) + pickup d'arme Grenadelauncher en fallback
+        // si grenadelauncher_pickup pas disponible.
+        let is_grenade_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == gl_slot
+        ) || matches!(
+            p.kind,
+            PickupKind::Weapon { weapon: WeaponId::Grenadelauncher, .. }
+        );
+        if is_grenade_ammo && has_grenade_ammo {
+            let s = grenade_ammo_scale.unwrap();
+            r.queue_prop("grenade_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Rocket Launcher pickup GLB** — pickup d'ARME Rocketlauncher.
+        // Doit passer AVANT la branche rocket_ammo qui matchait aussi
+        // l'arme RL.  Les munitions roquettes restent sur rocket_ammo.
+        if has_rocketlauncher_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Rocketlauncher, .. }
+            )
+        {
+            let s = rocketlauncher_pickup_scale.unwrap();
+            r.queue_prop(
+                "rocketlauncher_pickup",
+                make_glb_model(s, yaw, trans),
+                [1.0, 1.0, 1.0, 1.0],
+            );
+            continue;
+        }
+
+        // **Rocket ammo box GLB** — boîte de munitions roquettes
+        // (item_rockets) + pickup d'arme Rocketlauncher en fallback
+        // si rocketlauncher_pickup pas disponible.
+        let is_rocket_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == rl_slot
+        ) || matches!(
+            p.kind,
+            PickupKind::Weapon { weapon: WeaponId::Rocketlauncher, .. }
+        );
+        if is_rocket_ammo && has_rocket_ammo {
+            let s = rocket_ammo_scale.unwrap();
+            r.queue_prop("rocket_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Plasma gun pickup GLB** (v0.9.5++) — uniquement le pickup
+        // d'ARME Plasmagun (style fusil d'assaut). Distinct du
+        // `cell_ammo` qui reste pour les boîtes de cellules ammo.
+        // Branche placée AVANT cell_ammo pour priorité.
+        if has_plasma_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Plasmagun, .. }
+            )
+        {
+            let s = plasma_pickup_scale.unwrap();
+            r.queue_prop("plasma_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Shotgun pickup GLB** — pickup d'ARME Shotgun.
+        if has_shotgun_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Shotgun, .. }
+            )
+        {
+            let s = shotgun_pickup_scale.unwrap();
+            r.queue_prop("shotgun_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Shotgun shells (cartouches calibre 12) GLB** — boîte de
+        // munitions SG (item_shells uniquement, l'arme elle-même
+        // utilise shotgun_pickup ci-dessus).
+        let is_sg_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == sg_slot
+        );
+        if is_sg_ammo && has_shotgun_ammo {
+            let s = shotgun_ammo_scale.unwrap();
+            r.queue_prop("shotgun_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **BFG ammo GLB** — boîte de munitions BFG (item_bfgammo).
+        let is_bfg_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == bfg_slot
+        );
+        if is_bfg_ammo && has_bfg_ammo {
+            let s = bfg_ammo_scale.unwrap();
+            r.queue_prop("bfg_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Gauntlet pickup GLB** — pickup d'ARME Gauntlet (mêlée).
+        if has_gauntlet_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Gauntlet, .. }
+            )
+        {
+            let s = gauntlet_pickup_scale.unwrap();
+            r.queue_prop("gauntlet_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **BFG10K pickup GLB** — pickup d'ARME Bfg.
+        if has_bfg_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Bfg, .. }
+            )
+        {
+            let s = bfg_pickup_scale.unwrap();
+            r.queue_prop("bfg_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Cell ammo box GLB** — cellules énergétiques pour le Plasma
+        // Gun (item_cells uniquement, l'arme elle-même utilise
+        // plasma_pickup ci-dessus).
+        let is_cell_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == pg_slot
+        );
+        if is_cell_ammo && has_cell_ammo {
+            let s = cell_ammo_scale.unwrap();
+            r.queue_prop("cell_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Lightning Gun pickup GLB** — pickup d'ARME Lightninggun.
+        // Doit passer AVANT la branche lg_ammo qui matchait aussi
+        // l'arme LG.  Les batteries (item_lightning) restent sur lg_ammo.
+        if has_lightninggun_pickup
+            && matches!(
+                p.kind,
+                PickupKind::Weapon { weapon: WeaponId::Lightninggun, .. }
+            )
+        {
+            let s = lightninggun_pickup_scale.unwrap();
+            r.queue_prop(
+                "lightninggun_pickup",
+                make_glb_model(s, yaw, trans),
+                [1.0, 1.0, 1.0, 1.0],
+            );
+            continue;
+        }
+
+        // **LG battery box GLB** — batteries pour le Lightning Gun
+        // (item_lightning) + pickup d'arme Lightninggun en fallback si
+        // lightninggun_pickup pas disponible.
+        let is_lg_ammo = matches!(
+            p.kind,
+            PickupKind::Ammo { slot, .. } if slot as usize == lg_slot
+        ) || matches!(
+            p.kind,
+            PickupKind::Weapon { weapon: WeaponId::Lightninggun, .. }
+        );
+        if is_lg_ammo && has_lg_ammo {
+            let s = lg_ammo_scale.unwrap();
+            r.queue_prop("lg_ammo", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Big armor (Red Armor) GLB** — item_armor_body 100 armor.
+        // Match précis sur amount=100 pour ne pas remplacer les
+        // armor shards (5) ou combat (50) qui ont leur propre look.
+        if has_big_armor
+            && matches!(p.kind, PickupKind::Armor { amount: 100 })
+        {
+            let s = big_armor_scale.unwrap();
+            r.queue_prop("big_armor", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Combat armor (Yellow Armor) GLB** — item_armor_combat 50.
+        if has_combat_armor
+            && matches!(p.kind, PickupKind::Armor { amount: 50 })
+        {
+            let s = combat_armor_scale.unwrap();
+            r.queue_prop("combat_armor", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Armor Shard GLB** — item_armor_shard (5).
+        if has_armor_shard
+            && matches!(p.kind, PickupKind::Armor { amount: 5 })
+        {
+            let s = armor_shard_scale.unwrap();
+            r.queue_prop("armor_shard", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // **Medkit holdable GLB** — holdable_medkit (trousse en stock).
+        if has_medkit
+            && matches!(
+                p.kind,
+                PickupKind::Holdable { kind: HoldableKind::Medkit }
+            )
+        {
+            let s = medkit_scale.unwrap();
+            r.queue_prop("medkit", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            continue;
+        }
+
+        // Fallback : MD3 classique.
         let m = Mat4::from_scale_rotation_translation(GVec3::ONE, rot, trans);
         r.draw_md3(p.mesh.clone(), m, [1.0, 1.0, 1.0, 1.0]);
     }
@@ -13048,6 +19571,7 @@ fn queue_pickups(
 /// montrer que l'interpolation shader fait son travail. Un vrai système
 /// d'armes pilotera plus tard frame_a/frame_b selon l'état (idle, fire,
 /// raise, lower).
+#[allow(clippy::too_many_arguments)]
 fn queue_viewmodel(
     r: &mut Renderer,
     mesh: &Arc<Md3Gpu>,
@@ -13056,16 +19580,25 @@ fn queue_viewmodel(
     time_sec: f32,
     invul_until: f32,
     invisible: bool,
-    // `weapon` : arme tenue — pilote la couleur du muzzle flash 3D.
-    // `muzzle_active` : `true` pendant la fenêtre de flash (60 ms).
     weapon: WeaponId,
     muzzle_active: bool,
-    // `view_kick` : recul courant accumulé (0..VIEW_KICK_MAX ≈ 1.2).
-    // On pull le viewmodel en arrière le long de `forward` et on pitch
-    // légèrement up : l'œil lit ça comme « l'arme vient de cogner ma main »
-    // sans avoir besoin d'animer les frames MD3.  Décale aussi le muzzle
-    // flash puisqu'il est attaché au tag → cohérent.
     view_kick: f32,
+    // **Player cosmetic tint** (v0.9.5++) — multiplié à `tint`
+    // appliqué au draw du viewmodel.  Lu depuis `cg_playertint`.
+    player_tint: [f32; 3],
+    // **Locomotion bob** (v0.9.5++) — phase bob du joueur (synchro
+    // avec les footsteps).  Module l'oscillation X/Z de l'arme.
+    bob_phase: f32,
+    // Vitesse XY du joueur — modulant l'amplitude du bob (0 = pas de bob).
+    velocity_xy: f32,
+    // True si le joueur est au sol — gate le bob (pas de bob airborne).
+    on_ground: bool,
+    // Temps écoulé depuis le dernier landing — déclenche le jump-kick
+    // pendant 0.3 s (dip + spring).  `f32::INFINITY` = aucun land récent.
+    time_since_land: f32,
+    // Sway accumulé eased — déplacement écran de l'arme proportionnel
+    // au mouvement caméra (yaw, pitch).  Donne du poids à l'arme.
+    sway: [f32; 2],
 ) {
     let basis = view_angles.to_vectors();
     // Offsets en unités Q3 — calibré à l'œil pour un MD3 d'arme standard.
@@ -13087,14 +19620,61 @@ fn queue_viewmodel(
     // Décalage de base calé pour un MD3 d'arme Q3 standard, dont l'origin
     // mesh est ~ au pivot de la main droite : forward 8 (devant le near
     // plane à 4u, marge confortable), right 5 (main droite), -up 5
-    // (sous l'œil, hauteur poitrine). Avant : forward 12 / right 6 / -up 6
-    // → ressentait trop loin et trop bas, la main « flottait » devant la
-    // caméra au lieu d'être tenue contre l'épaule. Retour utilisateur
-    // "positionnement à vérifier" → on rapproche le viewmodel.
+    // **Visuel arme en main** v0.9.4 — repositionné + idle sway pour
+    // que la main respire au lieu d'être figée comme une statue.
+    //
+    // Position de base (corrigée v0.9.4) : forward 10 (assez devant
+    // pour bien voir la silhouette mais pas envahir l'écran), right 7
+    // (main droite décalée du centre, comme un FPS classique),
+    // -up 7 (~hauteur ceinture, l'œil scanne le centre du viseur sans
+    // que l'arme s'y plante). Précédent : 8 / 5 / 5 → trop ramassé,
+    // l'œil voyait l'arme "collée à la lentille".
+    //
+    // Idle sway : 2 oscillations sin déphasées simulent la respiration.
+    //   - vertical (∼0.4 Hz, ±0.6 u)  : monte/descend lentement
+    //   - latéral  (∼0.27 Hz, ±0.4 u) : balance G/D désynchronisé
+    // Effet : même immobile, la main vit. Frequencies coprime pour
+    // ne pas former un pattern circulaire trivial.
+    let breath_v = (time_sec * std::f32::consts::TAU * 0.4).sin() * 0.6;
+    let breath_h = (time_sec * std::f32::consts::TAU * 0.27 + 1.3).sin() * 0.4;
     let kick_back = view_kick * 3.0;
     let kick_up = view_kick * 1.5;
-    let origin = eye + basis.forward * (8.0 - kick_back) + basis.right * 5.0
-        - basis.up * (5.0 - kick_up);
+    // **Locomotion bob** (v0.9.5++) — synchro sur `bob_phase` (qui
+    // avance avec le déplacement, déjà utilisé pour les footsteps).
+    // Vertical : 2 cycles par foulée (sin(2φ)).  Horizontal : 1 cycle
+    // par foulée (sin(φ)) en quadrature → trace une figure 8.
+    // Amplitude proportionnelle à la vitesse (0 → 1.0 entre 0 et 320 u/s).
+    // Skip airborne (pas de bob en l'air, c'est le jump-kick qui prend).
+    let speed_factor = if on_ground {
+        (velocity_xy / 320.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let bob_v = (bob_phase * 2.0).sin() * 1.6 * speed_factor;
+    let bob_h = bob_phase.sin() * 0.9 * speed_factor;
+    // **Jump-kick** (v0.9.5++) — quand le joueur retouche le sol après
+    // un saut, l'arme dip vers le bas puis spring-back.  Profil de la
+    // courbe : sin amorti sur 0.30 s (1 cycle complet).
+    const KICK_DURATION: f32 = 0.30;
+    let kick_phase = (time_since_land / KICK_DURATION).clamp(0.0, 1.0);
+    let kick_amp = if kick_phase < 1.0 {
+        // sin(2π × phase) × decay → premier dip à 0.25, retour à 0.5,
+        // overshoot léger à 0.75, settle à 1.0.
+        (kick_phase * std::f32::consts::TAU).sin()
+            * (1.0 - kick_phase) // amortissement
+            * 2.5 // amplitude max ~2.5u
+    } else {
+        0.0
+    };
+    // **Sway** : sway[0] = yaw delta eased → push arme G/D ; sway[1]
+    // = pitch delta → push arme haut/bas (mais inversé pour l'effet
+    // "lag derrière la caméra").
+    let sway_h = -sway[0]; // yaw + → caméra tourne droite → arme lag gauche
+    let sway_v = -sway[1] * 0.5; // pitch (atténué pour ne pas être trop fort)
+    let origin = eye
+        + basis.forward * (10.0 - kick_back)
+        + basis.right * (7.0 + breath_h + bob_h + sway_h)
+        - basis.up * (7.0 - kick_up - breath_v - bob_v + kick_amp + sway_v);
     // Le repère local du MD3 est +X=forward, +Y=left, +Z=up.
     let left = -basis.right;
     let transform = Mat4::from_cols(
@@ -13129,7 +19709,92 @@ fn queue_viewmodel(
         tint[2] *= 1.0;
         tint[3] *= 0.18;
     }
-    r.draw_md3_viewmodel(mesh.clone(), transform, tint, fa, fb, lerp);
+    // **Player cosmetic tint** (v0.9.5++) — appliqué après les autres
+    // modifs (invul/invisible) pour que la teinte joueur module la
+    // couleur finale sans être écrasée par l'effet d'état.
+    tint[0] *= player_tint[0];
+    tint[1] *= player_tint[1];
+    tint[2] *= player_tint[2];
+
+    // **Viewmodel GLB override** (v0.9.5++) — pour les 5 armes avec
+    // un asset GLB pickup (Plasma, Railgun, Machinegun, BFG, Lightning),
+    // on utilise le mesh GLB au lieu du MD3 vintage.  Les GLB n'ont pas
+    // de `tag_flash` → le muzzle flash utilise un offset hardcoded
+    // (cf. `glb_viewmodel` plus bas).  Gauntlet/Shotgun/GL/RL restent
+    // en MD3.
+    let glb_viewmodel_prop: Option<&str> = match weapon {
+        WeaponId::Plasmagun       if r.has_prop("plasma_pickup")          => Some("plasma_pickup"),
+        WeaponId::Railgun         if r.has_prop("railgun_pickup")         => Some("railgun_pickup"),
+        WeaponId::Machinegun      if r.has_prop("machinegun_pickup")      => Some("machinegun_pickup"),
+        WeaponId::Bfg             if r.has_prop("bfg_pickup")             => Some("bfg_pickup"),
+        WeaponId::Lightninggun    if r.has_prop("lightninggun_pickup")    => Some("lightninggun_pickup"),
+        WeaponId::Shotgun         if r.has_prop("shotgun_pickup")         => Some("shotgun_pickup"),
+        WeaponId::Grenadelauncher if r.has_prop("grenadelauncher_pickup") => Some("grenadelauncher_pickup"),
+        WeaponId::Gauntlet        if r.has_prop("gauntlet_pickup")        => Some("gauntlet_pickup"),
+        WeaponId::Rocketlauncher  if r.has_prop("rocketlauncher_pickup")  => Some("rocketlauncher_pickup"),
+        _ => None,
+    };
+    if let Some(prop_name) = glb_viewmodel_prop {
+        // Échelle viewmodel : ~8u radius (gun de taille raisonnable
+        // dans le champ de vision).  Native radius ~1.06 → scale ~7.5.
+        // Tuning par arme — certains modèles ont besoin d'être plus
+        // gros pour avoir une présence visuelle équivalente.
+        let vm_scale = match weapon {
+            WeaponId::Shotgun         => 14.0_f32, // bien visible (user request)
+            WeaponId::Machinegun      => 13.0_f32, // bien visible (user request)
+            WeaponId::Rocketlauncher  => 13.0_f32, // bien visible (user request)
+            WeaponId::Lightninggun    => 13.0_f32, // bien visible (user request)
+            WeaponId::Bfg             => 13.0_f32, // bien visible (user request)
+            WeaponId::Grenadelauncher => 10.5_f32,
+            WeaponId::Plasmagun       => 10.5_f32,
+            _                         => 8.0_f32,
+        };
+        let s = vm_scale;
+        // **Orientation viewmodel par arme**.  Baseline commune
+        // (-right, +up, +forward) — équivalent 180° Z.
+        let r_v = basis.right;
+        let u_v = basis.up;
+        let f_v = basis.forward;
+        let base_col0 = [-r_v.x, -r_v.y, -r_v.z];
+        let base_col1 = [ u_v.x,  u_v.y,  u_v.z];
+        let base_col2 = [ f_v.x,  f_v.y,  f_v.z];
+        let (col0, col1, col2) = if matches!(weapon, WeaponId::Grenadelauncher) {
+            // Grenadelauncher : baseline + rotation +90° Y (canon le long
+            // de GLB -X local).  +90° Y math :
+            //   new_col_x = -base_col2  (= -forward)
+            //   new_col_y =  base_col1  (= +up)
+            //   new_col_z =  base_col0  (= -right)
+            (
+                [-base_col2[0], -base_col2[1], -base_col2[2]],
+                base_col1,
+                base_col0,
+            )
+        } else if matches!(weapon, WeaponId::Shotgun) {
+            // Shotgun : baseline + rotation -90° Y (canon le long de
+            // GLB +X local).  -90° Y math :
+            //   new_col_x =  base_col2  (= +forward)
+            //   new_col_y =  base_col1  (= +up)
+            //   new_col_z = -base_col0  (= +right)
+            (
+                base_col2,
+                base_col1,
+                [-base_col0[0], -base_col0[1], -base_col0[2]],
+            )
+        } else {
+            // Plasma + Railgun + BFG + Lightninggun + Gauntlet + RL :
+            // baseline pure (-right, +up, +forward).
+            (base_col0, base_col1, base_col2)
+        };
+        let model = [
+            [col0[0] * s, col0[1] * s, col0[2] * s, 0.0],
+            [col1[0] * s, col1[1] * s, col1[2] * s, 0.0],
+            [col2[0] * s, col2[1] * s, col2[2] * s, 0.0],
+            [origin.x, origin.y, origin.z, 1.0],
+        ];
+        r.queue_prop(prop_name, model, tint);
+    } else {
+        r.draw_md3_viewmodel(mesh.clone(), transform, tint, fa, fb, lerp);
+    }
 
     // Muzzle flash 3D : sprite additif billboard à `tag_flash` du viewmodel.
     // C'est le comportement canonique Q3 — un vrai MD3 tag pointe la sortie
@@ -13139,18 +19804,55 @@ fn queue_viewmodel(
     // frame pendant la fenêtre active, automatiquement vidé après flush.
     if muzzle_active {
         if let Some((base_color, radius)) = weapon.muzzle_flash() {
-            // Certains viewmodels utilisent "tag_flash" (Q3 standard),
-            // d'autres "tag_barrel" sur des variantes — on tente les deux.
-            let tag_local = mesh
-                .tag_transform(fa, fb, lerp, "tag_flash")
-                .or_else(|| mesh.tag_transform(fa, fb, lerp, "tag_barrel"));
-            if let Some(tag_local) = tag_local {
-                let world = transform * tag_local;
-                let tag_pos = Vec3::new(
-                    world.col(3).x,
-                    world.col(3).y,
-                    world.col(3).z,
-                );
+            // **Muzzle flash position** :
+            // 1. MD3 viewmodel → tag_flash (ou tag_barrel) du mesh.
+            // 2. GLB viewmodel (Plasma) → offset hardcoded au bout du
+            //    canon (eye + forward × 22u + right × 7u).  Pas de tag
+            //    GLB → on approxime visuellement.
+            // **GLB viewmodel = pas de tag_flash** → offset hardcoded.
+            // Forward 14u (≈ bout du canon, < hull radius 15u → pas de
+            // bleed mur).
+            // **Source de vérité unique** : la même condition
+            // `glb_viewmodel_prop` qui a été utilisée plus haut pour
+            // décider d'afficher le mesh GLB.  Évite la dérive entre
+            // "afficher GLB" et "muzzle flash sans tag_flash".
+            let glb_viewmodel = glb_viewmodel_prop.is_some();
+            let tag_pos_opt = if glb_viewmodel {
+                // **Offset par arme** — chaque GLB a une géométrie
+                // différente, donc le bout du canon n'est pas au même
+                // endroit dans l'espace local.  Valeurs (forward, right,
+                // up_neg) tunées empiriquement pour que le muzzle flash
+                // sorte VRAIMENT du bout du canon visible.
+                // **Source de vérité commune** avec `App::viewmodel_muzzle_pos` :
+                // si tu changes ici, change aussi le helper (et vice-versa)
+                // pour que muzzle flash + tracers + projectiles sortent
+                // tous du même point pour chaque arme.
+                let (fwd, rt, up_neg) = match weapon {
+                    // Armes longues.
+                    WeaponId::Machinegun      => (28.0, 4.0, 4.0),
+                    WeaponId::Lightninggun    => (26.0, 5.0, 4.0),
+                    WeaponId::Rocketlauncher  => (26.0, 6.0, 5.0),
+                    WeaponId::Shotgun         => (24.0, 6.0, 5.0),
+                    WeaponId::Grenadelauncher => (22.0, 6.0, 5.0),
+                    // Armes médiums.
+                    WeaponId::Bfg             => (18.0, 6.0, 5.0),
+                    WeaponId::Plasmagun
+                    | WeaponId::Railgun       => (14.0, 6.0, 5.0),
+                    // Gauntlet — pas de muzzle flash réel, mais offset
+                    // proche main pour que l'eventuel halo soit cohérent.
+                    WeaponId::Gauntlet        => (10.0, 5.0, 4.0),
+                };
+                Some(eye + basis.forward * fwd + basis.right * rt
+                     - basis.up * up_neg)
+            } else {
+                mesh.tag_transform(fa, fb, lerp, "tag_flash")
+                    .or_else(|| mesh.tag_transform(fa, fb, lerp, "tag_barrel"))
+                    .map(|tag_local| {
+                        let world = transform * tag_local;
+                        Vec3::new(world.col(3).x, world.col(3).y, world.col(3).z)
+                    })
+            };
+            if let Some(tag_pos) = tag_pos_opt {
                 // Légère variation de taille inter-tir pour éviter l'effet
                 // « sprite figé identique à chaque frame » — Q3 original
                 // randomisait la rotation + scale du quad flash.  Ici on

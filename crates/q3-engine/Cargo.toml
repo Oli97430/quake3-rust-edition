@@ -24,7 +24,10 @@ q3-game = { workspace = true }
 q3-sound = { workspace = true }
 q3-bot = { workspace = true }
 q3-net = { workspace = true }
+q3-terrain = { workspace = true }
+q3-model = { workspace = true }
 smallvec = { workspace = true }
+hashbrown = { workspace = true }
 tokio = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
@@ -33,6 +36,9 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
+zip = { workspace = true }
+ureq = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(windows)'.build-dependencies]
 # Embarque l'icone Windows + métadonnées de version dans le .exe.

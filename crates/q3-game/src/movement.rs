@@ -242,6 +242,16 @@ const GROUND_CHECK_DEPTH: f32 = 0.25;
 /// recontacts éternels avec la même surface.
 const OVERCLIP: f32 = 1.001;
 
+/// **Terrain physics** — Z-min du hull joueur (= mins.z = -24). Exposé
+/// publiquement pour `tick_terrain` qui en a besoin pour snapper les
+/// pieds sur la heightmap (l'origine joueur est ~24u au-dessus du sol).
+pub const PLAYER_HULL_MIN_Z: f32 = -24.0;
+/// Pente max marchable sur terrain — cosinus de l'angle avec la
+/// verticale.  0.7 ≈ 45°.  Au-delà, le joueur ne peut plus monter (la
+/// vélocité de montée est annulée). Volcan/falaises de Mafate
+/// deviennent infranchissables sans saut/grappin.
+pub const TERRAIN_MAX_WALK_SLOPE: f32 = 0.7;
+
 /// Player hull Q3 — variante debout ou accroupie.
 pub fn player_hull() -> TraceBox {
     TraceBox::new(HULL_MINS, HULL_MAXS)
@@ -491,6 +501,104 @@ impl PlayerMove {
 
         // Re-check ground après le move.
         self.update_ground(world, hull, mask);
+    }
+
+    /// **Battle Royale terrain** — tick physique sur heightmap, sans BSP.
+    ///
+    /// Modèle simplifié vs `tick_collide` :
+    ///   * pas de hull box trace : la collision est verticale uniquement
+    ///     (on snap le pied du joueur à la hauteur terrain au point XY)
+    ///   * pas de slide multi-itérations : si la pente est trop raide
+    ///     (cos angle < `TERRAIN_MAX_WALK_SLOPE`), on annule la vélocité
+    ///     horizontale dans la direction de la montée.
+    ///   * pas de wall-jump / mantling — surface continue, pas de murs
+    ///     parfaitement verticaux dans une heightmap (on pourra le
+    ///     rajouter plus tard pour les falaises de Mafate).
+    ///
+    /// Suffit pour explorer la map BR.  Peaufinage gameplay (slide
+    /// down slopes, sprint scaling sur pente, etc.) viendra après.
+    pub fn tick_terrain(
+        &mut self,
+        cmd: MoveCmd,
+        params: PhysicsParams,
+        terrain: &q3_terrain::Terrain,
+    ) {
+        // Crouch toggle simple (pas de plafond à tester sur terrain).
+        self.crouching = cmd.crouch;
+
+        // Détecte sol à partir de la hauteur terrain au point courant.
+        // Le joueur tient à `PLAYER_HULL_MIN_Z` sous son origine, donc
+        // les pieds sont à `origin.z - 24`. On considère sur sol si
+        // `pieds <= terrain + 1u`.
+        let foot_z = self.origin.z + PLAYER_HULL_MIN_Z;
+        let ground_z = terrain.height_at(self.origin.x, self.origin.y);
+        self.on_ground = (foot_z - ground_z) <= 2.0;
+
+        // Wall-jump terrain : skip pour ce premier pass (pas de murs
+        // parfaitement verticaux dans une heightmap, gain marginal).
+        if self.on_ground {
+            self.last_wall_normal = None;
+        }
+
+        // Mantling — skip aussi, pas de rebord de table sur terrain.
+        if self.mantling_remaining > 0.0 {
+            self.velocity.z = MANTLE_RISE_VEL;
+        }
+
+        self.integrate_velocity(cmd, params);
+
+        let dt = cmd.delta_time;
+
+        // **Anti-grimpe pente raide** — projette la vélocité horizontale
+        // sur la composante perpendiculaire à la normale terrain quand
+        // on essaie de monter une pente trop raide. Empêche le joueur
+        // de monter le Piton des Neiges en ligne droite à 320 u/s.
+        let n = terrain.normal_at(self.origin.x, self.origin.y);
+        if n.z < TERRAIN_MAX_WALK_SLOPE && self.on_ground {
+            let horiz = Vec3::new(self.velocity.x, self.velocity.y, 0.0);
+            // Direction de montée = projection horizontale de -n (pointe
+            // vers le sommet de la pente).  Si la vélocité a une compo
+            // dans cette direction → on l'annule.
+            let uphill = Vec3::new(-n.x, -n.y, 0.0);
+            let len = uphill.length();
+            if len > 1e-3 {
+                let uphill = uphill / len;
+                let along = horiz.dot(uphill);
+                if along > 0.0 {
+                    self.velocity.x -= uphill.x * along;
+                    self.velocity.y -= uphill.y * along;
+                }
+            }
+        }
+
+        // Avance simple — pas de slide BSP, on déplace juste l'origin.
+        self.origin += self.velocity * dt;
+
+        // Snap Z : feet sur le terrain sous le joueur.  Si on tombe
+        // sous le sol → remonté brusque (le joueur ne traverse jamais
+        // la heightmap).  Si on est au-dessus → laisse tomber par
+        // gravité au prochain tick.
+        let new_ground_z = terrain.height_at(self.origin.x, self.origin.y);
+        let new_foot_z = self.origin.z + PLAYER_HULL_MIN_Z;
+        if new_foot_z < new_ground_z {
+            // Snap pieds sur le sol.
+            self.origin.z = new_ground_z - PLAYER_HULL_MIN_Z;
+            // Si on descendait, on tue la vélocité Z (atterrissage).
+            if self.velocity.z < 0.0 {
+                self.velocity.z = 0.0;
+            }
+            self.on_ground = true;
+        } else {
+            self.on_ground = (new_foot_z - new_ground_z) <= 2.0;
+        }
+
+        // Tick down les cooldowns.
+        if self.wall_jump_cooldown > 0.0 {
+            self.wall_jump_cooldown = (self.wall_jump_cooldown - dt).max(0.0);
+        }
+        if self.mantling_remaining > 0.0 {
+            self.mantling_remaining = (self.mantling_remaining - dt).max(0.0);
+        }
     }
 
     fn integrate_velocity(&mut self, cmd: MoveCmd, params: PhysicsParams) {

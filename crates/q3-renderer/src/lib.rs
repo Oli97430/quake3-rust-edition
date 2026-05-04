@@ -25,7 +25,9 @@ pub mod material;
 pub mod md3;
 pub mod particle;
 pub mod post;
+pub mod drone;
 pub mod sky;
+pub mod terrain;
 pub mod text;
 
 use bytemuck::{Pod, Zeroable};
@@ -63,6 +65,14 @@ const PREFERRED_SURFACE_FORMATS: &[wgpu::TextureFormat] = &[
 
 /// Format du depth buffer.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// **Cascaded Shadow Maps** (v0.9.5++ #7) — résolution de la shadow map
+/// solaire.  2048² donne ~1 pixel par 0.4 unités Q3 dans une frustum
+/// orthographique de ~800u, suffisant pour des contours nets sans
+/// shimmering.  Format Depth32Float pour la précision dans les zones
+/// proches (acne control).  Future itération : passer à 1024² ×
+/// 2 cascades pour mieux gérer les distances.
+pub const SHADOW_MAP_SIZE: u32 = 2048;
 
 /// **Format HDR** de la passe scene. Tous les pipelines world/3D
 /// (worldspawn, MD3, sky, particles, decals, beams, flares) ciblent
@@ -129,6 +139,7 @@ pub struct Renderer {
     pub queue: Arc<wgpu::Queue>,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
+    depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
 
     /// Texture HDR offscreen (Rgba16Float, taille surface). Toutes les
@@ -137,6 +148,76 @@ pub struct Renderer {
     /// Recréée sur resize. `view` cloné pour le bind dans PostFx.
     hdr_color_tex: wgpu::Texture,
     hdr_color_view: wgpu::TextureView,
+
+    /// **Previous frame HDR** (v0.9.5++ #10) — copie de `hdr_color_tex`
+    /// après le post-process de la frame précédente.  Lue par les
+    /// shaders water_shade pour faire du Screen-Space Reflection.
+    /// Le 1-frame lag est invisible sur l'eau (qui n'a pas de motion
+    /// vectors disponibles côté joueur).  Recréée sur resize.
+    prev_hdr_color_tex: wgpu::Texture,
+    prev_hdr_color_view: wgpu::TextureView,
+    /// Mirror du depth buffer, copié à la fin de chaque frame.  Lu par
+    /// SSR water — évite le conflit usage RT vs RESOURCE qui se
+    /// produirait si on bindait le `depth_view` courant pendant la
+    /// passe qui écrit dedans.
+    prev_depth_tex: wgpu::Texture,
+    prev_depth_view: wgpu::TextureView,
+    ssr_bgl: wgpu::BindGroupLayout,
+    ssr_sampler: wgpu::Sampler,
+    ssr_bind_group: wgpu::BindGroup,
+
+    /// **Cascaded Shadow Maps** (v0.9.5++ #7) — texture depth-only
+    /// rendue depuis le POV du soleil.  Lue par les shaders material/
+    /// terrain/drone pour modulé la lumière directe par l'occlusion.
+    /// 2048² Depth32Float = ~16 MB.  Re-rendue à chaque frame.
+    /// (Tex+sampler retenus pour rester propriétaire de la ressource GPU
+    /// même si seul `shadow_view` est utilisé directement par les passes.)
+    #[allow(dead_code)]
+    shadow_tex: wgpu::Texture,
+    shadow_view: wgpu::TextureView,
+    /// Uniform contenant la matrice view_proj du soleil — utilisée par
+    /// les shaders material pour transformer world_pos en shadow UV.
+    /// Mise à jour chaque frame depuis la position joueur (frustum
+    /// orthographique centré sur le joueur, taille fixe 1500u).
+    shadow_uniform: wgpu::Buffer,
+    shadow_bgl: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
+    shadow_sampler: wgpu::Sampler,
+    /// Bind group complet (uniform + tex + sampler) — utilisé par les
+    /// pipelines material pour SAMPLE la shadow map.
+    shadow_bind_group: wgpu::BindGroup,
+    /// Bind group minimal (uniform seul) — utilisé par le shadow pipeline
+    /// pendant la passe d'écriture de la shadow map.  Doit être séparé
+    /// pour ne pas inclure `shadow_view` qui est render target dans
+    /// cette passe (conflit usage texture sample vs DEPTH_STENCIL_WRITE).
+    #[allow(dead_code)]
+    shadow_pass_bgl: wgpu::BindGroupLayout,
+    shadow_pass_bind_group: wgpu::BindGroup,
+    /// Pipeline depth-only pour la passe shadow.  Réutilise le vertex
+    /// layout du BSP (`WorldVertex`) mais avec un fragment shader vide
+    /// (juste depth-write).  Pas de fog/dlight/bloom/etc.
+    shadow_pipeline: wgpu::RenderPipeline,
+
+    /// **TAA — Temporal Anti-Aliasing** (v0.9.5++ #9).
+    /// `taa_history_tex` : copie du résolu de la frame N-1 (sample-able).
+    /// `taa_resolved_tex` : cible RT de la passe TAA resolve (frame N).
+    /// Chaque frame : on rend la scène jittered dans `hdr_color`, puis
+    /// la TAA resolve pass blend `hdr_color` (current) + `taa_history`
+    /// (previous resolved) avec neighborhood clamping → écrit dans
+    /// `taa_resolved`.  À la fin, copy `taa_resolved → taa_history` pour
+    /// la frame suivante.  PostFx lit `taa_resolved` au lieu de `hdr_color`.
+    taa_history_tex: wgpu::Texture,
+    taa_history_view: wgpu::TextureView,
+    taa_resolved_tex: wgpu::Texture,
+    taa_resolved_view: wgpu::TextureView,
+    taa_bgl: wgpu::BindGroupLayout,
+    taa_bind_group: wgpu::BindGroup,
+    taa_pipeline: wgpu::RenderPipeline,
+    taa_sampler: wgpu::Sampler,
+    /// Compteur de frame pour la séquence Halton(2,3).  Incrementé
+    /// chaque render, modulo 8 (8 samples Halton donnent un pattern
+    /// quasi-uniforme suffisant pour le supersampling temporel).
+    taa_frame_index: u32,
 
     pipeline: wgpu::RenderPipeline,
     camera: Camera,
@@ -149,6 +230,21 @@ pub struct Renderer {
     lightmap_bind_group: Option<wgpu::BindGroup>,
 
     bsp_mesh: Option<BspMesh>,
+    /// Pipeline terrain (BR maps).  `Some` quand un terrain a été
+    /// uploadé via `upload_terrain`.  Mutuellement exclusif avec `bsp_mesh`
+    /// côté usage : on ne dessine pas les deux dans la même frame.
+    terrain_gpu: Option<terrain::TerrainGpu>,
+    /// Pipeline drones GLB (BR aerial).  Mesh partagé entre tous les
+    /// drones, instance uniform ré-écrit par drone.
+    drone_gpu: Option<drone::DroneRenderer>,
+    /// Transforms drones queues pour la frame courante.  Vidé après
+    /// chaque flush dans la passe principale.  Le rendu drone se fait
+    /// avec un seul instance uniform → on doit dessiner séquentiellement.
+    pending_drones: Vec<drone::DroneInstance>,
+    /// Props static GLB (rochers, plantes, palmiers...) — clé = nom du
+    /// prop, +/= instance data.  Sera groupé par nom pour minimiser
+    /// les changements de mesh à la frame.
+    pending_props: Vec<(String, drone::DroneInstance)>,
     fog_set: FogSet,
     fog_uniform: FogUniform,
 
@@ -220,12 +316,13 @@ impl Renderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("q3-device"),
                     required_features: wgpu::Features::empty(),
-                    // `downlevel_defaults` plafonne à `max_bind_groups=4`
-                    // (GL ES 3.0), or on a 5 groups : camera / lightmap /
-                    // material / dlights / fog.  On bump le cap à 5 ; tout
-                    // adapter desktop moderne supporte 8 ou plus.
+                    // `downlevel_defaults` plafonne à `max_bind_groups=4`.
+                    // v0.9.5++ : on a 7 bind groups dans le pipeline material —
+                    // camera (0), lightmap (1), material (2), dlights (3),
+                    // fog (4), SSR (5), shadow CSM (6).  On bump à 8 (cap
+                    // standard Vulkan/D3D12 desktop, supporté universellement).
                     required_limits: wgpu::Limits {
-                        max_bind_groups: 5,
+                        max_bind_groups: 8,
                         ..wgpu::Limits::downlevel_defaults()
                     }
                     .using_resolution(adapter.limits()),
@@ -268,9 +365,384 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
-        let depth_view = create_depth_view(&device, size.0, size.1);
+        let (depth_tex, depth_view) = create_depth_view(&device, size.0, size.1);
         let (hdr_color_tex, hdr_color_view) =
             create_hdr_color_view(&device, size.0, size.1);
+        let (prev_hdr_color_tex, prev_hdr_color_view) =
+            create_prev_hdr_view(&device, size.0, size.1);
+        let (prev_depth_tex, prev_depth_view) =
+            create_prev_depth_view(&device, size.0, size.1);
+        // Sampler SSR : Linear filtrant pour le HDR (interp.) +
+        // ClampToEdge (UV en sortie de frustum → bord).
+        let ssr_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ssr-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        // BGL SSR : prev_hdr (filterable) + depth (Depth) + sampler.
+        let ssr_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssr-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ssr_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ssr-bg"),
+            layout: &ssr_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&prev_hdr_color_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&prev_depth_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&ssr_sampler) },
+            ],
+        });
+
+        // ─── **Cascaded Shadow Maps** (v0.9.5++ #7) ───
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-map"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // Uniform : 4×4 matrice du soleil (view × proj orthographique).
+        let shadow_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow-uniform"),
+            size: 64, // 4×4×f32
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Sampler comparison pour PCF — comparaison hardware avec bias.
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow-sampler-cmp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-bgl"),
+            entries: &[
+                // Uniform sun_view_proj — accessible vertex (shadow pass)
+                // ET fragment (sample côté material).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Shadow texture (lu uniquement par les fragment shaders
+                // côté material, la shadow pass écrit dedans en
+                // RENDER_ATTACHMENT).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-bg"),
+            layout: &shadow_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: shadow_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+            ],
+        });
+        // BGL et bind group MINIMAUX pour la passe shadow elle-même.
+        // Inclut UNIQUEMENT l'uniform (le shadow_view est déjà render
+        // target → ne peut pas être bind comme texture en même temps).
+        let shadow_pass_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-pass-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let shadow_pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-pass-bg"),
+            layout: &shadow_pass_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_uniform.as_entire_binding() }],
+        });
+        // ─── **TAA Resolve pipeline** (v0.9.5++ #9) ───
+        let (taa_history_tex, taa_history_view) =
+            create_taa_history_view(&device, size.0, size.1);
+        let (taa_resolved_tex, taa_resolved_view) =
+            create_taa_resolved_view(&device, size.0, size.1);
+        let taa_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("taa-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let taa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("taa-bgl"),
+            entries: &[
+                // 0 : current frame HDR (jittered)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 1 : history HDR (frame N-1 résolu)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 2 : sampler partagé
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let taa_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("taa-bg"),
+            layout: &taa_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_color_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&taa_history_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&taa_sampler) },
+            ],
+        });
+        // WGSL inline — TAA resolve avec neighborhood clamping (variance
+        // clipping de Karis 2014).  Algorithme :
+        //   1. Sample current(uv)
+        //   2. Compute box AABB de 9 voisins du current (3×3)
+        //   3. Sample history(uv) puis clip dans la box
+        //   4. Blend 0.92 * clamped_history + 0.08 * current
+        // Le clamp suppresse le ghosting des objets en mouvement (sans
+        // motion vectors — limitation acceptée).  Sur scène statique
+        // l'accumulation 8-frames donne un effet supersampling 8x.
+        let taa_shader_src = r#"
+@group(0) @binding(0) var current_tex: texture_2d<f32>;
+@group(0) @binding(1) var history_tex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vid: u32) -> VsOut {
+    let x = -1.0 + f32((vid & 1u) << 2u);
+    let y = -1.0 + f32((vid & 2u) << 1u);
+    var out: VsOut;
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_taa(in: VsOut) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(current_tex);
+    let texel = vec2<f32>(1.0 / f32(dims.x), 1.0 / f32(dims.y));
+    let curr = textureSample(current_tex, samp, in.uv).rgb;
+    // Sample history.
+    let hist = textureSample(history_tex, samp, in.uv).rgb;
+    // Neighborhood AABB 3×3 sur le current — limites min/max chrominance.
+    var c_min = curr;
+    var c_max = curr;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            if (dx == 0 && dy == 0) { continue; }
+            let off = vec2<f32>(f32(dx), f32(dy)) * texel;
+            let s = textureSample(current_tex, samp, in.uv + off).rgb;
+            c_min = min(c_min, s);
+            c_max = max(c_max, s);
+        }
+    }
+    // Clamp history dans la box du voisinage current → suppresse le
+    // ghosting (samples qui dérivent trop sont reset).
+    let hist_clamped = clamp(hist, c_min, c_max);
+    // Blend exponentiel : history dominante (accumule), current
+    // contribute juste assez pour rafraîchir + introduire sub-pixel.
+    // Alpha 0.08 = ~12 frames d'accumulation effective.
+    let blended = mix(hist_clamped, curr, 0.08);
+    return vec4<f32>(blended, 1.0);
+}
+"#;
+        let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("taa-shader"),
+            source: wgpu::ShaderSource::Wgsl(taa_shader_src.into()),
+        });
+        let taa_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("taa-pipeline-layout"),
+            bind_group_layouts: &[&taa_bgl],
+            push_constant_ranges: &[],
+        });
+        let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("taa-pipeline"),
+            layout: Some(&taa_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &taa_shader,
+                entry_point: "vs_fullscreen",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &taa_shader,
+                entry_point: "fs_taa",
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SCENE_HDR_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Pipeline shadow : vertex BSP only (depth write), fragment empty.
+        let shadow_shader_src = r#"
+struct SunU { view_proj: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> sun: SunU;
+struct VsIn {
+    @location(0) position: vec3<f32>,
+};
+@vertex
+fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
+    return sun.view_proj * vec4<f32>(in.position, 1.0);
+}
+"#;
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow-pipeline-shader"),
+            source: wgpu::ShaderSource::Wgsl(shadow_shader_src.into()),
+        });
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow-pipeline-layout"),
+            bind_group_layouts: &[&shadow_pass_bgl],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow-pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: "vs_main",
+                compilation_options: Default::default(),
+                // Use the same vertex layout as BSP rendering — only
+                // position (location 0) is consumed, others ignored.
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            fragment: None, // depth-only
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // Cull front faces — réduit le shadow acne classique
+                // (le self-shadowing de la face avant). Convention
+                // Q3 BSP : winding CCW pour les triangles "outside".
+                cull_mode: Some(wgpu::Face::Front),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,        // bias en unités depth
+                    slope_scale: 2.0,    // bias proportionnel à la pente
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         // Camera
         let camera = Camera::new(
@@ -416,16 +888,43 @@ impl Renderer {
             size.0,
             size.1,
         );
-        post.set_hdr_input(&hdr_color_view);
+        // Post lit depuis taa_resolved (sortie TAA), pas hdr_color brut.
+        post.set_hdr_input(&taa_resolved_view, &depth_view);
 
         Ok(Self {
             device,
             queue,
             surface,
             surface_config,
+            depth_tex,
             depth_view,
             hdr_color_tex,
             hdr_color_view,
+            prev_hdr_color_tex,
+            prev_hdr_color_view,
+            prev_depth_tex,
+            prev_depth_view,
+            ssr_bgl,
+            ssr_sampler,
+            ssr_bind_group,
+            shadow_tex,
+            shadow_view,
+            shadow_uniform,
+            shadow_bgl,
+            shadow_sampler,
+            shadow_bind_group,
+            shadow_pass_bgl,
+            shadow_pass_bind_group,
+            shadow_pipeline,
+            taa_history_tex,
+            taa_history_view,
+            taa_resolved_tex,
+            taa_resolved_view,
+            taa_bgl,
+            taa_bind_group,
+            taa_pipeline,
+            taa_sampler,
+            taa_frame_index: 0,
             pipeline,
             camera,
             camera_buffer,
@@ -435,6 +934,10 @@ impl Renderer {
             lightmap_array: None,
             lightmap_bind_group: None,
             bsp_mesh: None,
+            terrain_gpu: None,
+            drone_gpu: None,
+            pending_drones: Vec::new(),
+            pending_props: Vec::new(),
             fog_set: FogSet::default(),
             fog_uniform,
             material_cache: None,
@@ -557,6 +1060,8 @@ impl Renderer {
             mat_cache.bind_group_layout(),
             &self.dlight.bind_group_layout,
             &self.fog_uniform.bind_group_layout,
+            &self.ssr_bgl,
+            &self.shadow_bgl,
             SCENE_HDR_FORMAT,
         );
         let md3 = Md3Renderer::new(
@@ -570,6 +1075,81 @@ impl Renderer {
         self.material_cache = Some(mat_cache);
         self.pipeline_cache = Some(pipe_cache);
         self.md3 = Some(md3);
+    }
+
+    /// **Drone GLB** — upload du mesh partagé pour les drones BR.
+    /// Crée le pipeline si absent puis charge le mesh.  Appelé une
+    /// seule fois par session (le mesh est partagé).
+    pub fn upload_drone_mesh(&mut self, mesh: &q3_model::glb::GlbMesh) {
+        let dr = self.drone_gpu.get_or_insert_with(|| {
+            drone::DroneRenderer::new(self.device.clone(), self.queue.clone(), &self.camera_bgl)
+        });
+        dr.upload_mesh(mesh);
+    }
+
+    /// Dessine un drone — appelé pendant la passe HDR scene.  Le
+    /// caller fournit la transform monde + le tint.  No-op si le
+    /// pipeline n'est pas créé / le mesh pas chargé.
+    pub fn queue_drone(&mut self, model: [[f32; 4]; 4], tint: [f32; 4]) {
+        if let Some(dr) = self.drone_gpu.as_ref() {
+            if !dr.has_mesh() { return; }
+            self.pending_drones.push(drone::DroneInstance { model, tint });
+        }
+    }
+
+    /// Vérifie si le pipeline drone a un mesh chargé.
+    pub fn drone_has_mesh(&self) -> bool {
+        self.drone_gpu.as_ref().map_or(false, |d| d.has_mesh())
+    }
+
+    /// Radius natif (unités mesh) du drone GLB. `0.0` si non chargé.
+    pub fn drone_radius(&self) -> f32 {
+        self.drone_gpu.as_ref().map_or(0.0, |d| d.mesh_radius)
+    }
+
+    /// **Prop GLB nommé** — upload d'un mesh de décor (rocher, plante,
+    /// etc.) sous une clé string. Réutilise le pipeline drone.
+    pub fn upload_prop(&mut self, name: &str, mesh: &q3_model::glb::GlbMesh) {
+        let dr = self.drone_gpu.get_or_insert_with(|| {
+            drone::DroneRenderer::new(self.device.clone(), self.queue.clone(), &self.camera_bgl)
+        });
+        dr.upload_prop(name, mesh);
+    }
+
+    pub fn has_prop(&self, name: &str) -> bool {
+        self.drone_gpu.as_ref().map_or(false, |d| d.has_prop(name))
+    }
+
+    /// Radius natif (unités mesh) du prop GLB identifié par `name`.
+    /// `None` si le prop n'est pas chargé. Utile pour calculer un
+    /// scale auto au call site (target_size_world / radius).
+    pub fn prop_radius(&self, name: &str) -> Option<f32> {
+        self.drone_gpu.as_ref().and_then(|d| d.prop_radius(name))
+    }
+
+    /// Queue une instance de prop nommé pour rendu cette frame.
+    pub fn queue_prop(&mut self, name: &str, model: [[f32; 4]; 4], tint: [f32; 4]) {
+        if let Some(dr) = self.drone_gpu.as_ref() {
+            if !dr.has_prop(name) { return; }
+            self.pending_props.push((name.to_string(), drone::DroneInstance { model, tint }));
+        }
+    }
+
+    /// **Battle Royale** — upload d'un `Terrain` heightmap pour
+    /// rendu hors-BSP.  Crée le pipeline terrain dédié et garde un
+    /// `Arc<Terrain>` qui sera tickée chaque frame par la sélection
+    /// LOD selon la position caméra.
+    pub fn upload_terrain(&mut self, terrain: std::sync::Arc<q3_terrain::Terrain>) {
+        let gpu = terrain::TerrainGpu::new(
+            self.device.clone(),
+            self.queue.clone(),
+            &self.camera_bgl,
+            terrain,
+        );
+        self.terrain_gpu = Some(gpu);
+        // Le BSP devient inactif quand on bascule en mode terrain
+        // (mutuellement exclusifs côté gameplay).
+        self.bsp_mesh = None;
 
         // Si des fogs ont déjà été chargés par un précédent `upload_bsp`,
         // résout leurs fogparms maintenant qu'un registry shader est dispo.
@@ -891,17 +1471,51 @@ impl Renderer {
         self.surface_config.width = w;
         self.surface_config.height = h;
         self.surface.configure(&self.device, &self.surface_config);
-        self.depth_view = create_depth_view(&self.device, w, h);
+        let (dtex, dview) = create_depth_view(&self.device, w, h);
+        self.depth_tex = dtex;
+        self.depth_view = dview;
         // Re-alloue le HDR target — il vit en parallèle de la swapchain.
         let (tex, view) = create_hdr_color_view(&self.device, w, h);
         self.hdr_color_tex = tex;
         self.hdr_color_view = view;
+        // **Prev HDR + Prev Depth + SSR rebind** (v0.9.5++ #10).
+        let (ptex, pview) = create_prev_hdr_view(&self.device, w, h);
+        self.prev_hdr_color_tex = ptex;
+        self.prev_hdr_color_view = pview;
+        let (pdtex, pdview) = create_prev_depth_view(&self.device, w, h);
+        self.prev_depth_tex = pdtex;
+        self.prev_depth_view = pdview;
+        self.ssr_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ssr-bg"),
+            layout: &self.ssr_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.prev_hdr_color_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.prev_depth_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.ssr_sampler) },
+            ],
+        });
+        // **TAA rebind** (v0.9.5++ #9) — history + resolved nouveaux.
+        let (htex, hview) = create_taa_history_view(&self.device, w, h);
+        self.taa_history_tex = htex;
+        self.taa_history_view = hview;
+        let (rtex, rview) = create_taa_resolved_view(&self.device, w, h);
+        self.taa_resolved_tex = rtex;
+        self.taa_resolved_view = rview;
+        self.taa_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("taa-bg"),
+            layout: &self.taa_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_color_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.taa_history_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.taa_sampler) },
+            ],
+        });
         self.camera.set_aspect(w as f32 / h as f32);
         // Post-process : recrée scene_capture + bloom mip chain à la
         // nouvelle résolution. Fait une fois par resize, pas chaud.
         self.post.resize(w, h);
         // PostFx doit re-binder son input HDR sur le nouveau view.
-        self.post.set_hdr_input(&self.hdr_color_view);
+        self.post.set_hdr_input(&self.taa_resolved_view, &self.depth_view);
     }
 
     /// Rend une frame. `now` est l'horloge applicative (secondes) utilisée
@@ -921,10 +1535,32 @@ impl Renderer {
         let active_fog = self.fog_set.active_at(self.camera.position).cloned();
         self.fog_uniform.write(active_fog.as_ref());
 
-        // update camera uniform
+        // **TAA jitter** (v0.9.5++ #9) — Halton(2,3) en NDC space.
+        // Increment frame_index modulo 8 (8 samples Halton bien
+        // distribués couvrent un pixel 8× → MSAA 8x effective).
+        self.taa_frame_index = (self.taa_frame_index + 1) % 8;
+        let h_idx = self.taa_frame_index + 1; // halton(0) = 0 → skip
+        let jitter_x_unit = halton(h_idx, 2) - 0.5; // [-0.5, 0.5]
+        let jitter_y_unit = halton(h_idx, 3) - 0.5;
+        let w_f = self.surface_config.width.max(1) as f32;
+        let h_f = self.surface_config.height.max(1) as f32;
+        // Convert pixel → NDC : multiplier par 2/dim (NDC range = 2).
+        self.camera.taa_jitter = [
+            jitter_x_unit * 2.0 / w_f,
+            jitter_y_unit * 2.0 / h_f,
+        ];
+
+        // update camera uniform (avec le jitter appliqué)
         let uniform = self.camera.uniform(now);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+
+        // **BR terrain** — sélection LOD + génération chunks pour la
+        // frame courante. Doit se faire AVANT le render pass car ça
+        // crée des buffers (alloc GPU) hors-pass.
+        if let Some(tg) = self.terrain_gpu.as_mut() {
+            tg.update_chunks(self.camera.position);
+        }
 
         // Pré-résolution des matériaux hors du render pass — ça termine le
         // borrow mutable sur `material_cache` / `pipeline_cache` avant
@@ -984,6 +1620,76 @@ impl Renderer {
                 label: Some("frame-encoder"),
             });
 
+        // ─── **Shadow pass** (v0.9.5++ #7 CSM) ───
+        // Calcule la matrice sun_view_proj orthographique centrée sur
+        // le joueur, puis rend les surfaces opaques BSP dans la
+        // shadow map (depth-only).  Single cascade pour cette version.
+        {
+            // Direction du soleil (matche sky.wgsl + lib.rs god rays).
+            let sun_dir = glam::Vec3::new(-0.4, -0.3, 0.86).normalize();
+            // Centre du frustum shadow = position joueur (légèrement
+            // décalée vers le sol pour mieux capter le terrain).
+            let target = self.camera.position - glam::Vec3::Z * 32.0;
+            // Position virtuelle du soleil très loin dans la direction
+            // opposée à `sun_dir` (le soleil "envoie" la lumière dans
+            // la direction -sun_dir vers le sol).
+            let sun_pos = target + sun_dir * 4000.0;
+            let sun_view = glam::Mat4::look_at_rh(sun_pos, target, glam::Vec3::Z);
+            // Frustum orthographique : ~1500u de côté centré sur le
+            // joueur, profondeur 8000u (couvre le terrain visible).
+            let half_extent = 1500.0_f32;
+            let near = 100.0_f32;
+            let far = 8000.0_f32;
+            let sun_proj = glam::Mat4::orthographic_rh(
+                -half_extent, half_extent,
+                -half_extent, half_extent,
+                near, far,
+            );
+            let sun_view_proj = sun_proj * sun_view;
+            self.queue.write_buffer(
+                &self.shadow_uniform,
+                0,
+                bytemuck::cast_slice(&sun_view_proj.to_cols_array()),
+            );
+            // Render pass shadow.
+            if let Some(mesh) = self.bsp_mesh.as_ref() {
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow-pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                shadow_pass.set_pipeline(&self.shadow_pipeline);
+                shadow_pass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
+                shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                shadow_pass.set_index_buffer(
+                    mesh.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                // Draw uniquement les surfaces OPAQUE (bucs[0]) — skip
+                // transparent/additif qui ne devraient pas projeter
+                // d'ombre franche.  Si pas encore de buckets (1ère
+                // frame), draw tout le mesh par défaut.
+                if let Some(bucs) = buckets.as_ref() {
+                    for (_, first_idx, idx_count) in &bucs[0] {
+                        shadow_pass.draw_indexed(
+                            *first_idx..*first_idx + *idx_count,
+                            0,
+                            0..1,
+                        );
+                    }
+                }
+            }
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
@@ -1025,6 +1731,14 @@ impl Renderer {
                         // Bind group fog (slot 4) : buffer mis à jour en
                         // début de frame selon la position de la caméra.
                         pass.set_bind_group(4, self.fog_uniform.bind_group(), &[]);
+                        // Bind group SSR (slot 5) : prev_hdr + depth + sampler.
+                        // Lu uniquement par water_shade — autres branches l'ignorent.
+                        pass.set_bind_group(5, &self.ssr_bind_group, &[]);
+                        // Bind group Shadow (slot 6) : sun_view_proj +
+                        // shadow_tex + comparison sampler. Lu par toutes
+                        // les branches material pour modulé l'éclairage
+                        // direct par l'occlusion solaire.
+                        pass.set_bind_group(6, &self.shadow_bind_group, &[]);
                         // Ordre Opaque → AlphaTest → AlphaBlend → Additive
                         // (approximation du `sort` Q3).
                         for (slot, pipeline) in pipes.iter().enumerate() {
@@ -1046,7 +1760,45 @@ impl Renderer {
                     }
                 }
             }
+
+            // **Battle Royale terrain** — chunks LOD-adaptés, drawn
+            // dans la même passe HDR que le BSP (mais en mode BR il
+            // n'y a pas de BSP, donc on remplit l'écran). update_chunks
+            // a déjà préparé les buffers via la position caméra du
+            // début de frame (cf. début de `render`).
+            if let Some(tg) = self.terrain_gpu.as_ref() {
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                tg.draw(&mut pass);
+            }
+
+            // **Drones GLB** — dessinés séquentiellement avec un seul
+            // instance uniform ré-écrit entre chaque draw.  Pas
+            // optimal sur 100+ instances mais largement suffisant
+            // pour 4-8 drones planants.
+            // **Drones / props GLB instanced** (v0.9.5+ refactor) —
+            // Tout passe par un vertex buffer per-instance (step
+            // Instance) avec un seul write par frame. Plus de bug
+            // de uniform partagé. Les props sont groupés par nom
+            // pour qu'on fasse 1 draw_indexed par mesh distinct.
+            if !self.pending_drones.is_empty() || !self.pending_props.is_empty() {
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                // Group props par nom.
+                let mut groups: hashbrown::HashMap<String, Vec<drone::DroneInstance>> =
+                    hashbrown::HashMap::new();
+                for (name, inst) in &self.pending_props {
+                    groups.entry(name.clone()).or_default().push(*inst);
+                }
+                let groups_ref: Vec<(&str, &[drone::DroneInstance])> = groups
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_slice()))
+                    .collect();
+                if let Some(dr) = self.drone_gpu.as_mut() {
+                    dr.flush_and_draw(&mut pass, &self.pending_drones, &groups_ref);
+                }
+            }
         }
+        self.pending_drones.clear();
+        self.pending_props.clear();
 
         // --- passe SKY : remplit les pixels restés à depth=1.0 (pas de
         // géométrie derrière). LessEqual + z=1.0 → ne touche QUE les trous.
@@ -1270,6 +2022,64 @@ impl Renderer {
         // fait le tonemap final → écrit la scène complète sur la
         // surface (remplacement total, pas additif). Donc OBLIGATOIRE
         // sinon la swapchain reste à zéro et le HUD apparaît seul.
+        // **God rays setup** (v0.9.5++ #12) — projette la direction du
+        // soleil en UV écran pour le raymarch radial dans fs_compose.
+        // Direction monde du soleil : matche celle de sky.wgsl
+        // (-0.4, -0.3, 0.86) pour cohérence visuelle.
+        let sun_dir_world = glam::Vec3::new(-0.4, -0.3, 0.86).normalize();
+        // On positionne un point soleil très loin dans cette direction
+        // depuis la caméra ; clip-space division donne la projection.
+        let sun_world =
+            self.camera.position + sun_dir_world * 100_000.0;
+        let view_proj = self.camera.view_proj();
+        let sun_clip = view_proj * glam::Vec4::new(
+            sun_world.x, sun_world.y, sun_world.z, 1.0,
+        );
+        let (sun_uv, sun_vis) = if sun_clip.w > 1e-3 {
+            let ndc_x = sun_clip.x / sun_clip.w;
+            let ndc_y = sun_clip.y / sun_clip.w;
+            // NDC [-1, 1] → UV [0, 1], Y flip pour conv. texture.
+            let u = ndc_x * 0.5 + 0.5;
+            let v = -ndc_y * 0.5 + 0.5;
+            // Visible : dans le frustum + pas trop loin au-delà des bords
+            // (laisse une marge de 0.3 pour amorcer le raymarch même si
+            // le soleil est légèrement off-screen).
+            let in_screen = u > -0.3 && u < 1.3 && v > -0.3 && v < 1.3;
+            (
+                [u, v],
+                if in_screen { 1.0 } else { 0.0 },
+            )
+        } else {
+            // Soleil derrière la caméra → off.
+            ([0.5, 0.5], 0.0)
+        };
+        // ─── **TAA Resolve pass** (v0.9.5++ #9) ───
+        // Lit hdr_color (jittered) + taa_history → blend avec
+        // neighborhood clamping → écrit dans taa_resolved.  Le post
+        // pipeline lit ensuite taa_resolved au lieu de hdr_color
+        // (rebind dynamique via set_hdr_input).
+        {
+            let mut taa_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("taa-resolve-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.taa_resolved_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            taa_pass.set_pipeline(&self.taa_pipeline);
+            taa_pass.set_bind_group(0, &self.taa_bind_group, &[]);
+            taa_pass.draw(0..3, 0..1);
+        }
+
+        // Push tous les paramètres dynamiques au compose shader.
+        self.post.set_compose_params(now, sun_uv, sun_vis);
         self.post.apply(&mut encoder, &view);
 
         // --- passe HUD : load color, pas de depth, alpha-blending --------
@@ -1300,6 +2110,63 @@ impl Renderer {
             .pending_screenshot
             .take()
             .map(|path| self.begin_capture(&mut encoder, &frame.texture, path));
+
+        // **Prev-HDR copy** (v0.9.5++ #10) — sauvegarde le HDR de cette
+        // frame pour que le water_shade de la frame suivante puisse y
+        // raymarch les SSR.  Coût : 1 copy GPU plein écran (~0.1ms).
+        let copy_size = wgpu::Extent3d {
+            width: self.surface_config.width.max(1),
+            height: self.surface_config.height.max(1),
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.hdr_color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.prev_hdr_color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            copy_size,
+        );
+        // Copy depth aussi pour SSR water hit-test next frame.
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.depth_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.prev_depth_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            copy_size,
+        );
+        // **TAA history copy** (v0.9.5++ #9) — resolved → history pour
+        // alimenter le blend de la frame suivante.
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.taa_resolved_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.taa_history_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            copy_size,
+        );
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -1501,7 +2368,7 @@ impl Renderer {
     }
 }
 
-fn create_depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
+fn create_depth_view(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d {
@@ -1513,10 +2380,102 @@ fn create_depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // **TEXTURE_BINDING + COPY_SRC** (v0.9.5++) — TEXTURE_BINDING
+        // pour SSAO post-process (lecture après main pass dans une
+        // PASSE SÉPARÉE — OK).  COPY_SRC pour copier le depth dans
+        // `prev_depth_tex` à la fin de chaque frame, qui sera lu par
+        // les material shaders de la frame suivante (SSR water).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    tex.create_view(&wgpu::TextureViewDescriptor::default())
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// **Halton sequence** (base prime) — utilisé pour générer les jitters
+/// sub-pixel TAA.  Halton(2,3) donne 8 samples bien distribués dans
+/// [0,1]² qui couvrent uniformément la zone d'un pixel.
+fn halton(mut index: u32, base: u32) -> f32 {
+    let mut f = 1.0_f32;
+    let mut r = 0.0_f32;
+    while index > 0 {
+        f /= base as f32;
+        r += f * (index % base) as f32;
+        index /= base;
+    }
+    r
+}
+
+/// **TAA history texture** — Rgba16Float HDR pour préserver les
+/// highlights pendant le blend.  COPY_DST + TEXTURE_BINDING.
+fn create_taa_history_view(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("taa-history"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SCENE_HDR_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// **TAA resolved texture** — RT de la passe TAA + COPY_SRC pour la
+/// copie vers history à la fin.  Doit aussi être lue par PostFx.
+fn create_taa_resolved_view(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("taa-resolved"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SCENE_HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// **Previous-frame depth** (v0.9.5++ #10) — destinée à recevoir la
+/// copie du `depth` à la fin de chaque frame.  Lue par water_shade
+/// SSR pour le hit-test ; évite le conflit RT-vs-RESOURCE qui se
+/// produirait si on bindait le `depth_view` courant pendant qu'il
+/// est utilisé comme depth attachment dans la même passe.
+fn create_prev_depth_view(device: &wgpu::Device, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("prev-depth"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 /// Crée la texture HDR offscreen pour la passe scene. Usages :
@@ -1538,8 +2497,39 @@ fn create_hdr_color_view(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: SCENE_HDR_FORMAT,
+        // **COPY_SRC ajouté** (v0.9.5++ #10 SSR) — la texture HDR est
+        // copiée vers `prev_hdr_color` à la fin de chaque frame pour
+        // alimenter le SSR de l'eau au prochain frame.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING,
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// **Previous-frame HDR** (v0.9.5++ #10) — texture destinée à recevoir
+/// la copie du `hdr_color_tex` à la fin de chaque frame.  Lue par les
+/// shaders water_shade pour SSR.  Doit avoir COPY_DST + TEXTURE_BINDING.
+fn create_prev_hdr_view(
+    device: &wgpu::Device,
+    w: u32,
+    h: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("prev-hdr-color"),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SCENE_HDR_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());

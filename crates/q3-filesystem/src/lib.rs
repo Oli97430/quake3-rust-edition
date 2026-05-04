@@ -83,6 +83,18 @@ impl Vfs {
             scan_root(root, &mut archives, &mut index)?;
         }
 
+        // **Project assets/** (v0.9.5++) — racine additionnelle relative
+        // au CWD pour permettre l'override des assets baseq3 sans toucher
+        // aux pak0.pk3 originaux.  Indexé en DERNIER → priorité maximum
+        // (les loose files écrasent les pk3 baseq3 + mods).  Permet par
+        // ex. d'avoir une `assets/textures/env/skybox_custom_*.tga` qui
+        // override le sky shader d'une map.
+        let project_assets = PathBuf::from("assets");
+        if project_assets.is_dir() {
+            info!("vfs: ajout root projet `assets/` (override loose files)");
+            scan_root(&project_assets, &mut archives, &mut index)?;
+        }
+
         info!(
             "vfs: mounted {} archives, {} indexed files",
             archives.len(),
@@ -251,12 +263,39 @@ fn scan_loose_dir(
     dir: &Path,
     index: &mut HashMap<String, Entry>,
 ) -> Result<()> {
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    scan_loose_dir_inner(root, dir, index, &mut visited, 0)
+}
+
+/// Implementation interne avec **détection de cycle** (junctions
+/// Windows / symlinks Unix qui pointent en boucle).  Sans cette garde,
+/// un junction `assets/foo → assets/` provoquait un stack overflow.
+fn scan_loose_dir_inner(
+    root: &Path,
+    dir: &Path,
+    index: &mut HashMap<String, Entry>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
+) -> Result<()> {
+    // Garde de profondeur (16 niveaux suffisent pour tout layout sain).
+    if depth > 16 {
+        warn!("vfs: scan profondeur >16 à {} — skip (cycle suspecté)", dir.display());
+        return Ok(());
+    }
+    // Canonicalise pour résoudre symlinks/junctions et détecter cycle.
+    let canon = match dir.canonicalize() {
+        Ok(c) => c,
+        Err(_) => dir.to_path_buf(), // fallback si impossible
+    };
+    if !visited.insert(canon) {
+        return Ok(()); // déjà vu → cycle, on skip
+    }
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            scan_loose_dir(root, &path, index)?;
+            scan_loose_dir_inner(root, &path, index, visited, depth + 1)?;
         } else if ft.is_file() {
             if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pk3")) {
                 continue; // géré séparément

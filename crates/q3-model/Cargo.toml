@@ -12,3 +12,7 @@ q3-math = { workspace = true }
 q3-common = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
+gltf = { workspace = true }
+thiserror = { workspace = true }
+image = { workspace = true }
+glam = { workspace = true }
