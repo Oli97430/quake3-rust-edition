@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.78+-orange)](https://rustup.rs/)
-[![Status](https://img.shields.io/badge/Status-v0.9.5-green)]()
+[![Status](https://img.shields.io/badge/Status-v0.10.0-brightgreen)]()
 
 </div>
 
@@ -14,20 +14,21 @@
 
 Réécriture complète de **Quake III Arena** en Rust moderne — pipeline `wgpu` (Vulkan/DX12/Metal), assets glTF, anti-cheat serveur, netcode lag-compensation, audio spatial, post-FX HDR.
 
-> **État** : v0.9.5 — moteur complet, jouable solo + bots IA, mode BR exploration, **9/9 armes en GLB**, anti-cheat actif, map downloader intégré.
+> **État** : v0.10.0 — moteur complet, jouable solo + bots IA, mode BR exploration, **9/9 armes en GLB**, animations bots physiques, éditeur de niveau intégré, taunts vocaux, rendu PBR procédural.
 
 ## ✨ Highlights
 
 - **Renderer wgpu HDR** : pipeline scene buffer `Rgba16Float` + ACES Narkowicz + multi-mip bloom + SSAO depth-based + CSM (PCF 3×3) + TAA Halton(2,3) + SSR water raymarch + god rays + volumetric fog (HG phase)
 - **9/9 armes en GLB** moderne (pickup au sol + viewmodel main joueur) avec orientation tunée par arme
-- **Animations bots Q3 fidèles** : parsing `animation.cfg` runtime, 25+ ranges (LEGS_*, TORSO_*, BOTH_*), TORSO_PAIN1, phase rebase per anim change
-- **Netcode lag-compensation** : ring buffer `LagSample { origin, velocity, view_angles, crouching }` 30 samples × 50 ms, hit-center ajusté crouch (24u stand / 14u crouch)
-- **Anti-cheat serveur** : cap angulaire 720°/s post-budget, teleport detection 2400 u/s, dt budget cumulatif, comparaisons signées (anti i32→u32 wrap exploit)
-- **Map downloader intégré** : catalogue + DL HTTP background (ureq + rustls) + SHA256 + magic ZIP/IBSP check + cap 100 MB anti-DoS
-- **Battle Royale Réunion** mode exploration : terrain procédural, POI tier 2-4, ring shrink optionnel
-- **Lecteur audio universel** : mp3/wav/ogg/flac, scan récursif `~/Music`, `~/Downloads`, OneDrive, dossiers custom via `s_musicpath`
-- **Punch angles recoil** par arme (BFG 6°, RL 5°, SG 4.5°, MG 1.4° + jitter ±0.5°)
-- **Railgun sniper scope** : RMB tenu = zoom FOV÷3 + sens÷3 + crosshair de précision + mil-dot
+- **PBR Cook-Torrance complet** : GGX NDF + Smith G + Schlick Fresnel, normal maps (cotangent frame Mikkelsen), metallic/roughness glTF
+- **Animations bots drastiquement améliorées** : ragdoll physics à la mort, hit-reactions spring damper, look-at IK tête/torse, torso lag yaw, strafe blending, alignement surface terrain
+- **Éditeur de niveau intégré** : souris libre, panel UI avec boutons, import GLB natif (rfd), spawn/sélect/déplace/scale/rotate/aligne/save/load, JSON persistant
+- **Taunts vocaux** : 28 fichiers `taunt*.wav` Q3 originaux + fallback announcer, déclenchés à la mort des bots
+- **Lightning Gun beam GLB** : effet faisceau électrique 3D sur chaque tir
+- **Reunion BR** : herbe procédurale (1 800 touffes billboard) + rochers procéduraux (1 200 icosaèdres perturbés) + alignement terrain
+- **Netcode lag-compensation** : ring buffer 30 samples × 50 ms, hit-center ajusté crouch
+- **Anti-cheat serveur** : cap angulaire 720°/s, teleport detection 2400 u/s, dt budget, comparaisons signées
+- **Map downloader intégré** : HTTP background + SHA256 + magic ZIP/IBSP + cap 100 MB
 
 ## 🔫 Armes (9/9 GLB)
 
@@ -38,10 +39,21 @@ Réécriture complète de **Quake III Arena** en Rust moderne — pipeline `wgpu
 | Shotgun | ✅ | Slug AP 80 dmg, cooldown 1.5s |
 | Grenade Launcher | ✅ | Airburst flat shot 110 splash |
 | Rocket Launcher | ✅ | Lock-on cône 30°/1500u |
-| Lightning Gun | ✅ | Shock blast 55 dmg |
+| Lightning Gun | ✅ | Shock blast 55 dmg + **beam GLB** |
 | Railgun | ✅ | **Sniper zoom 3× + ricochet** |
 | Plasma Gun | ✅ | Plasma orb gros splash 96u |
 | BFG10K | ✅ | Death zone 250u splash, 160 dmg |
+
+## 🤖 Animations bots (v0.10.0)
+
+| Feature | Détail |
+|---------|--------|
+| **Ragdoll mort** | Physique corps rigide : gravité 800 u/s², quaternion integration, settlement detection |
+| **Hit reactions** | Spring damper (k=80, c=18) ~300 ms, twist torse selon angle impact |
+| **Look-at IK** | Tête/torse traque la cible, yaw ±55° pitch ±30°, smoothed 5 rad/s |
+| **Torso lag** | Yaw torse suit lower avec lag 10 rad/s, blending 180° |
+| **Strafe blend** | Lower yaw ≠ upper yaw : jambes anticipent la direction de déplacement |
+| **Surface align** | 4 raycasts terrain → pitch/roll bot aligné sur la pente |
 
 ## 🛡️ Items
 
@@ -50,28 +62,49 @@ Réécriture complète de **Quake III Arena** en Rust moderne — pipeline `wgpu
 | Munitions (9 types) | 9/9 ✅ GLB |
 | Armures (3 tiers) | 3/3 ✅ (shard 5 / combat 50 / body 100) |
 | Health (4 tiers) | ✅ partagé via `health_pack.glb` |
-| Powerups (Quad, Regen) | 2/6 ✅ GLB |
+| Powerups (Quad, Regen) | 2/6 ✅ GLB (Quad absent sur Reunion — équilibre BR) |
 | Holdables (Medkit) | 1/2 ✅ |
+
+## 🗺️ Éditeur de niveau
+
+Accessible via `Menu → OPTIONS → EDITOR MODE` :
+
+```
+[Touche ~]  ed_spawn <nom>         # spawn devant le joueur
+[Touche ~]  ed_pick                # sélectionner prop sous la visée
+[F2]        ed_pick (raccourci)
+[Clic G]    Sélectionner / spawner sur le panel UI
+            ImportGLB → rfd::FileDialog natif
+[~]         ed_move 0 100 0        # translate sélection
+[~]         ed_scale 1.5           # échelle
+[~]         ed_rotate 45           # yaw
+[~]         ed_align               # aligner sur le terrain
+[~]         ed_save                # JSON → assets/maps/<map>_edits.json
+[~]         ed_load                # rechargement en jeu
+```
+
+Les edits sont auto-chargés au démarrage de la map.
 
 ## 🏗️ Architecture
 
 ```
 crates/
-├── q3-engine/      # binaire q3.exe + main loop + app.rs (~22k lines)
+├── q3-engine/      # binaire q3.exe + main loop + app.rs
 │   ├── src/app.rs       # state machine + render loop + input
+│   ├── src/editor.rs    # éditeur de niveau (panel UI + hit-test + ray)
 │   ├── src/menu.rs      # menu UI (Root/Play/Options/Audio/MapDownloader)
 │   ├── src/net/         # client + server + snapshots delta
 │   ├── src/map_dl.rs    # HTTP map downloader (ureq + sha256 + zip)
 │   └── src/vr.rs        # VR scaffolding (OpenXR partial)
-├── q3-renderer/    # wgpu pipelines (BSP, MD3, GLB, terrain, sky, post)
+├── q3-renderer/    # wgpu pipelines (BSP, MD3, GLB/PBR, terrain, sky, post)
 ├── q3-bsp/         # parseur IBSP v46 (zero-copy bytemuck)
-├── q3-model/       # MD3 + glTF/GLB loader
+├── q3-model/       # MD3 + glTF/GLB loader (scène graph + vertex colors)
 ├── q3-bot/         # IA bots (FSM + animation ranges)
 ├── q3-game/        # physique mouvement (strafe-jump, wall-jump, mantling)
 ├── q3-collision/   # trace BSP + bbox vs world
 ├── q3-terrain/     # heightmap BR + ring shrink + POI
 ├── q3-net/         # protocole snapshots + UserCmd quantification
-├── q3-sound/       # rodio wrapper + spatial 3D
+├── q3-sound/       # rodio wrapper + spatial 3D + taunts vocaux
 ├── q3-image/       # decoder TGA/JPG/PNG + ImageCache
 ├── q3-shader/      # parseur Q3 shader scripts
 ├── q3-filesystem/  # VFS pak0+mods+assets/ avec cycle protection symlinks
@@ -142,7 +175,7 @@ Console alternative : `mapdl list` / `mapdl get <id>` / `mapdl status`.
 | q3dm6 | 280 | 240 | 195 |
 | q3dm17 | 320 | 290 | 260 |
 | q3tourney2 | 350 | 310 | 280 |
-| br_reunion | 180 | 145 | 120 |
+| br_reunion | 165 | 130 | 105 |
 
 *RTX 3090 @ 1920×1080, ULTRA*
 
@@ -151,20 +184,29 @@ Optims clés :
 - SSAO kernel précomputé `var<array>`
 - Drone scratch buffer (0 alloc heap par frame)
 - TAA Halton jitter (supersampling temporel)
+- Procedural grass/rocks : vertex buffer unique partagé (0 alloc par instance)
 
-## 🐛 Polish v0.9.5
+## 🐛 Changelog v0.10.0
 
-~14 bugs critiques fixés sur 2 passes audit :
-- Lag-comp u32 underflow guard + crouching hit-center
-- MapDownloader race + DoS cap (100 MB) + BSP magic check
-- VFS symlink cycle protection (Windows junctions)
-- MD3 normal decoding (lat = [0, π], pas [0, 2π])
-- Sound cache leak (`unload()` + `clear_cache()`)
-- Ammo i32→u32 cast exploit (tir infini)
-- Cap angulaire post-budget (anti lag-spike flick)
-- Fire flags reset au switch d'arme
-- NaN guard homing rocket
-- Endianness assert q3-bsp + q3-model
+### Nouveautés
+- **Éditeur de niveau intégré** (Editor mode) avec panel UI, import GLB natif rfd, JSON save/load
+- **Animations bots** : ragdoll, hit reactions spring, look-at IK, strafe blend, surface align
+- **Taunts vocaux bots** : 28 taunts Q3 classiques déclenchés à la mort
+- **Lightning Gun beam GLB** : effet visuel 3D sur les tirs
+- **GLB multi-mesh fix** : scene graph traversal correct (railgun 76 nodes, etc.)
+- **GLB vertex colors** : `base_color_factor` par primitive baked → couleurs matériaux correctes
+- **Procédural Reunion** : 1 800 touffes d'herbe billboard + 1 200 rochers icosaèdre
+- **Nouveaux GLB baked** : railgun, quad damage, shotgun ammo box
+
+### Fixes v0.10.0
+- Railgun viewmodel et pickup orientation (pre-transform `load_prop_glb_xform`)
+- Grenade Launcher tenu 180° correct
+- Multi-material GLB blanc corrigé (vertex color per primitive)
+- Multi-mesh GLB géométrie collapsée corrigée (node transforms)
+- Quad Damage retiré de Reunion (balance BR)
+
+### Changelog v0.9.5 (précédent)
+~14 bugs critiques fixés : lag-comp u32 underflow, MapDownloader race, VFS symlink cycle, MD3 normal decoding, sound cache leak, ammo exploit, cap angulaire, fire flags reset, NaN guard homing rocket, endianness assert.
 
 ## 🤝 Contribuer
 
@@ -190,4 +232,5 @@ GPL-2.0-or-later (héritage Q3 id Software).
 - **rodio** — audio
 - **glam** — math SIMD
 - **gltf** — parser glTF 2.0
+- **rfd** — native file dialogs (éditeur)
 - **ureq + rustls** — HTTP pure Rust pour map downloader

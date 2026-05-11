@@ -39,6 +39,9 @@ clap = { version = "4.5", features = ["derive"] }
 zip = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
+# Native file dialog pour l'éditeur — bouton "Import GLB" qui ouvre
+# l'explorateur Windows natif sans dépendance lourde.
+rfd = "0.14"
 
 [target.'cfg(windows)'.build-dependencies]
 # Embarque l'icone Windows + métadonnées de version dans le .exe.

@@ -5,10 +5,15 @@
 #![warn(clippy::all)]
 
 mod app;
+mod editor;
+#[allow(dead_code)]
+mod feedback;
 mod hud_helpers;
 mod logo;
+#[allow(dead_code)]
 mod map_dl;
 mod menu;
+#[allow(dead_code)]
 mod net;
 mod vr;
 

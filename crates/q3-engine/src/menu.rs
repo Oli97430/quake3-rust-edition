@@ -71,6 +71,9 @@ pub enum MenuAction {
     /// **Map downloader** (v0.9.5++) — lance le DL d'une map du
     /// catalogue par son `id`.  Le moteur utilise `MapDownloader::start`.
     DownloadMap(String),
+    /// **Editor mode** (v0.9.6) — bascule le mode éditeur de props
+    /// GLB.  L'App ferme le menu et active `editor_enabled`.
+    ToggleEditor,
 }
 
 /// Rectangle cliquable en pixels écran — utilisé à la fois pour le dessin
@@ -294,8 +297,9 @@ impl Menu {
             }
             MenuPage::Play => 1 + self.map_list.len(),
             MenuPage::Options => {
-                // BACK + 4 sous-pages (Gameplay/Video/Audio/MapDownloader).
-                5
+                // BACK + 4 sous-pages (Gameplay/Video/Audio/MapDownloader)
+                // + EDITOR MODE (v0.9.6).
+                6
             }
             MenuPage::Gameplay => {
                 // BACK + sensitivity + FOV + invert pitch + mouse smoothing.
@@ -479,6 +483,7 @@ impl Menu {
                 2 => self.go(MenuPage::Video),
                 3 => self.go(MenuPage::Audio),
                 4 => self.go(MenuPage::MapDownloader),
+                5 => return MenuAction::ToggleEditor,
                 _ => {}
             },
             MenuPage::Gameplay => {
@@ -1050,6 +1055,7 @@ impl Menu {
                     "VIDEO           >".into(),
                     "AUDIO           >".into(),
                     "MAP DOWNLOADER  >".into(),
+                    "EDITOR MODE     >".into(),
                 ]
             }
             MenuPage::Gameplay => {

@@ -59,6 +59,14 @@ fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x2,
                 },
+                // **v0.9.6** : vertex color RGBA8 (baked base_color_factor
+                // par primitive glTF).  Format Unorm8x4 → [0,1] dans
+                // le shader.
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Unorm8x4,
+                },
             ],
         },
         // Buffer 1 : instances, 80 octets (mat4 + vec4 tint).

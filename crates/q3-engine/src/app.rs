@@ -68,6 +68,35 @@ enum PendingAction {
     MapDlList,
     MapDlGet(String),
     MapDlStatus,
+    // ── Editor mode (v0.9.6) ──
+    /// Charge un GLB depuis un chemin disque comme prop nommé.
+    /// `(prop_name, glb_path)`.
+    EditorLoadGlb(String, String),
+    /// Spawn un prop à la position du crosshair (raycast terrain).
+    /// `(prop_name, scale_override)`.
+    EditorSpawn(String, Option<f32>),
+    /// Sélectionne un prop par index.
+    EditorSelect(usize),
+    /// Sélectionne le prop le plus proche du crosshair.
+    EditorSelectAim,
+    /// Déplace le prop sélectionné (`dx, dy, dz` en unités monde).
+    EditorMove(f32, f32, f32),
+    /// Multiplie le scale du prop sélectionné.
+    EditorScale(f32),
+    /// Ajoute `deg` au yaw du prop sélectionné (degrés).
+    EditorRotate(f32),
+    /// Toggle l'alignement terrain-normale du prop sélectionné.
+    EditorAlignTerrain,
+    /// Supprime le prop sélectionné.
+    EditorDelete,
+    /// Liste tous les props éditables avec leur index/nom/position.
+    EditorList,
+    /// Sauvegarde les props éditables dans `assets/edits/<name>.txt`.
+    EditorSave(String),
+    /// Charge les props depuis `assets/edits/<name>.txt`.
+    EditorLoadFile(String),
+    /// Toggle le mode editor (dessin reticle, etc.).
+    EditorToggle,
 }
 
 pub struct App {
@@ -188,10 +217,25 @@ pub struct App {
     /// **Armor Shard (5) GLB** — remplace le MD3 d'item_armor_shard.
     /// Target ~18u (petit shard).
     armor_shard_scale: Option<f32>,
+    /// **Lightning beam GLB** — mesh d'arc electrique (chain_lightning.glb)
+    /// place le long du faisceau LG pour un effet volumetrique.
+    /// `Some(scale)` quand l'asset est charge, `None` sinon.
+    lightning_beam_scale: Option<f32>,
     /// **GLB prop lights cache** (v0.9.5++) — par prop name, la liste
     /// de lights KHR_lights_punctual extraites du mesh.  Vide pour
     /// les assets sans lights définies.
     prop_lights: hashbrown::HashMap<String, Vec<q3_model::glb::GlbLight>>,
+    /// **Editor mode** (v0.9.6) — permet de placer manuellement des
+    /// props GLB sur la map courante.  `true` = HUD reticle visible,
+    /// commandes `ed_*` actives.
+    editor_enabled: bool,
+    /// Index du prop sélectionné dans `self.rocks` (None = aucun).
+    editor_selected: Option<usize>,
+    /// Cache des scales auto par prop chargé via `ed_load_glb`.
+    /// Permet à `ed_spawn` de connaître un scale raisonnable par défaut.
+    editor_prop_scales: hashbrown::HashMap<String, f32>,
+    /// État du panneau UI editor (largeur, prop actif, scroll).
+    editor_panel: crate::editor::EditorPanel,
     player: PlayerMove,
     params: PhysicsParams,
 
@@ -683,6 +727,11 @@ pub struct App {
     /// fraggés simultanément (splash qui tue 2 bots = 1 thunk, pas 2).
     /// Même convention « dans l'oreille » que `sfx_hit`.
     sfx_kill_confirm: Option<SoundHandle>,
+    /// **Taunts vocaux** (v0.9.6) — pool de samples voix joués au F3
+    /// (taunt joueur) et lors d'un clapback bot.  Tirage uniforme à
+    /// chaque déclenchement pour la variété.  Vide = pas d'asset
+    /// disponible, on retombe alors sur le kill-confirm classique.
+    sfx_taunts: Vec<SoundHandle>,
     /// Médaille « Humiliation » — Q3 la joue quand on achève un ennemi au
     /// Gauntlet. Superposée au kill-confirm standard, pas en remplacement :
     /// on veut garder la continuité sonore de la volée + la voix humaine
@@ -2549,6 +2598,7 @@ struct BotDriver {
     /// **Personnalité bot** (v0.9.5) — biais de comportement persistant
     /// par bot.  Affecte la distance d'engagement préférée et la propension
     /// à fuir/charger sous le feu.
+    #[allow(dead_code)]
     personality: BotPersonality,
     /// **Squad chatter cooldown** — empêche un bot de spammer la radio.
     /// Chaque bot ne parle qu'une fois toutes les `CHATTER_COOLDOWN_SEC`.
@@ -2580,6 +2630,44 @@ struct BotDriver {
     /// Idem pour upper (TORSO_*).
     upper_anim_start: usize,
     upper_anim_started_at: f32,
+    /// **Animation crossfade** (v0.9.6) — quand une anim change, on blend
+    /// progressivement de l'ancienne vers la nouvelle sur `CROSSFADE_SEC`.
+    /// `prev_lower/upper` stocke la range précédente et sa phase.
+    prev_lower_range_start: usize,
+    prev_lower_phase_at_switch: f32,
+    prev_upper_range_start: usize,
+    prev_upper_phase_at_switch: f32,
+    lower_crossfade_until: f32,
+    upper_crossfade_until: f32,
+
+    // ── Animation upgrades v0.9.6 ──
+    /// **Hit reaction** — twist additif appliqué au torse quand le bot
+    /// prend un dégât.  Spring décroissant qui revient à 0 en ~300 ms.
+    /// `_yaw` = rotation horizontale (degrés), `_pitch` = vertical.
+    hit_twist_yaw: f32,
+    hit_twist_yaw_vel: f32,
+    hit_twist_pitch: f32,
+    hit_twist_pitch_vel: f32,
+    /// **Look-at IK smoothing** — yaw/pitch tête lissés en degrés
+    /// (relatif au body forward).  Critical damper vers la cible.
+    head_look_yaw: f32,
+    head_look_pitch: f32,
+    /// **Spring lag torse** — yaw du torse lisse qui suit le yaw du
+    /// body avec un délai (effet inertie / cascade).
+    torso_lag_yaw: f32,
+    /// **Ragdoll mort** — quand `ragdoll_active`, on remplace le rendu
+    /// frame-based par une simu rigid body + spring sur lower/upper/head.
+    ragdoll_active: bool,
+    /// Position monde du centre du corps ragdoll (lower_origin).
+    ragdoll_pos: Vec3,
+    /// Vélocité linéaire du centre du corps.
+    ragdoll_vel: Vec3,
+    /// Quaternion d'orientation totale du corps.
+    ragdoll_quat: glam::Quat,
+    /// Vélocité angulaire (rad/s, axes monde).
+    ragdoll_ang_vel: glam::Vec3,
+    /// Timestamp où le ragdoll s'est suffisamment stabilisé pour figer.
+    ragdoll_settled_at: f32,
 }
 
 /// États d'animation du bot, pilotés par la combinaison vitesse /
@@ -3199,6 +3287,116 @@ impl App {
                 p.lock().push(PendingAction::Restart);
             });
         }
+        // ── Editor mode commands (v0.9.6) ──
+        // Permet de placer des props GLB n'importe ou sur la map
+        // courante (BR ou BSP) avec position/scale/rotation modifiables.
+        // Sauvegarde en `assets/edits/<name>.txt` pour rechargement.
+        {
+            let p = pending.clone();
+            cmds.add("editor", move |_args: &Args| {
+                p.lock().push(PendingAction::EditorToggle);
+            });
+            let p = pending.clone();
+            cmds.add("ed_load_glb", move |args: &Args| {
+                if args.count() < 3 {
+                    info!("ed_load_glb: usage `ed_load_glb <prop_name> <chemin.glb>`");
+                    return;
+                }
+                p.lock().push(PendingAction::EditorLoadGlb(
+                    args.argv(1).to_string(),
+                    args.argv(2).to_string(),
+                ));
+            });
+            let p = pending.clone();
+            cmds.add("ed_spawn", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("ed_spawn: usage `ed_spawn <prop_name> [scale]`");
+                    return;
+                }
+                let scale = if args.count() >= 3 {
+                    args.argv(2).parse::<f32>().ok()
+                } else { None };
+                p.lock().push(PendingAction::EditorSpawn(
+                    args.argv(1).to_string(),
+                    scale,
+                ));
+            });
+            let p = pending.clone();
+            cmds.add("ed_select", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("ed_select: usage `ed_select <index>`");
+                    return;
+                }
+                if let Ok(idx) = args.argv(1).parse::<usize>() {
+                    p.lock().push(PendingAction::EditorSelect(idx));
+                } else {
+                    info!("ed_select: index invalide '{}'", args.argv(1));
+                }
+            });
+            let p = pending.clone();
+            cmds.add("ed_pick", move |_args: &Args| {
+                p.lock().push(PendingAction::EditorSelectAim);
+            });
+            let p = pending.clone();
+            cmds.add("ed_move", move |args: &Args| {
+                if args.count() < 4 {
+                    info!("ed_move: usage `ed_move <dx> <dy> <dz>` (unités monde)");
+                    return;
+                }
+                let dx = args.argv(1).parse::<f32>().unwrap_or(0.0);
+                let dy = args.argv(2).parse::<f32>().unwrap_or(0.0);
+                let dz = args.argv(3).parse::<f32>().unwrap_or(0.0);
+                p.lock().push(PendingAction::EditorMove(dx, dy, dz));
+            });
+            let p = pending.clone();
+            cmds.add("ed_scale", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("ed_scale: usage `ed_scale <facteur>` (multiplicatif, ex: 1.1, 0.9)");
+                    return;
+                }
+                let f = args.argv(1).parse::<f32>().unwrap_or(1.0);
+                p.lock().push(PendingAction::EditorScale(f));
+            });
+            let p = pending.clone();
+            cmds.add("ed_rotate", move |args: &Args| {
+                if args.count() < 2 {
+                    info!("ed_rotate: usage `ed_rotate <degrés>`");
+                    return;
+                }
+                let d = args.argv(1).parse::<f32>().unwrap_or(0.0);
+                p.lock().push(PendingAction::EditorRotate(d));
+            });
+            let p = pending.clone();
+            cmds.add("ed_align", move |_args: &Args| {
+                p.lock().push(PendingAction::EditorAlignTerrain);
+            });
+            let p = pending.clone();
+            cmds.add("ed_delete", move |_args: &Args| {
+                p.lock().push(PendingAction::EditorDelete);
+            });
+            let p = pending.clone();
+            cmds.add("ed_list", move |_args: &Args| {
+                p.lock().push(PendingAction::EditorList);
+            });
+            let p = pending.clone();
+            cmds.add("ed_save", move |args: &Args| {
+                let name = if args.count() >= 2 {
+                    args.argv(1).to_string()
+                } else {
+                    "reunion_edits".to_string()
+                };
+                p.lock().push(PendingAction::EditorSave(name));
+            });
+            let p = pending.clone();
+            cmds.add("ed_load", move |args: &Args| {
+                let name = if args.count() >= 2 {
+                    args.argv(1).to_string()
+                } else {
+                    "reunion_edits".to_string()
+                };
+                p.lock().push(PendingAction::EditorLoadFile(name));
+            });
+        }
         {
             let p = pending.clone();
             cmds.add("say", move |args: &Args| {
@@ -3472,7 +3670,12 @@ impl App {
             combat_armor_scale: None,
             medkit_scale: None,
             armor_shard_scale: None,
+            lightning_beam_scale: None,
             prop_lights: hashbrown::HashMap::new(),
+            editor_enabled: false,
+            editor_selected: None,
+            editor_prop_scales: hashbrown::HashMap::new(),
+            editor_panel: crate::editor::EditorPanel::default(),
             player: PlayerMove::new(Vec3::ZERO),
             params: PhysicsParams::default(),
             console,
@@ -3628,6 +3831,7 @@ impl App {
             sfx_rocket_explode: None,
             sfx_hit: None,
             sfx_kill_confirm: None,
+            sfx_taunts: Vec::new(),
             sfx_humiliation: None,
             sfx_one_frag: None,
             sfx_two_frags: None,
@@ -3687,7 +3891,11 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        if on {
+        // **Editor mode override** (v0.9.6) — quand l'éditeur est actif,
+        // la souris reste libre quel que soit le `on` demandé : le user
+        // doit pouvoir cliquer dans le panneau UI et sur le terrain.
+        let effective_on = on && !self.editor_enabled;
+        if effective_on {
             let _ = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
@@ -3696,7 +3904,7 @@ impl App {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
         }
-        self.mouse_captured = on;
+        self.mouse_captured = effective_on;
     }
 
     /// Applique une action remontée par le menu principal. Centralisé ici
@@ -3732,6 +3940,26 @@ impl App {
                 }
             }
             MenuAction::Quit => event_loop.exit(),
+            MenuAction::ToggleEditor => {
+                self.editor_enabled = !self.editor_enabled;
+                info!(
+                    "menu/editor: {} ({} props placeables)",
+                    if self.editor_enabled { "ON" } else { "OFF" },
+                    self.rocks.len()
+                );
+                // Ferme le menu : le mode éditeur libère
+                // automatiquement la souris via `set_mouse_capture`
+                // (override quand `editor_enabled = true`).  Quand on
+                // sort de l'éditeur, on recapture la souris pour le FPS.
+                if self.world.is_some() || self.terrain.is_some() {
+                    self.menu.close();
+                    if self.editor_enabled {
+                        self.set_mouse_capture(false);
+                    } else {
+                        self.set_mouse_capture(true);
+                    }
+                }
+            }
             MenuAction::ApplyResolution { width, height } => {
                 if let Some(window) = self.window.as_ref() {
                     let _ = window.request_inner_size(
@@ -3996,6 +4224,8 @@ impl App {
         self.load_combat_armor_asset();
         self.load_medkit_asset();
         self.load_armor_shard_asset();
+        // **Lightning beam GLB** — arc electrique volumetrique pour le LG.
+        self.load_lightning_beam_asset();
 
         // Nouvelle map → on remet à zéro les projectiles / explosions de
         // l'ancienne instance pour éviter des frames fantômes.
@@ -4330,14 +4560,36 @@ impl App {
         self.load_combat_armor_asset();
         self.load_medkit_asset();
         self.load_armor_shard_asset();
+        // **Lightning beam GLB** — arc electrique volumetrique pour le LG.
+        self.load_lightning_beam_asset();
         // **Mode exploration** (v0.9.5++ user request) — quand
         // `br_bots=0`, on n'affiche QUE rochers + powerups sur le
         // terrain, sans statues / statue_femme / drones / hellhounds /
         // ring shrink.  Carte propre pour visite touristique.
         let exploration_mode = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
-        // **Rochers GLB** — gardés en exploration (décor minimal).
-        self.load_rock_asset();
-        self.spawn_br_rocks(&terrain);
+        // **Rochers GLB** — gardés sur les autres maps BR, retirés sur
+        // Reunion à la demande utilisateur (v0.9.6).
+        let is_reunion = name.eq_ignore_ascii_case("reunion");
+        if !is_reunion {
+            self.load_rock_asset();
+            self.spawn_br_rocks(&terrain);
+        }
+        // **Grass cluster GLB** — chargé pour usage éditeur uniquement
+        // (v0.9.6).  L'auto-spawn `spawn_reunion_grass_clusters` est
+        // désactivé : l'utilisateur place l'herbe à la main via le mode
+        // éditeur (commande `editor` ou bouton menu Options).
+        self.load_grass_cluster_asset();
+        // **Procedural grass** (v0.9.6) — herbe générée en code, scatter
+        // dense sur les zones végétales de Reunion.  Réactivé à la
+        // demande utilisateur après le retrait du grass_cluster auto.
+        if is_reunion {
+            self.load_grass_proc_asset();
+            self.spawn_reunion_grass_proc(&terrain);
+            // **Procedural rocks** (v0.9.6) — icosahédron 20-tri varié,
+            // 1200 instances scatter selon biome rock + altitude.
+            self.load_rock_proc_asset();
+            self.spawn_reunion_rocks_proc(&terrain);
+        }
         // **Statues GLB** — désactivées en exploration (user request).
         if !exploration_mode {
             self.load_statue_asset();
@@ -4365,6 +4617,10 @@ impl App {
             r.upload_terrain(terrain_arc.clone());
         }
         self.terrain = Some(terrain_arc);
+        // **Editor: auto-load** des placements manuels pour cette map
+        // (v0.9.6).  Cherche `assets/edits/<mapname>_edits.txt`.
+        let edits_name = format!("{}_edits", name);
+        self.editor_load_file(&edits_name);
         // **Mode exploration** (v0.9.5++) — pas de ring shrink quand
         // `br_bots=0` (sinon il tuerait le joueur en visite tranquille).
         let exploration_mode = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
@@ -4450,6 +4706,20 @@ impl App {
     /// aussi les lights extraites pour spawn au moment du place
     /// d'instance.
     fn load_prop_glb(&mut self, name: &str, paths: &[&str]) {
+        self.load_prop_glb_xform(name, paths, None);
+    }
+
+    /// **Variante avec transform mesh-space** — applique une matrice
+    /// glam aux positions+normales des vertices avant upload GPU.
+    /// Utile pour réorienter un asset GLB dont le bake (ex. Blender)
+    /// produit une convention d'axes incompatible (canon le long de Z
+    /// au lieu de X par exemple).
+    fn load_prop_glb_xform(
+        &mut self,
+        name: &str,
+        paths: &[&str],
+        pre_xform: Option<glam::Mat4>,
+    ) {
         let bases = resolve_asset_search_bases();
         let mut tried: Vec<String> = Vec::new();
         for base in &bases {
@@ -4461,15 +4731,29 @@ impl App {
                     Err(_) => continue,
                 };
                 match q3_model::glb::GlbMesh::from_glb_bytes(&bytes) {
-                    Ok(mesh) => {
+                    Ok(mut mesh) => {
+                        // Applique la pré-transform si demandée (ex.
+                        // -90° Y pour le railgun baké).
+                        if let Some(m) = pre_xform {
+                            let normal_m = glam::Mat3::from_mat4(m).inverse().transpose();
+                            for v in &mut mesh.vertices {
+                                let p = m * glam::Vec4::new(v.pos[0], v.pos[1], v.pos[2], 1.0);
+                                v.pos = [p.x, p.y, p.z];
+                                let n = (normal_m
+                                    * glam::Vec3::new(v.normal[0], v.normal[1], v.normal[2]))
+                                    .normalize_or_zero();
+                                v.normal = [n.x, n.y, n.z];
+                            }
+                        }
                         info!(
-                            "prop GLB '{}' chargé : '{}' ({} verts, {} idx, radius {:.1}, {} lights)",
+                            "prop GLB '{}' chargé : '{}' ({} verts, {} idx, radius {:.1}, {} lights){}",
                             name,
                             full.display(),
                             mesh.vertices.len(),
                             mesh.indices.len(),
                             mesh.radius(),
                             mesh.lights.len(),
+                            if pre_xform.is_some() { " [pre-xform]" } else { "" },
                         );
                         // Stocke les lights pour spawn au place.
                         self.prop_lights.insert(name.to_string(), mesh.lights.clone());
@@ -4544,12 +4828,14 @@ impl App {
             &["assets/models/statue.glb"],
         );
     }
+    #[allow(dead_code)]
     fn load_building_asset(&mut self) {
         self.load_prop_glb(
             "building",
             &["assets/models/building.glb"],
         );
     }
+    #[allow(dead_code)]
     fn load_hellhound_asset(&mut self) {
         self.load_prop_glb(
             "hellhound",
@@ -4562,10 +4848,345 @@ impl App {
             &["assets/models/statue_femme.glb"],
         );
     }
+    #[allow(dead_code)]
     fn load_grass_asset(&mut self) {
         self.load_prop_glb(
             "grass",
             &["assets/models/grass.glb"],
+        );
+    }
+    /// **Grass cluster GLB** — touffe d'herbe volumineuse (gros patch
+    /// d'herbes multiples).  Utilisé sur Reunion pour couvrir les zones
+    /// basses avec de la végétation dense et variée.  Target ~18u pour
+    /// un cluster à hauteur genou/cheville.
+    fn load_grass_cluster_asset(&mut self) {
+        self.load_prop_glb(
+            "grass_cluster",
+            &[
+                "assets/models/grass_cluster.glb",
+                "assets/models/grass_claster_downoad_like_please.glb",
+            ],
+        );
+    }
+
+    /// **Procedural grass tuft** (v0.9.6) — génère un mesh d'herbe en
+    /// code, sans dépendre d'un asset disque.  3 quads verticaux à 60°
+    /// d'écart (couverture 360° vue de dessus), avec gradient vertex
+    /// color (sombre racine → clair pointe).  Uploadé comme prop
+    /// `grass_proc` réutilisable par le système de scatter.
+    fn load_grass_proc_asset(&mut self) {
+        let mesh = make_grass_tuft_mesh();
+        info!(
+            "grass_proc: mesh procédural généré ({} verts, {} idx, radius {:.2})",
+            mesh.vertices.len(),
+            mesh.indices.len(),
+            mesh.radius(),
+        );
+        self.prop_lights.insert("grass_proc".to_string(), Vec::new());
+        if let Some(r) = self.renderer.as_mut() {
+            r.upload_prop("grass_proc", &mesh);
+        }
+    }
+
+    /// **Procedural rock mesh** (v0.9.6) — icosahédron 20 faces avec
+    /// perturbation déterministe par vertex (noise sphérique).  Flat
+    /// shading via duplication des verts par face, vertex colors gris-
+    /// brun variés.  Uploadé comme prop `rock_proc` réutilisable.
+    fn load_rock_proc_asset(&mut self) {
+        let mesh = make_rock_proc_mesh();
+        info!(
+            "rock_proc: mesh procédural généré ({} verts, {} idx, radius {:.2})",
+            mesh.vertices.len(),
+            mesh.indices.len(),
+            mesh.radius(),
+        );
+        self.prop_lights.insert("rock_proc".to_string(), Vec::new());
+        if let Some(r) = self.renderer.as_mut() {
+            r.upload_prop("rock_proc", &mesh);
+        }
+    }
+
+    /// **Spawn rochers procéduraux Reunion** (v0.9.6) — densité variable
+    /// selon biome rock + altitude.  Trois échelles : pebbles (petits
+    /// cailloux), rocks (rochers moyens), boulders (gros rochers).
+    /// Yaw + scale + tint aléatoires par instance.
+    fn spawn_reunion_rocks_proc(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("rock_proc"))
+            .unwrap_or(false);
+        if !has_mesh { return; }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("rock_proc"))
+            .unwrap_or(1.0);
+        // base_scale calibre le mesh à ~30u radius pour un "rock" moyen.
+        let base_scale = if r_native > 0.001 { 30.0 / r_native } else { 1.0 };
+
+        const MAX_ROCKS: usize = 1200;
+        const N_SAMPLES: usize = 8000;
+        let mut spawned = 0usize;
+
+        for k in 0..N_SAMPLES {
+            if spawned >= MAX_ROCKS { break; }
+
+            let h1 = (k.wrapping_mul(2654435761) ^ 0xA5A5_C3C3) as u32;
+            let h2 = (k.wrapping_mul(40503) ^ 0x55AA_F00D) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            let wx = terrain.meta.origin_x + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+
+            // Skip océan.
+            if wz <= terrain.meta.water_level + 2.0 { continue; }
+
+            // Densité dépend du biome + altitude :
+            //   - Sommets (z>800)   : densité haute, gros boulders
+            //   - Pentes rocheuses  : densité moyenne, mix
+            //   - Plaines végétales : densité faible, pebbles
+            let rock_w = terrain.biome_weight(wx, wy, 0);
+            let veg_w  = terrain.biome_weight(wx, wy, 2);
+            let altitude_factor = (wz / 800.0).clamp(0.0, 1.5);
+            let density_score = rock_w * 0.6 + altitude_factor * 0.5 - veg_w * 0.3;
+
+            let h3 = (k.wrapping_mul(73856093) ^ 0xC0DE_BABE) as u32;
+            let roll = (h3 & 0xff) as f32 / 255.0;
+            if roll > density_score { continue; }
+
+            // Catégorie de taille selon le biome :
+            let h_size = (k.wrapping_mul(1664525).wrapping_add(1013904223)) as u32;
+            let size_roll = (h_size & 0xff) as f32 / 255.0;
+            // Sommets → boulders dominants ; plaines → pebbles dominants
+            let scale_var = if altitude_factor > 0.6 {
+                if size_roll < 0.5 { 1.4 + size_roll * 0.6 }      // gros (1.4..1.7)
+                else if size_roll < 0.85 { 0.9 + size_roll * 0.4 }  // moyens (0.9..1.24)
+                else { 0.4 + size_roll * 0.3 }                       // petits (0.4..0.55)
+            } else if rock_w > 0.5 {
+                if size_roll < 0.3 { 1.1 + size_roll * 0.6 }
+                else if size_roll < 0.7 { 0.6 + size_roll * 0.5 }
+                else { 0.3 + size_roll * 0.2 }
+            } else {
+                // Plaines : essentiellement des pebbles.
+                0.25 + size_roll * 0.4
+            };
+
+            // Yaw aléatoire (rotation autour de l'up axis).
+            let h_yaw = (k.wrapping_mul(83492791) ^ 0x55AA) as u32;
+            let yaw = (h_yaw & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+
+            // Tint variation : gris-brun selon altitude.
+            //   - altitude haute : gris clair / blanc (granite)
+            //   - moyenne : gris moyen
+            //   - basse : brun-rougeâtre (basalte volcanique Reunion)
+            let h_tint = (k.wrapping_mul(22695477).wrapping_add(1)) as u32;
+            let tint_var = (h_tint & 0xff) as f32 / 255.0;
+            let tint = if altitude_factor > 0.7 {
+                let g = 0.78 + tint_var * 0.20;
+                [g, g, g * 0.96, 1.0]
+            } else if altitude_factor > 0.3 {
+                let g = 0.55 + tint_var * 0.25;
+                [g, g * 0.95, g * 0.88, 1.0]
+            } else {
+                let r_ = 0.45 + tint_var * 0.20;
+                [r_, r_ * 0.85, r_ * 0.72, 1.0]
+            };
+
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: base_scale * scale_var,
+                tint,
+                prop_name: "rock_proc",
+                terrain_normal: None, // rochers gardent leur up
+            });
+            spawned += 1;
+        }
+        info!(
+            "Reunion rock_proc: {} rochers procéduraux disséminés (radius={:.2}, base_scale={:.3})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    /// **Spawn grass procédural Reunion** (v0.9.6) — scatter dense
+    /// (1800 tufts) sur les zones végétales (biome veg > 0.3, altitude
+    /// < 600m, hors océan).  Variation par tuft : yaw aléatoire,
+    /// scale [0.7..1.4], tint vert ±10 %.  Aligné sur la normale du
+    /// terrain pour épouser les pentes.
+    fn spawn_reunion_grass_proc(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("grass_proc"))
+            .unwrap_or(false);
+        if !has_mesh { return; }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("grass_proc"))
+            .unwrap_or(1.0);
+        // Target world size ~28u — touffe d'herbe à hauteur cheville/genou.
+        let base_scale = if r_native > 0.001 { 28.0 / r_native } else { 1.0 };
+
+        const MAX_TUFTS: usize = 1800;
+        const N_SAMPLES: usize = 12_000;
+        let mut spawned = 0usize;
+
+        for k in 0..N_SAMPLES {
+            if spawned >= MAX_TUFTS { break; }
+
+            // Hash 2D pseudo-aléatoire déterministe.
+            let h1 = (k.wrapping_mul(2654435761) ^ 0x517C_C1B7) as u32;
+            let h2 = (k.wrapping_mul(40503) ^ 0x9E37_79B9) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            let wx = terrain.meta.origin_x + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+
+            // Skip océan + altitude.
+            if wz <= terrain.meta.water_level + 4.0 || wz > 600.0 {
+                continue;
+            }
+            // Filtre biome végétation.
+            let veg = terrain.biome_weight(wx, wy, 2);
+            if veg < 0.30 { continue; }
+            // Skip zones très rocheuses (canal 0).
+            let rock = terrain.biome_weight(wx, wy, 0);
+            if rock > 0.65 { continue; }
+            // Densité scaled par poids végé.
+            let h3 = (k.wrapping_mul(73856093) ^ 0xBEEF_CAFE) as u32;
+            if (h3 & 0xff) as f32 / 255.0 > veg { continue; }
+
+            // Yaw aléatoire.
+            let h4 = (k.wrapping_mul(83492791) ^ 0xDEAD_F00D) as u32;
+            let yaw = (h4 & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+            // Scale aléatoire.
+            let h5 = (k.wrapping_mul(2246822519) ^ 0xC0DE) as u32;
+            let scale_var = 0.7 + (h5 & 0xff) as f32 / 255.0 * 0.7;
+            // Tint vert avec variation.
+            let h6 = (k.wrapping_mul(22695477).wrapping_add(1)) as u32;
+            let g_var = 0.85 + (h6 & 0x7f) as f32 / 127.0 * 0.15;
+            let tint = [0.85, g_var, 0.75, 1.0];
+
+            // Normale terrain pour alignement à la pente.
+            let n = terrain.normal_at(wx, wy);
+
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: base_scale * scale_var,
+                tint,
+                prop_name: "grass_proc",
+                terrain_normal: Some([n.x, n.y, n.z]),
+            });
+            spawned += 1;
+        }
+        info!(
+            "Reunion grass_proc: {} tufts disséminés (radius={:.2}, base_scale={:.3})",
+            spawned, r_native, base_scale
+        );
+    }
+    /// **Spawn grass clusters Reunion** (v0.9.6) — patches de végétation
+    /// dense disséminés dans les zones basses et moyennes de l'île
+    /// (altitude < 500m, poids végétation > 0.35).  Densité élevée
+    /// (~800 touffes) pour un rendu luxuriant tropical.  Variété par
+    /// scale aléatoire [0.6..1.3] + tint vert subtil [0.85..1.0].
+    ///
+    /// **Désactivé v0.9.6** — l'auto-spawn ne respectait pas la pente
+    /// du terrain de manière satisfaisante.  L'éditeur manuel
+    /// (`editor`) prend le relais.  Conservé pour usage console
+    /// éventuel.
+    #[allow(dead_code)]
+    fn spawn_reunion_grass_clusters(&mut self, terrain: &q3_terrain::Terrain) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("grass_cluster"))
+            .unwrap_or(false);
+        if !has_mesh {
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("grass_cluster"))
+            .unwrap_or(1.0);
+        // Target world size ~18u — touffe d'herbe volumineuse, un
+        // peu plus grosse qu'un rocher petit.
+        let base_scale = if r_native > 0.001 { 18.0 / r_native } else { 1.0 };
+
+        const MAX_CLUSTERS: usize = 800;
+        const N_SAMPLES: usize = 6000;
+        let mut spawned = 0usize;
+
+        for k in 0..N_SAMPLES {
+            if spawned >= MAX_CLUSTERS { break; }
+
+            // Hash pseudo-aléatoire déterministe — seed différent de
+            // spawn_br_grass pour ne pas se superposer.
+            let h1 = (k.wrapping_mul(1103515245).wrapping_add(12345) ^ 0xDEAD_CAFE) as u32;
+            let h2 = (k.wrapping_mul(214013).wrapping_add(2531011) ^ 0xBEEF_F00D) as u32;
+            let gx = (h1 % terrain.width as u32) as usize;
+            let gy = (h2 % terrain.height as u32) as usize;
+            let wx = terrain.meta.origin_x + gx as f32 * terrain.meta.units_per_sample;
+            let wy = terrain.meta.origin_y + gy as f32 * terrain.meta.units_per_sample;
+            let wz = terrain.height_at(wx, wy);
+
+            // Skip : océan (+5m marge), haute altitude (>500m = roche nue).
+            if wz <= terrain.meta.water_level + 5.0 || wz > 500.0 {
+                continue;
+            }
+
+            // Filtre biome : poids végétation canal 2 (vert) > 0.35.
+            let veg = terrain.biome_weight(wx, wy, 2);
+            if veg < 0.35 {
+                continue;
+            }
+            // Skip zones très rocheuses (canal 0 > 0.7) — on laisse
+            // la roche nue visible.
+            let rock = terrain.biome_weight(wx, wy, 0);
+            if rock > 0.7 {
+                continue;
+            }
+
+            // Probabilité de spawn proportionnelle au poids végé.
+            let h3 = (k.wrapping_mul(48271) ^ 0xA5A5) as u32;
+            if (h3 & 0xff) as f32 / 255.0 > veg {
+                continue;
+            }
+
+            // Yaw aléatoire [0..2π].
+            let yaw_h = (k.wrapping_mul(196314165).wrapping_add(907633515)) as u32;
+            let yaw = (yaw_h & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+
+            // Scale aléatoire [0.6..1.3] — variété visuelle.
+            let scale_h = (k.wrapping_mul(1664525).wrapping_add(1013904223)) as u32;
+            let scale_rand = 0.6 + (scale_h & 0xff) as f32 / 255.0 * 0.7;
+
+            // Tint vert subtil — légère variation de couleur pour
+            // casser l'uniformité.  Vert tropical saturé.
+            let tint_h = (k.wrapping_mul(22695477).wrapping_add(1)) as u32;
+            let g_var = 0.85 + (tint_h & 0x7f) as f32 / 127.0 * 0.15;
+            let tint = [0.90, g_var, 0.80, 1.0];
+
+            // Normale terrain → l'herbe épouse la pente.
+            let n = terrain.normal_at(wx, wy);
+            self.rocks.push(RockProp {
+                pos: Vec3::new(wx, wy, wz),
+                yaw,
+                scale: base_scale * scale_rand,
+                tint,
+                prop_name: "grass_cluster",
+                terrain_normal: Some([n.x, n.y, n.z]),
+            });
+            spawned += 1;
+        }
+        info!(
+            "Reunion: {} grass clusters disséminés (radius={:.2}, scale={:.3})",
+            spawned, r_native, base_scale
         );
     }
     fn load_quad_pickup_asset(&mut self) {
@@ -4601,15 +5222,22 @@ impl App {
         }
     }
     fn load_railgun_pickup_asset(&mut self) {
-        self.load_prop_glb(
+        // **Pré-transform** : rotation π autour de Y mesh-local au load.
+        // Le baked GLB a son canon à mesh -Z. La baseline viewmodel
+        // (-right, +up, +forward) mappe mesh +Z → world forward.
+        // Une rotation 180° autour de Y inverse Z : mesh -Z → +Z, donc
+        // canon → forward. (-π/2 testé → canon gauche ; π = vrai forward.)
+        let xform = glam::Mat4::from_rotation_y(std::f32::consts::PI);
+        self.load_prop_glb_xform(
             "railgun_pickup",
             &["assets/models/railgun_pickup.glb"],
+            Some(xform),
         );
-        // Target world size ~30u — taille d'un weapon pickup Q3.
+        // Target world size ~70u — gros pour bien voir le détail PBR.
         if let Some(r) = self.renderer.as_ref() {
             if let Some(radius) = r.prop_radius("railgun_pickup") {
                 if radius > 0.001 {
-                    self.railgun_pickup_scale = Some(30.0 / radius);
+                    self.railgun_pickup_scale = Some(45.0 / radius);
                     info!(
                         "railgun_pickup: native radius={:.2}, scale auto={:.3}",
                         radius,
@@ -4853,13 +5481,12 @@ impl App {
             "shotgun_ammo",
             &["assets/models/shotgun_ammo.glb"],
         );
-        // Target world size ~18u (un peu plus petit que les autres
-        // ammo crates ~25u — user request : cartouches calibre 12 plus
-        // petites au sol qu'une vraie caisse de munitions).
+        // Target world size ~32u — boîte ammo fusil bien visible (user
+        // request v0.9.6 : la précédente cible 18u était trop petite).
         if let Some(r) = self.renderer.as_ref() {
             if let Some(radius) = r.prop_radius("shotgun_ammo") {
                 if radius > 0.001 {
-                    self.shotgun_ammo_scale = Some(18.0 / radius);
+                    self.shotgun_ammo_scale = Some(32.0 / radius);
                     info!(
                         "shotgun_ammo: native radius={:.2}, scale auto={:.3}",
                         radius,
@@ -5024,11 +5651,629 @@ impl App {
             }
         }
     }
+    #[allow(dead_code)]
     fn load_tropical_asset(&mut self) {
         self.load_prop_glb(
             "tropical",
             &["assets/models/tropical_pack.glb", "assets/models/tropical.glb"],
         );
+    }
+    /// **Lightning beam GLB** — charge le mesh d'arc electrique
+    /// (chain_lightning) pour affichage volumetrique le long du
+    /// faisceau LG.  Target ~8u de rayon — le mesh sera etire le
+    /// long de l'axe du tir et repete plusieurs fois.
+    fn load_lightning_beam_asset(&mut self) {
+        self.load_prop_glb(
+            "lightning_beam",
+            &[
+                "assets/models/lightning_beam.glb",
+                "assets/models/lighting_pack_chain_lighting.glb",
+            ],
+        );
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius("lightning_beam") {
+                if radius > 0.001 {
+                    self.lightning_beam_scale = Some(8.0 / radius);
+                    info!(
+                        "lightning_beam: native radius={:.2}, scale auto={:.3}",
+                        radius,
+                        self.lightning_beam_scale.unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  Editor mode helpers (v0.9.6)
+    // ────────────────────────────────────────────────────────────
+
+    /// **Editor: charge un GLB arbitraire** depuis un chemin disque
+    /// comme prop nommé.  Le path peut être absolu ou relatif aux
+    /// asset bases (CWD, exe dir, assets/).  Une fois chargé, le prop
+    /// est utilisable via `ed_spawn <name>`.
+    fn editor_load_glb(&mut self, prop_name: &str, glb_path: &str) {
+        // On délègue à `load_prop_glb` qui gère déjà la recherche
+        // multi-bases et l'upload renderer.
+        self.load_prop_glb(prop_name, &[glb_path]);
+        // Calcule un scale auto pour atteindre une taille raisonnable
+        // (~30u radius) et le mémorise pour `ed_spawn`.
+        if let Some(r) = self.renderer.as_ref() {
+            if let Some(radius) = r.prop_radius(prop_name) {
+                if radius > 0.001 {
+                    let auto = 30.0 / radius;
+                    self.editor_prop_scales.insert(prop_name.to_string(), auto);
+                    info!(
+                        "editor: '{}' chargé, radius={:.2}, scale auto={:.3}",
+                        prop_name, radius, auto
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Editor: spawn un prop au point visé** par le crosshair.
+    /// Raycast depuis l'oeil du joueur le long du forward vector,
+    /// distance max 4096u.  Si BR : trace contre `Terrain`.
+    /// Si BSP : trace contre `World`.
+    fn editor_spawn_at_aim(&mut self, prop_name: &str, scale_override: Option<f32>) {
+        // Vérifie que le prop est connu du renderer.
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop(prop_name))
+            .unwrap_or(false);
+        if !has_mesh {
+            warn!(
+                "editor: prop '{}' non chargé. Utilise `ed_load_glb {} <chemin.glb>` d'abord.",
+                prop_name, prop_name
+            );
+            return;
+        }
+
+        // Position de tir = oeil joueur ; direction = forward depuis
+        // pitch/yaw (convention Q3 : pitch+ = vers le bas).
+        let eye = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+        let yaw_rad = self.player.view_angles.yaw.to_radians();
+        let pitch_rad = self.player.view_angles.pitch.to_radians();
+        let cy = yaw_rad.cos();
+        let sy = yaw_rad.sin();
+        let cp = pitch_rad.cos();
+        let sp = pitch_rad.sin();
+        // Q3: pitch positif = vers le bas → -sin(pitch) sur l'axe Z.
+        let fwd = Vec3::new(cp * cy, cp * sy, -sp);
+        const MAX_DIST: f32 = 4096.0;
+        let end = eye + fwd * MAX_DIST;
+
+        // Détermine le hit point.
+        let hit_pos = if let Some(terrain) = self.terrain.as_ref() {
+            let tr = terrain.trace_ray(eye, end);
+            if tr.fraction < 1.0 {
+                Some(eye + (end - eye) * tr.fraction)
+            } else { None }
+        } else if let Some(world) = self.world.as_ref() {
+            let tr = world.collision.trace_ray(eye, end, q3_collision::Contents::MASK_SHOT);
+            if tr.fraction < 1.0 {
+                Some(eye + (end - eye) * tr.fraction)
+            } else { None }
+        } else {
+            None
+        };
+
+        let Some(hit_pos) = hit_pos else {
+            warn!("editor: rien sous le crosshair (max {}u)", MAX_DIST as i32);
+            return;
+        };
+
+        // Scale : override ou cache éditeur ou défaut (1.0).
+        let scale = scale_override
+            .or_else(|| self.editor_prop_scales.get(prop_name).copied())
+            .unwrap_or(1.0);
+
+        // Yaw : aligné sur la direction de regard du joueur.
+        let yaw = yaw_rad;
+
+        let new_idx = self.rocks.len();
+        // prop_name doit être &'static — on cherche dans le tableau
+        // des prop names connus, sinon on leak la string.
+        let static_name: &'static str = static_prop_name(prop_name);
+        self.rocks.push(RockProp {
+            pos: hit_pos,
+            yaw,
+            scale,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            prop_name: static_name,
+            terrain_normal: None,
+        });
+        self.editor_selected = Some(new_idx);
+        info!(
+            "editor: spawn '{}' #{} pos=({:.0},{:.0},{:.0}) scale={:.3}",
+            prop_name, new_idx, hit_pos.x, hit_pos.y, hit_pos.z, scale
+        );
+    }
+
+    /// **Editor: sélectionne le prop le plus proche du crosshair**
+    /// (raycast → distance min au point d'impact).  Sélectionne le
+    /// prop dont le centre est dans un rayon de 256u du hit point.
+    fn editor_select_aim(&mut self) {
+        let eye = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+        let yaw_rad = self.player.view_angles.yaw.to_radians();
+        let pitch_rad = self.player.view_angles.pitch.to_radians();
+        let fwd = Vec3::new(
+            pitch_rad.cos() * yaw_rad.cos(),
+            pitch_rad.cos() * yaw_rad.sin(),
+            -pitch_rad.sin(),
+        );
+        const MAX_DIST: f32 = 4096.0;
+        let end = eye + fwd * MAX_DIST;
+
+        let hit_pos = if let Some(terrain) = self.terrain.as_ref() {
+            let tr = terrain.trace_ray(eye, end);
+            if tr.fraction < 1.0 {
+                eye + (end - eye) * tr.fraction
+            } else { return; }
+        } else if let Some(world) = self.world.as_ref() {
+            let tr = world.collision.trace_ray(eye, end, q3_collision::Contents::MASK_SHOT);
+            if tr.fraction < 1.0 {
+                eye + (end - eye) * tr.fraction
+            } else { return; }
+        } else { return; };
+
+        // Scan tous les rocks et garde le plus proche du hit_pos.
+        let mut best: Option<(usize, f32)> = None;
+        for (i, p) in self.rocks.iter().enumerate() {
+            let d2 = (p.pos - hit_pos).length_squared();
+            if best.map_or(true, |(_, bd)| d2 < bd) {
+                best = Some((i, d2));
+            }
+        }
+        if let Some((i, d2)) = best {
+            // Tolérance 256u — au-dela on considère qu'on n'a rien visé.
+            if d2 < 256.0 * 256.0 {
+                self.editor_selected = Some(i);
+                let p = &self.rocks[i];
+                info!(
+                    "editor: ed_pick → #{} '{}' à {:.0}u",
+                    i, p.prop_name, d2.sqrt()
+                );
+            } else {
+                info!("editor: ed_pick — aucun prop assez proche du crosshair ({:.0}u)", d2.sqrt());
+            }
+        }
+    }
+
+    /// **Editor: import GLB via dialog natif Windows** — ouvre un
+    /// FileDialog rfd, l'utilisateur choisit un .glb local, on déduit
+    /// le prop_name du nom de fichier (sans extension) et on charge.
+    fn editor_import_glb_dialog(&mut self) {
+        let res = rfd::FileDialog::new()
+            .add_filter("glTF binary", &["glb"])
+            .set_title("Importer un GLB pour le mode éditeur")
+            .pick_file();
+        let Some(path) = res else {
+            info!("editor: import annulé");
+            return;
+        };
+        // Nom = stem du path (lowercased, alphanum/underscore).
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("imported");
+        let prop_name: String = stem
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect();
+        let path_str = path.to_string_lossy().to_string();
+        self.editor_load_glb(&prop_name, &path_str);
+        // Sélectionne automatiquement comme prop actif.
+        self.editor_panel.active_prop = Some(prop_name);
+    }
+
+    /// **Editor: gère un clic souris en mode éditeur**. Si c'est sur
+    /// le panneau UI → action correspondante. Si c'est dans la scène
+    /// 3D → spawn le prop actif au point cliqué (raycast écran→monde).
+    fn editor_handle_click(&mut self, cursor_x: f32, cursor_y: f32) {
+        let (sw, sh) = self
+            .window
+            .as_ref()
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width as f32, s.height as f32)
+            })
+            .unwrap_or((self.init_width as f32, self.init_height as f32));
+
+        // Construit le PanelView
+        let loaded: Vec<(String, f32)> = self
+            .editor_prop_scales
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let placed: Vec<(usize, &str, [f32; 3])> = self
+            .rocks
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, p.prop_name, [p.pos.x, p.pos.y, p.pos.z]))
+            .collect();
+        let view = crate::editor::PanelView {
+            loaded_props: &loaded,
+            placed_props: &placed,
+            selected_idx: self.editor_selected,
+        };
+        let action = crate::editor::hit_test(
+            &mut self.editor_panel, &view, cursor_x, cursor_y, sw, sh,
+        );
+
+        use crate::editor::EditorClick;
+        match action {
+            EditorClick::None => {}
+            EditorClick::ImportGlb => {
+                self.editor_import_glb_dialog();
+            }
+            EditorClick::SelectActiveProp(name) => {
+                info!("editor: prop actif → '{}' (clic en monde pour spawn)", name);
+                self.editor_panel.active_prop = Some(name);
+            }
+            EditorClick::SelectPlaced(idx) => {
+                self.editor_selected = Some(idx);
+                if let Some(p) = self.rocks.get(idx) {
+                    info!(
+                        "editor: sélectionné #{} '{}' pos=({:.0},{:.0},{:.0})",
+                        idx, p.prop_name, p.pos.x, p.pos.y, p.pos.z
+                    );
+                }
+            }
+            EditorClick::SpawnAtAim => {
+                self.editor_spawn_at_cursor(cursor_x, cursor_y, sw, sh);
+            }
+            EditorClick::ScaleMul(f) => {
+                if let Some(i) = self.editor_selected {
+                    if let Some(p) = self.rocks.get_mut(i) {
+                        p.scale = (p.scale * f).max(0.001);
+                    }
+                }
+            }
+            EditorClick::YawAdd(deg) => {
+                if let Some(i) = self.editor_selected {
+                    if let Some(p) = self.rocks.get_mut(i) {
+                        p.yaw += deg.to_radians();
+                    }
+                }
+            }
+            EditorClick::ToggleAlign => {
+                if let Some(i) = self.editor_selected {
+                    let pos = self.rocks.get(i).map(|p| p.pos);
+                    if let (Some(pos), Some(terrain)) = (pos, self.terrain.as_ref()) {
+                        let n = terrain.normal_at(pos.x, pos.y);
+                        if let Some(p) = self.rocks.get_mut(i) {
+                            p.terrain_normal = if p.terrain_normal.is_some() {
+                                None
+                            } else {
+                                Some([n.x, n.y, n.z])
+                            };
+                        }
+                    }
+                }
+            }
+            EditorClick::Delete => {
+                if let Some(i) = self.editor_selected {
+                    if i < self.rocks.len() {
+                        self.rocks.remove(i);
+                        self.editor_selected = None;
+                    }
+                }
+            }
+            EditorClick::Save => {
+                let name = self
+                    .terrain
+                    .as_ref()
+                    .map(|t| format!("{}_edits", t.meta.name))
+                    .unwrap_or_else(|| "reunion_edits".to_string());
+                self.editor_save(&name);
+            }
+            EditorClick::Load => {
+                let name = self
+                    .terrain
+                    .as_ref()
+                    .map(|t| format!("{}_edits", t.meta.name))
+                    .unwrap_or_else(|| "reunion_edits".to_string());
+                self.editor_load_file(&name);
+            }
+            EditorClick::Close => {
+                self.editor_enabled = false;
+                self.set_mouse_capture(true);
+            }
+        }
+    }
+
+    /// **Editor: spawn le prop actif au point sous le curseur**
+    /// (raycast écran → terrain).
+    fn editor_spawn_at_cursor(&mut self, cx: f32, cy: f32, sw: f32, sh: f32) {
+        let Some(prop_name) = self.editor_panel.active_prop.clone() else {
+            warn!("editor: pas de prop actif (clique sur un nom dans la liste)");
+            return;
+        };
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop(&prop_name))
+            .unwrap_or(false);
+        if !has_mesh {
+            warn!("editor: prop '{}' non chargé", prop_name);
+            return;
+        }
+        // Caméra view×proj → inverse pour déprojection.
+        let Some(r) = self.renderer.as_mut() else { return; };
+        let view_proj = r.camera_mut().view_proj();
+        let inv_vp = view_proj.inverse();
+        let cam_pos_q3 = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+        let cam_pos = glam::Vec3::new(cam_pos_q3.x, cam_pos_q3.y, cam_pos_q3.z);
+        let (origin, dir) = crate::editor::screen_to_ray(
+            glam::Vec2::new(cx, cy),
+            glam::Vec2::new(sw, sh),
+            inv_vp,
+            cam_pos,
+        );
+        if dir.length_squared() < 1e-6 {
+            warn!("editor: rayon dégénéré");
+            return;
+        }
+        const MAX_DIST: f32 = 8192.0;
+        let q3_origin = Vec3::new(origin.x, origin.y, origin.z);
+        let q3_dir = Vec3::new(dir.x, dir.y, dir.z);
+        let q3_end = q3_origin + q3_dir * MAX_DIST;
+
+        let hit_pos = if let Some(terrain) = self.terrain.as_ref() {
+            let tr = terrain.trace_ray(q3_origin, q3_end);
+            if tr.fraction < 1.0 {
+                Some(q3_origin + (q3_end - q3_origin) * tr.fraction)
+            } else { None }
+        } else if let Some(world) = self.world.as_ref() {
+            let tr = world.collision.trace_ray(
+                q3_origin, q3_end, q3_collision::Contents::MASK_SHOT,
+            );
+            if tr.fraction < 1.0 {
+                Some(q3_origin + (q3_end - q3_origin) * tr.fraction)
+            } else { None }
+        } else {
+            None
+        };
+
+        let Some(hit_pos) = hit_pos else {
+            info!("editor: clic hors-monde");
+            return;
+        };
+
+        let scale = self
+            .editor_prop_scales
+            .get(&prop_name)
+            .copied()
+            .unwrap_or(1.0);
+        let yaw = self.player.view_angles.yaw.to_radians();
+        let static_name = static_prop_name(&prop_name);
+        let new_idx = self.rocks.len();
+        self.rocks.push(RockProp {
+            pos: hit_pos,
+            yaw,
+            scale,
+            tint: [1.0, 1.0, 1.0, 1.0],
+            prop_name: static_name,
+            terrain_normal: None,
+        });
+        self.editor_selected = Some(new_idx);
+        info!(
+            "editor: clic-spawn '{}' #{} ({:.0},{:.0},{:.0})",
+            prop_name, new_idx, hit_pos.x, hit_pos.y, hit_pos.z
+        );
+    }
+
+    /// **Editor: dessine le panneau UI** sur le frame courant.
+    /// Free helper (pas de méthode) pour éviter les conflits de
+    /// borrow avec `self.renderer.as_mut()` qui détient `r`.
+    /// Appelé depuis le HUD pass quand `editor_enabled` est vrai.
+    #[allow(clippy::too_many_arguments)]
+    fn editor_draw_panel_static(
+        r: &mut q3_renderer::Renderer,
+        panel: &crate::editor::EditorPanel,
+        rocks: &[RockProp],
+        editor_prop_scales: &hashbrown::HashMap<String, f32>,
+        editor_selected: Option<usize>,
+        sw: f32,
+        sh: f32,
+    ) {
+        let (px, py, pw, ph) = crate::editor::panel_bounds(panel, sw, sh);
+        // Fond semi-opaque sombre.
+        r.push_rect(px, py, pw, ph, [0.05, 0.05, 0.08, 0.85]);
+        // Bordure en trait jaune.
+        let bc = [0.9, 0.85, 0.30, 1.0];
+        r.push_rect(px, py, pw, 1.0, bc);
+        r.push_rect(px, py + ph - 1.0, pw, 1.0, bc);
+        r.push_rect(px, py, 1.0, ph, bc);
+        r.push_rect(px + pw - 1.0, py, 1.0, ph, bc);
+
+        let lh = panel.line_h;
+        let mut y = py + 12.0;
+        let scale = 12.0_f32;
+        let pad_x = 8.0;
+        let txt_y_off = 4.0;
+
+        // Titre
+        let title = format!("EDITOR ({} props)", rocks.len());
+        r.push_text(px + pad_x, y + txt_y_off, scale + 2.0, [1.0, 0.85, 0.30, 1.0], &title);
+        y += lh;
+
+        // Bouton IMPORT GLB
+        r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, [0.20, 0.40, 0.20, 1.0]);
+        r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], "  + IMPORT GLB...");
+        y += lh + 6.0;
+
+        // Section: props chargés
+        r.push_text(px + pad_x, y + txt_y_off, scale, [0.7, 0.7, 0.7, 1.0], "PROPS CHARGES (clic = actif)");
+        y += lh;
+        // Liste
+        let active = panel.active_prop.as_deref().unwrap_or("");
+        let mut loaded: Vec<&String> = editor_prop_scales.keys().collect();
+        loaded.sort();
+        for name in &loaded {
+            let is_active = name.as_str() == active;
+            let bg = if is_active { [0.30, 0.30, 0.55, 1.0] } else { [0.10, 0.10, 0.14, 1.0] };
+            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, bg);
+            let prefix = if is_active { ">> " } else { "   " };
+            r.push_text(
+                px + pad_x, y + txt_y_off, scale,
+                [0.95, 0.95, 0.95, 1.0],
+                &format!("{}{}", prefix, name),
+            );
+            y += lh;
+        }
+        y += 6.0;
+
+        // Boutons d'action
+        let actions = [
+            ("scale +",       [0.20, 0.30, 0.50, 1.0]),
+            ("scale -",       [0.20, 0.30, 0.50, 1.0]),
+            ("yaw +15",       [0.20, 0.30, 0.50, 1.0]),
+            ("yaw -15",       [0.20, 0.30, 0.50, 1.0]),
+            ("toggle align",  [0.30, 0.30, 0.20, 1.0]),
+            ("delete",        [0.55, 0.15, 0.15, 1.0]),
+        ];
+        for (label, color) in &actions {
+            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, *color);
+            r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], label);
+            y += lh;
+        }
+        y += 6.0;
+
+        // Save/Load/Close
+        let footer = [
+            ("save",         [0.15, 0.40, 0.20, 1.0]),
+            ("load",         [0.15, 0.40, 0.20, 1.0]),
+            ("close editor", [0.40, 0.20, 0.20, 1.0]),
+        ];
+        for (label, color) in &footer {
+            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, *color);
+            r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], label);
+            y += lh;
+        }
+        y += 6.0;
+
+        // Section: props placés (cliquable)
+        r.push_text(px + pad_x, y + txt_y_off, scale, [0.7, 0.7, 0.7, 1.0], "PROPS PLACES (clic = select)");
+        y += lh;
+
+        // Détermine combien de lignes restent dans la zone visible
+        let max_lines = ((py + ph - y - 8.0) / lh).floor() as usize;
+        let total = rocks.len();
+        let show = total.min(max_lines);
+        for k in 0..show {
+            let idx = k;
+            let p = &rocks[idx];
+            let is_sel = editor_selected == Some(idx);
+            let bg = if is_sel { [0.50, 0.30, 0.15, 1.0] } else { [0.10, 0.10, 0.14, 1.0] };
+            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, bg);
+            let line = format!(
+                "#{:3} {:<14} ({:>5.0},{:>5.0})",
+                idx, &p.prop_name[..p.prop_name.len().min(14)], p.pos.x, p.pos.y
+            );
+            r.push_text(px + pad_x, y + txt_y_off, scale, [0.95, 0.95, 0.95, 1.0], &line);
+            y += lh;
+        }
+
+        // Réticule au centre écran (croix simple) pour aim spawn fallback.
+        let cx = sw * 0.5;
+        let cy = sh * 0.5;
+        r.push_rect(cx - 6.0, cy - 0.5, 12.0, 1.0, [1.0, 0.85, 0.30, 0.9]);
+        r.push_rect(cx - 0.5, cy - 6.0, 1.0, 12.0, [1.0, 0.85, 0.30, 0.9]);
+    }
+
+    /// **Editor: sauvegarde** la liste des props dans
+    /// `assets/edits/<name>.txt`.  Format texte ligne-par-prop :
+    /// `<prop_name> <x> <y> <z> <scale> <yaw_rad> <align: 0|1>`
+    fn editor_save(&self, name: &str) {
+        use std::fmt::Write;
+        let mut out = String::new();
+        out.push_str("# q3-rust editor save — format: name x y z scale yaw align\n");
+        for p in &self.rocks {
+            let align = if p.terrain_normal.is_some() { 1 } else { 0 };
+            let _ = writeln!(
+                out,
+                "{} {} {} {} {} {} {}",
+                p.prop_name, p.pos.x, p.pos.y, p.pos.z, p.scale, p.yaw, align
+            );
+        }
+        let bases = resolve_asset_search_bases();
+        let base = bases.first().cloned().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let dir = base.join("assets").join("edits");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!("editor: impossible de créer {}: {}", dir.display(), e);
+            return;
+        }
+        let path = dir.join(format!("{}.txt", name));
+        match std::fs::write(&path, out) {
+            Ok(_) => info!("editor: {} props sauvés → {}", self.rocks.len(), path.display()),
+            Err(e) => warn!("editor: échec sauvegarde {}: {}", path.display(), e),
+        }
+    }
+
+    /// **Editor: charge** un fichier `assets/edits/<name>.txt` et
+    /// ajoute ses props à `self.rocks`.  Les props inconnus du
+    /// renderer sont skippés avec un warn.
+    fn editor_load_file(&mut self, name: &str) {
+        let bases = resolve_asset_search_bases();
+        let mut content: Option<String> = None;
+        for base in &bases {
+            let path = base.join("assets").join("edits").join(format!("{}.txt", name));
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                info!("editor: chargement {}", path.display());
+                content = Some(s);
+                break;
+            }
+        }
+        let Some(content) = content else {
+            warn!("editor: fichier '{}.txt' introuvable dans assets/edits/", name);
+            return;
+        };
+        let mut loaded = 0usize;
+        let mut skipped = 0usize;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            if toks.len() < 7 { continue; }
+            let prop_name = toks[0];
+            let x: f32 = toks[1].parse().unwrap_or(0.0);
+            let y: f32 = toks[2].parse().unwrap_or(0.0);
+            let z: f32 = toks[3].parse().unwrap_or(0.0);
+            let scale: f32 = toks[4].parse().unwrap_or(1.0);
+            let yaw: f32 = toks[5].parse().unwrap_or(0.0);
+            let align: i32 = toks[6].parse().unwrap_or(0);
+
+            let has_mesh = self
+                .renderer
+                .as_ref()
+                .map(|r| r.has_prop(prop_name))
+                .unwrap_or(false);
+            if !has_mesh {
+                skipped += 1;
+                continue;
+            }
+            let static_name = static_prop_name(prop_name);
+            let terrain_normal = if align != 0 {
+                self.terrain.as_ref().map(|t| {
+                    let n = t.normal_at(x, y);
+                    [n.x, n.y, n.z]
+                })
+            } else { None };
+            self.rocks.push(RockProp {
+                pos: Vec3::new(x, y, z),
+                yaw,
+                scale,
+                tint: [1.0, 1.0, 1.0, 1.0],
+                prop_name: static_name,
+                terrain_normal,
+            });
+            loaded += 1;
+        }
+        info!("editor: {} props chargés, {} skippés (mesh manquant)", loaded, skipped);
     }
 
     /// **Spawn rochers BR** — disséminés sur les zones rocheuses
@@ -5112,6 +6357,7 @@ impl App {
                 scale: scale * base_rock_scale,
                 tint: [1.0, 1.0, 1.0, 1.0],
                 prop_name: "rock",
+                terrain_normal: None,
             });
             spawned += 1;
             if spawned >= 400 {
@@ -5174,6 +6420,7 @@ impl App {
                 scale: base_scale,
                 tint: [1.0, 1.0, 1.0, 1.0],
                 prop_name: "statue",
+                terrain_normal: None,
             });
             spawned += 1;
         }
@@ -5187,6 +6434,7 @@ impl App {
     /// en zones végétales basse altitude (splat veg > 0.5, z < 400m).
     /// Densité élevée (~600 touffes) pour casser l'uniforme du sol
     /// vert.  Auto-scale ~25u (touffe d'herbe à hauteur cheville).
+    #[allow(dead_code)]
     fn spawn_br_grass(&mut self, terrain: &q3_terrain::Terrain) {
         let has_mesh = self
             .renderer
@@ -5235,6 +6483,7 @@ impl App {
                 scale: base_scale * scale,
                 tint: [1.0, 1.0, 1.0, 1.0],
                 prop_name: "grass",
+                terrain_normal: None,
             });
             spawned += 1;
             if spawned >= 600 {
@@ -5286,6 +6535,7 @@ impl App {
                 scale: base_scale,
                 tint: [1.0, 1.0, 1.0, 1.0],
                 prop_name: "statue_femme",
+                terrain_normal: None,
             });
             spawned += 1;
         }
@@ -5297,6 +6547,7 @@ impl App {
 
     /// **Spawn hellhounds BR** (v0.9.5++) — décors statiques style
     /// Quake autour des POI Forest + Volcano. Petite meute par POI.
+    #[allow(dead_code)]
     fn spawn_br_hellhounds(&mut self, terrain: &q3_terrain::Terrain) {
         use q3_terrain::PoiKind;
         let has_mesh = self
@@ -5343,6 +6594,7 @@ impl App {
                     scale: base_scale,
                     tint: [1.0, 1.0, 1.0, 1.0],
                     prop_name: "hellhound",
+                    terrain_normal: None,
                 });
                 spawned += 1;
             }
@@ -5358,6 +6610,7 @@ impl App {
     /// quartiers urbains.  3-6 buildings par POI urbain en cercle
     /// autour du centre.  Auto-scale ~250u (immeuble).  Yaw aligné
     /// approximativement face au centre POI pour suggérer une rue.
+    #[allow(dead_code)]
     fn spawn_br_buildings(&mut self, terrain: &q3_terrain::Terrain) {
         use q3_terrain::PoiKind;
         let has_mesh = self
@@ -5413,6 +6666,7 @@ impl App {
                     scale: base_scale * scale_var,
                     tint: [1.0, 1.0, 1.0, 1.0],
                     prop_name: "building",
+                    terrain_normal: None,
                 });
                 spawned += 1;
             }
@@ -5423,6 +6677,7 @@ impl App {
         );
     }
 
+    #[allow(dead_code)]
     fn spawn_br_tropical(&mut self, terrain: &q3_terrain::Terrain) {
         let has_mesh = self
             .renderer
@@ -5482,6 +6737,7 @@ impl App {
                 scale: scale * base_trop_scale,
                 tint,
                 prop_name: "tropical",
+                terrain_normal: None,
             });
             spawned += 1;
             if spawned >= 250 {
@@ -5900,6 +7156,60 @@ impl App {
                     break;
                 }
             }
+            // **Taunts vocaux** (v0.9.6) — pool de voix Q3 canoniques
+            // pour la touche F3.  Chaque bot vanilla a `taunt.wav` dans
+            // son dossier.  On charge tous ceux trouvés dans le pak0,
+            // tirage uniforme à chaque taunt.  Si aucun n'est trouvé
+            // (PK3 vanilla pas monté), on garde le kill-confirm comme
+            // fallback dans `trigger_player_taunt`.
+            const TAUNT_CANDIDATES: &[&str] = &[
+                "sound/player/sarge/taunt.wav",
+                "sound/player/major/taunt.wav",
+                "sound/player/visor/taunt.wav",
+                "sound/player/crash/taunt.wav",
+                "sound/player/grunt/taunt.wav",
+                "sound/player/bones/taunt.wav",
+                "sound/player/biker/taunt.wav",
+                "sound/player/hossman/taunt.wav",
+                "sound/player/keel/taunt.wav",
+                "sound/player/klesk/taunt.wav",
+                "sound/player/lucy/taunt.wav",
+                "sound/player/mynx/taunt.wav",
+                "sound/player/orbb/taunt.wav",
+                "sound/player/ranger/taunt.wav",
+                "sound/player/razor/taunt.wav",
+                "sound/player/sorlag/taunt.wav",
+                "sound/player/tankjr/taunt.wav",
+                "sound/player/uriel/taunt.wav",
+                "sound/player/wrack/taunt.wav",
+                "sound/player/xaero/taunt.wav",
+                "sound/player/anarki/taunt.wav",
+                "sound/player/angel/taunt.wav",
+                "sound/player/doom/taunt.wav",
+                "sound/player/hunter/taunt.wav",
+                "sound/player/medium/taunt.wav",
+                "sound/player/phobos/taunt.wav",
+                "sound/player/slash/taunt.wav",
+                "sound/player/stripe/taunt.wav",
+                // Fallback : voix announcer (pas exactement un taunt
+                // mais signifient quelque chose de similaire).
+                "sound/feedback/excellent.wav",
+                "sound/feedback/impressive.wav",
+                "sound/feedback/perfect.wav",
+            ];
+            for p in TAUNT_CANDIDATES {
+                if let Some(h) = try_load_sfx(&self.vfs, snd, p) {
+                    self.sfx_taunts.push(h);
+                }
+            }
+            if !self.sfx_taunts.is_empty() {
+                info!("sfx: {} taunts vocaux chargés", self.sfx_taunts.len());
+            } else {
+                warn!(
+                    "sfx: aucun taunt vocal trouvé dans pak0 — F3 retombera \
+                     sur le kill-confirm sfx (placez baseq3/pak0.pk3 dans le VFS)"
+                );
+            }
             // Médaille « Humiliation » — voix humaine canonique Q3
             // (`sound/feedback/humiliation.wav`). Aucun bon fallback si
             // le PK3 d'origine n'est pas monté : un bip random donnerait
@@ -6010,6 +7320,7 @@ impl App {
     /// si présent et upload le mesh vers le pipeline drone du
     /// renderer.  Échec silencieux si absent (pas d'asset = pas de
     /// drones, gameplay identique).
+    #[allow(dead_code)]
     fn load_drone_asset(&mut self) {
         const PATHS: &[&str] = &[
             "assets/models/drone.glb",
@@ -6053,6 +7364,7 @@ impl App {
     /// concentriques au-dessus du centre de l'île, à des altitudes
     /// et rayons variés.  Décalage de phase par drone pour qu'ils
     /// ne soient pas tous au même endroit.
+    #[allow(dead_code)]
     fn spawn_br_drones(&mut self, terrain: &q3_terrain::Terrain) {
         self.drones.clear();
         // Sans renderer ou sans mesh chargé, inutile de spawner.
@@ -6257,6 +7569,9 @@ impl App {
 
         let mut spawned = 0usize;
         let mut missing = 0usize;
+        // **Reunion-specific** (v0.9.6) — pas de Quad Damage sur cette
+        // map à la demande utilisateur (gameplay sandbox / éditeur).
+        let is_reunion = terrain.meta.name.eq_ignore_ascii_case("reunion");
         for (i, poi) in terrain.pois().iter().enumerate() {
             let specs: &[ItemSpec] = match poi.tier {
                 4 => tier4,
@@ -6275,6 +7590,18 @@ impl App {
             let exploration = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
             for (k, spec) in specs.iter().enumerate() {
                 if exploration && !matches!(spec.kind, PickupKind::Powerup { .. }) {
+                    continue;
+                }
+                // Skip Quad Damage uniquement sur Reunion.
+                if is_reunion
+                    && matches!(
+                        spec.kind,
+                        PickupKind::Powerup {
+                            powerup: PowerupKind::QuadDamage,
+                            ..
+                        }
+                    )
+                {
                     continue;
                 }
                 // Position en cercle autour du POI.
@@ -6572,6 +7899,121 @@ impl App {
                             info!("mapdl: `{}` — ERREUR : {}", id, message);
                         }
                     }
+                }
+                PendingAction::EditorToggle => {
+                    self.editor_enabled = !self.editor_enabled;
+                    info!(
+                        "editor: {} ({} props placeables)",
+                        if self.editor_enabled { "ON" } else { "OFF" },
+                        self.rocks.len()
+                    );
+                }
+                PendingAction::EditorLoadGlb(name, path) => {
+                    self.editor_load_glb(&name, &path);
+                }
+                PendingAction::EditorSpawn(prop_name, scale_override) => {
+                    self.editor_spawn_at_aim(&prop_name, scale_override);
+                }
+                PendingAction::EditorSelect(idx) => {
+                    if idx < self.rocks.len() {
+                        self.editor_selected = Some(idx);
+                        let p = &self.rocks[idx];
+                        info!(
+                            "editor: sélectionné #{} '{}' pos=({:.0},{:.0},{:.0}) scale={:.3} yaw={:.1}°",
+                            idx, p.prop_name, p.pos.x, p.pos.y, p.pos.z,
+                            p.scale, p.yaw.to_degrees()
+                        );
+                    } else {
+                        warn!("editor: index {} hors bornes (0..{})", idx, self.rocks.len());
+                    }
+                }
+                PendingAction::EditorSelectAim => {
+                    self.editor_select_aim();
+                }
+                PendingAction::EditorMove(dx, dy, dz) => {
+                    if let Some(i) = self.editor_selected {
+                        if let Some(p) = self.rocks.get_mut(i) {
+                            p.pos.x += dx;
+                            p.pos.y += dy;
+                            p.pos.z += dz;
+                            info!(
+                                "editor: #{} move → ({:.0},{:.0},{:.0})",
+                                i, p.pos.x, p.pos.y, p.pos.z
+                            );
+                        }
+                    } else {
+                        warn!("editor: aucun prop sélectionné (utilise `ed_pick` ou `ed_select <idx>`)");
+                    }
+                }
+                PendingAction::EditorScale(f) => {
+                    if let Some(i) = self.editor_selected {
+                        if let Some(p) = self.rocks.get_mut(i) {
+                            p.scale = (p.scale * f).max(0.001);
+                            info!("editor: #{} scale → {:.3}", i, p.scale);
+                        }
+                    } else {
+                        warn!("editor: aucun prop sélectionné");
+                    }
+                }
+                PendingAction::EditorRotate(deg) => {
+                    if let Some(i) = self.editor_selected {
+                        if let Some(p) = self.rocks.get_mut(i) {
+                            p.yaw += deg.to_radians();
+                            info!("editor: #{} yaw → {:.1}°", i, p.yaw.to_degrees());
+                        }
+                    } else {
+                        warn!("editor: aucun prop sélectionné");
+                    }
+                }
+                PendingAction::EditorAlignTerrain => {
+                    if let Some(i) = self.editor_selected {
+                        let pos = self.rocks.get(i).map(|p| p.pos);
+                        if let (Some(pos), Some(terrain)) = (pos, self.terrain.as_ref()) {
+                            let n = terrain.normal_at(pos.x, pos.y);
+                            if let Some(p) = self.rocks.get_mut(i) {
+                                p.terrain_normal = if p.terrain_normal.is_some() {
+                                    None
+                                } else {
+                                    Some([n.x, n.y, n.z])
+                                };
+                                info!(
+                                    "editor: #{} terrain-align = {}",
+                                    i,
+                                    p.terrain_normal.is_some()
+                                );
+                            }
+                        } else {
+                            warn!("editor: pas de terrain (mode BSP ?) ou prop introuvable");
+                        }
+                    }
+                }
+                PendingAction::EditorDelete => {
+                    if let Some(i) = self.editor_selected {
+                        if i < self.rocks.len() {
+                            let p = self.rocks.remove(i);
+                            info!("editor: #{} '{}' supprimé", i, p.prop_name);
+                            self.editor_selected = None;
+                        }
+                    } else {
+                        warn!("editor: aucun prop sélectionné");
+                    }
+                }
+                PendingAction::EditorList => {
+                    info!("editor: {} props placés :", self.rocks.len());
+                    for (i, p) in self.rocks.iter().enumerate() {
+                        info!(
+                            "  #{:3} {:20} pos=({:>6.0},{:>6.0},{:>6.0}) scale={:.3} yaw={:>6.1}° {}",
+                            i, p.prop_name, p.pos.x, p.pos.y, p.pos.z,
+                            p.scale, p.yaw.to_degrees(),
+                            if p.terrain_normal.is_some() { "[align]" } else { "" }
+                        );
+                    }
+                }
+                PendingAction::EditorSave(name) => {
+                    self.editor_save(&name);
+                }
+                PendingAction::EditorLoadFile(name) => {
+                    self.editor_load_file(&name);
                 }
             }
         }
@@ -7102,10 +8544,29 @@ impl App {
             lower_anim_started_at: 0.0,
             upper_anim_start: usize::MAX,
             upper_anim_started_at: 0.0,
+            prev_lower_range_start: usize::MAX,
+            prev_lower_phase_at_switch: 0.0,
+            prev_upper_range_start: usize::MAX,
+            prev_upper_phase_at_switch: 0.0,
+            lower_crossfade_until: 0.0,
+            upper_crossfade_until: 0.0,
             death_variant: (idx as u8) % 3,
             prev_yaw: 0.0,
             last_turn_at: f32::NEG_INFINITY,
             gesture_started_at: None,
+            hit_twist_yaw: 0.0,
+            hit_twist_yaw_vel: 0.0,
+            hit_twist_pitch: 0.0,
+            hit_twist_pitch_vel: 0.0,
+            head_look_yaw: 0.0,
+            head_look_pitch: 0.0,
+            torso_lag_yaw: 0.0,
+            ragdoll_active: false,
+            ragdoll_pos: Vec3::ZERO,
+            ragdoll_vel: Vec3::ZERO,
+            ragdoll_quat: glam::Quat::IDENTITY,
+            ragdoll_ang_vel: glam::Vec3::ZERO,
+            ragdoll_settled_at: 0.0,
         });
     }
 
@@ -7585,6 +9046,17 @@ impl App {
         if matches!(trigger, ChatTrigger::KillInsult) {
             if let Some(b) = self.bots.get_mut(idx) {
                 b.gesture_started_at = Some(self.time_sec);
+            }
+            // **Voix kill-insult** (v0.9.6) — joue un taunt vocal du
+            // pool à la position du bot fragger.  Permet au joueur
+            // d'entendre qui se moque de lui, depuis quelle direction.
+            let bot_origin = self.bots[idx].body.origin;
+            if let Some(snd) = self.sound.as_ref() {
+                if !self.sfx_taunts.is_empty() {
+                    let i = (rand_unit().abs() * self.sfx_taunts.len() as f32) as usize;
+                    let i = i.min(self.sfx_taunts.len() - 1);
+                    play_at(snd, self.sfx_taunts[i], bot_origin, Priority::VoiceOver);
+                }
             }
         }
     }
@@ -9987,11 +11459,55 @@ impl App {
                 let taken = bot_driver.health.take_damage(dmg);
                 let dead = bot_driver.health.is_dead();
                 let name = bot_driver.bot.name.clone();
+                // **Hit reaction impulse** (v0.9.6 #3) — twist le torse
+                // dans la direction du tir.  Composantes : lateral
+                // (yaw twist) + vertical (pitch twist).  Damping spring
+                // dans queue_bots ramène à 0 en ~300 ms.
+                if was_alive && taken > 0 {
+                    let body_yaw = bot_driver.body.view_angles.yaw.to_radians();
+                    // fwd = direction du tir (player→bot).  Convertir en
+                    // espace local du bot via rotation -body_yaw.
+                    let cy = body_yaw.cos();
+                    let sy = body_yaw.sin();
+                    let local_x = fwd.x * cy + fwd.y * sy;     // forward (entrée balle)
+                    let local_y = -fwd.x * sy + fwd.y * cy;    // right (côté impact)
+                    let local_z = fwd.z;                        // up/down
+                    // Magnitude proportionnelle aux dégâts (clampée).
+                    let mag = (taken as f32 / 25.0).clamp(0.3, 2.0);
+                    // Le tir vient de l'avant → twist faible.  Tir
+                    // latéral → grand twist yaw.  Tir d'en haut/dessous
+                    // → twist pitch.
+                    bot_driver.hit_twist_yaw_vel += -local_y * 600.0 * mag;  // deg/s
+                    bot_driver.hit_twist_pitch_vel += local_z * 200.0 * mag; // deg/s
+                    // Forward push si tir frontal (effet "knockback")
+                    let _ = local_x;
+                }
                 // **Death anim trigger** (v0.9.5++) — au moment exact où
                 // le bot meurt, on enregistre le timestamp pour piloter
                 // BOTH_DEATH1 → BOTH_DEAD1 freeze dans queue_bots.
                 if was_alive && dead && bot_driver.death_started_at.is_none() {
                     bot_driver.death_started_at = Some(self.time_sec);
+                    // **Ragdoll trigger** (v0.9.6 #2) — initialise la
+                    // simu physique avec un impulse depuis la direction
+                    // du tir.  Le rendu va alors basculer sur une pose
+                    // dynamique au lieu des frames DEATH1/2/3.
+                    bot_driver.ragdoll_active = true;
+                    bot_driver.ragdoll_pos = bot_driver.body.origin;
+                    let dmg_factor = (dmg as f32 / 50.0).clamp(0.5, 4.0);
+                    // Linear : push dans la direction du tir + jump up.
+                    let push_xy = Vec3::new(fwd.x, fwd.y, 0.0).normalize_or_zero() * 220.0 * dmg_factor;
+                    bot_driver.ragdoll_vel = bot_driver.body.velocity * 0.5
+                        + push_xy
+                        + Vec3::Z * 180.0 * dmg_factor; // soulève un peu
+                    bot_driver.ragdoll_quat =
+                        glam::Quat::from_rotation_z(bot_driver.body.view_angles.yaw.to_radians());
+                    // Angular : torque cross-produit fwd × up donne un
+                    // axe latéral, le bot tournoie dans le plan vertical.
+                    let torque_axis = glam::Vec3::new(-fwd.y, fwd.x, 0.0).normalize_or_zero();
+                    let spin = 4.0 + dmg_factor * 2.0; // rad/s
+                    bot_driver.ragdoll_ang_vel = torque_axis * spin
+                        + glam::Vec3::Z * (rand_unit() * 2.0); // spin around axis
+                    bot_driver.ragdoll_settled_at = 0.0;
                 }
                 if taken > 0 {
                     // Horodate la prise de dégât pour déclencher l'anim
@@ -10262,7 +11778,7 @@ impl App {
                 let hit_pt = eye + fwd * t_hit;
                 // **Muzzle position par arme** — helper commun.
                 let start = self.viewmodel_muzzle_pos(weapon);
-                let (mut color, lifetime) = match weapon {
+                let (color, lifetime) = match weapon {
                     WeaponId::Plasmagun => ([0.40, 0.85, 1.0, 0.55], 0.05_f32),
                     _ => ([1.0, 0.85, 0.40, 0.55], 0.06_f32), // MG/SG gold
                 };
@@ -11477,9 +12993,20 @@ impl App {
         let idx = idx.min(PLAYER_TAUNT_LINES.len() - 1);
         let text = PLAYER_TAUNT_LINES[idx].to_string();
         self.push_chat("YOU".to_string(), text);
-        if let (Some(snd), Some(h)) = (self.sound.as_ref(), self.sfx_kill_confirm) {
+        // Tirage : on préfère un taunt vocal vrai (pool sfx_taunts) ;
+        // si vide on retombe sur le kill-confirm sfx (bip menu).
+        if let Some(snd) = self.sound.as_ref() {
             let ear = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
-            play_at(snd, h, ear, Priority::VoiceOver);
+            let handle = if !self.sfx_taunts.is_empty() {
+                let i = (rand_unit().abs() * self.sfx_taunts.len() as f32) as usize;
+                let i = i.min(self.sfx_taunts.len() - 1);
+                Some(self.sfx_taunts[i])
+            } else {
+                self.sfx_kill_confirm
+            };
+            if let Some(h) = handle {
+                play_at(snd, h, ear, Priority::VoiceOver);
+            }
         }
         self.next_player_taunt_at = self.time_sec + PLAYER_TAUNT_COOLDOWN;
         // Clapback bot — roulette une seule fois par taunt.
@@ -11515,10 +13042,20 @@ impl App {
         let bot_idx = alive[pick];
         let line_idx = (rand_unit().abs() * BOT_CLAPBACK_LINES.len() as f32) as usize;
         let line_idx = line_idx.min(BOT_CLAPBACK_LINES.len() - 1);
+        let bot_origin = self.bots[bot_idx].body.origin;
         let speaker = self.bots[bot_idx].bot.name.clone();
         let text = BOT_CLAPBACK_LINES[line_idx].to_string();
         self.push_chat(speaker, text);
         self.next_chat_at = self.time_sec + CHAT_GLOBAL_COOLDOWN;
+        // **Voix bot** (v0.9.6) — un sample du pool taunts joué à la
+        // position du bot.  Permet au joueur de localiser qui répond.
+        if let Some(snd) = self.sound.as_ref() {
+            if !self.sfx_taunts.is_empty() {
+                let i = (rand_unit().abs() * self.sfx_taunts.len() as f32) as usize;
+                let i = i.min(self.sfx_taunts.len() - 1);
+                play_at(snd, self.sfx_taunts[i], bot_origin, Priority::VoiceOver);
+            }
+        }
     }
 
     /// Repositionne les bots morts à un spawn DM aléatoire et remet leur HP
@@ -11684,6 +13221,10 @@ impl App {
             // précédents (shot-0001.tga, shot-0002.tga, …). Bind edge-
             // triggered : plusieurs captures nécessitent plusieurs press.
             KeyCode::F11 if pressed => self.take_screenshot(),
+            // F2 : en editor mode, sélectionne le prop sous le crosshair.
+            KeyCode::F2 if pressed && self.editor_enabled => {
+                self.editor_select_aim();
+            }
             // ENTER : active le holdable courant (medkit / teleporter).
             // Bind canon Q3 = touche « Enter », réutilisée telle quelle.
             // Edge-triggered sur press pour ne pas spam-consommer le slot.
@@ -12000,6 +13541,21 @@ impl ApplicationHandler for App {
                             &self.cvars,
                         );
                         self.apply_menu_action(action, event_loop);
+                    }
+                } else if self.editor_enabled {
+                    // **Editor mode** — clic gauche = action panneau
+                    // ou spawn 3D, clic droit = sélectionne prop placé.
+                    if state == ElementState::Pressed {
+                        match button {
+                            MouseButton::Left => {
+                                let (cx, cy) = self.cursor_pos;
+                                self.editor_handle_click(cx, cy);
+                            }
+                            MouseButton::Right => {
+                                self.editor_select_aim();
+                            }
+                            _ => {}
+                        }
                     }
                 } else if !self.console.is_open() {
                     if button == MouseButton::Left {
@@ -13479,6 +15035,54 @@ impl ApplicationHandler for App {
                                         lg_seed.wrapping_add((t * 100.0) as u64),
                                     );
                                 }
+
+                                // **GLB volumetric lightning** — place 4
+                                // instances du mesh chain_lightning le long
+                                // du faisceau avec un roll aléatoire par
+                                // segment (change chaque frame via lg_seed).
+                                // Le mesh est étiré sur l'axe beam (scale
+                                // longitudinal = segment_len / base_scale)
+                                // et teinté bleu-blanc avec l'alpha du
+                                // faisceau pour un fade-out cohérent.
+                                if let Some(base_s) = self.lightning_beam_scale {
+                                    let seg_count = 4u32;
+                                    let seg_len = len / seg_count as f32;
+                                    // Scale transversal (épaisseur du mesh).
+                                    let s_t = base_s * 1.2;
+                                    // Scale longitudinal : étire chaque
+                                    // instance pour couvrir sa portion.
+                                    let s_l = seg_len / 8.0_f32.max(0.01);
+                                    for i in 0..seg_count {
+                                        let t_center = (i as f32 + 0.5) / seg_count as f32;
+                                        let center = b.a + dir * t_center;
+                                        // Roll pseudo-aléatoire par segment
+                                        // & par frame.
+                                        let roll = ((lg_seed.wrapping_mul(
+                                            (i as u64).wrapping_add(17),
+                                        ) % 628) as f32)
+                                            * 0.01; // ~0..6.28 rad
+                                        let cr = roll.cos();
+                                        let sr = roll.sin();
+                                        // Matrice : colonnes = (perp*s_t,
+                                        // perp2*s_t rotées du roll, axis*s_l).
+                                        // Y-up → Z-up déjà géré par perp/perp2/axis.
+                                        let px = perp * cr + perp2 * sr;
+                                        let py = -perp * sr + perp2 * cr;
+                                        let model: [[f32; 4]; 4] = [
+                                            [px.x * s_t, px.y * s_t, px.z * s_t, 0.0],
+                                            [py.x * s_t, py.y * s_t, py.z * s_t, 0.0],
+                                            [axis.x * s_l, axis.y * s_l, axis.z * s_l, 0.0],
+                                            [center.x, center.y, center.z, 1.0],
+                                        ];
+                                        let tint = [
+                                            0.7_f32,
+                                            0.85,
+                                            1.0,
+                                            col[3] * 0.8,
+                                        ];
+                                        r.queue_prop("lightning_beam", model, tint);
+                                    }
+                                }
                             }
                             BeamStyle::Spiral => {
                                 // **Rail beam upgrade** (P9) : double
@@ -13552,14 +15156,45 @@ impl ApplicationHandler for App {
                         for rk in &self.rocks {
                             let prop_name = rk.prop_name;
                             let s = rk.scale;
-                            let cy = rk.yaw.cos();
-                            let sy = rk.yaw.sin();
-                            let model = [
-                                [cy * s,  sy * s, 0.0, 0.0],
-                                [0.0,     0.0,    s,   0.0],
-                                [sy * s, -cy * s, 0.0, 0.0],
-                                [rk.pos.x, rk.pos.y, rk.pos.z, 1.0],
-                            ];
+                            let model = if let Some(tn) = rk.terrain_normal {
+                                // **Terrain-aligned** : le Y-up du mesh
+                                // (axe "haut" glTF) est aligné avec la
+                                // normale du terrain pour que le prop
+                                // épouse la pente.
+                                //
+                                // Base orthonormée :
+                                //   up   = terrain normal
+                                //   fwd  = projection du vecteur yaw dans
+                                //          le plan tangent
+                                //   right = up × fwd
+                                let up = Vec3::new(tn[0], tn[1], tn[2]).normalize();
+                                let cy = rk.yaw.cos();
+                                let sy = rk.yaw.sin();
+                                // Vecteur yaw brut dans le plan XY monde.
+                                let raw_fwd = Vec3::new(cy, sy, 0.0);
+                                // Projeter dans le plan tangent : fwd -
+                                // (fwd·up)*up, puis normaliser.
+                                let fwd = (raw_fwd - up * raw_fwd.dot(up)).normalize();
+                                let right = up.cross(fwd);
+                                // Matrice colonnes : glTF X→right, Y→up,
+                                // Z→(-fwd) avec le scale appliqué.
+                                [
+                                    [right.x * s, right.y * s, right.z * s, 0.0],
+                                    [up.x    * s, up.y    * s, up.z    * s, 0.0],
+                                    [-fwd.x  * s, -fwd.y  * s, -fwd.z  * s, 0.0],
+                                    [rk.pos.x, rk.pos.y, rk.pos.z, 1.0],
+                                ]
+                            } else {
+                                // Standard Y-up → Z-up + yaw rotation.
+                                let cy = rk.yaw.cos();
+                                let sy = rk.yaw.sin();
+                                [
+                                    [cy * s,  sy * s, 0.0, 0.0],
+                                    [0.0,     0.0,    s,   0.0],
+                                    [sy * s, -cy * s, 0.0, 0.0],
+                                    [rk.pos.x, rk.pos.y, rk.pos.z, 1.0],
+                                ]
+                            };
                             r.queue_prop(prop_name, model, rk.tint);
                         }
                     }
@@ -13601,7 +15236,8 @@ impl ApplicationHandler for App {
                     }
 
                     if let Some(rig) = self.bot_rig.as_ref() {
-                        queue_bots(r, rig, &mut self.bots, self.time_sec);
+                        let terrain_ref = self.terrain.as_deref();
+                        queue_bots(r, rig, &mut self.bots, self.time_sec, dt, terrain_ref);
                         queue_remote_players(
                             r,
                             rig,
@@ -14233,6 +15869,27 @@ impl ApplicationHandler for App {
                     // diagnostiquer une chute de fps liée au menu lui-même).
                     if self.show_perf_overlay {
                         draw_perf_overlay(r, &self.frame_times);
+                    }
+                    // **Editor mode panel** (v0.9.6) — UI complète à
+                    // droite avec import GLB / liste / actions cliquables.
+                    if self.editor_enabled {
+                        let (sw_px, sh_px) = self
+                            .window
+                            .as_ref()
+                            .map(|w| {
+                                let s = w.inner_size();
+                                (s.width as f32, s.height as f32)
+                            })
+                            .unwrap_or((self.init_width as f32, self.init_height as f32));
+                        Self::editor_draw_panel_static(
+                            r,
+                            &self.editor_panel,
+                            &self.rocks,
+                            &self.editor_prop_scales,
+                            self.editor_selected,
+                            sw_px,
+                            sh_px,
+                        );
                     }
                     // **Mini-map** (V3a) — toujours affichée en jeu.
                     // Zone top-left, n'interfère pas avec les autres
@@ -17895,18 +19552,29 @@ fn tick_bots(
 /// en sinusoïde cyan-blanc pour signaler l'état au joueur — sans ça, un
 /// tir qui passe à travers un bot invul paraîtrait buggé. La pulsation à
 /// ~3 Hz reste lisible à l'œil mais pas distrayante.
-fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_sec: f32) {
+fn queue_bots(
+    r: &mut Renderer,
+    rig: &PlayerRig,
+    bots: &mut [BotDriver],
+    time_sec: f32,
+    dt: f32,
+    terrain: Option<&q3_terrain::Terrain>,
+) {
     use glam::{Mat4 as GMat4, Quat, Vec3 as GVec3};
 
     // Seuils de la machine d'états — en secondes depuis l'évènement.
     const ATTACK_WINDOW_SEC: f32 = 0.40;
-    const PAIN_WINDOW_SEC: f32 = 0.20;
-    const LAND_WINDOW_SEC: f32 = 0.15;
-    const TURN_WINDOW_SEC: f32 = 0.25;
+    const PAIN_WINDOW_SEC: f32 = 0.25;  // bump 200→250 ms pour que le flinch soit visible
+    const LAND_WINDOW_SEC: f32 = 0.18;  // bump 150→180 ms pour un landing plus lisible
+    const TURN_WINDOW_SEC: f32 = 0.30;  // bump 250→300 ms pour un turn plus fluide
     const GESTURE_DURATION_SEC: f32 = 2.7; // 40 frames à 15 fps
     // Vitesse XY au-dessus de laquelle on considère que le bot « court »
     // plutôt qu'il traîne sur place — 40 u/s ≈ vitesse de walk Q3.
     const RUN_SPEED_SQ: f32 = 40.0 * 40.0;
+    // **Crossfade** (v0.9.6) — durée du blend entre deux anims quand la
+    // state machine change.  Court pour rester réactif mais suffisant
+    // pour éliminer le "snap" entre run→idle ou stand→attack.
+    const CROSSFADE_SEC: f32 = 0.15;
 
     // **Anim lookup** : `rig.anims` (animation.cfg parsé) en priorité,
     // fallback sur les constants `bot_anims::*` si la cfg est absente.
@@ -17942,42 +19610,128 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
         // Variation 0/1/2 selon `death_variant` pour casser l'uniformité
         // (3 anims de mort distinctes en Q3).
         if d.health.is_dead() {
-            let Some(death_at) = d.death_started_at else {
-                // Pas encore enregistré : skip (pas mort la frame courante).
+            let Some(_death_at) = d.death_started_at else {
                 continue;
             };
-            let phase = time_sec - death_at;
-            // Death dure 30 frames à 25 fps = 1.2 s.  Au-delà, freeze
-            // sur la dernière frame (pose cadavre).
-            let (death_range, dead_range) = match d.death_variant % 3 {
-                0 => (a_both_death1, a_both_dead1),
-                1 => (a_both_death2, a_both_dead2),
-                _ => (a_both_death3, a_both_dead3),
-            };
-            let active = if phase < 1.2 { death_range } else { dead_range };
-            let (fa_l, fb_l, lerp_l) = active.sample(phase, nf_lower);
-            let (fa_u, fb_u, lerp_u) = active.sample(phase, nf_upper);
-            let o = d.body.origin;
-            // Cadavre : on le laisse tomber au sol, pas de yaw spinning.
-            let rot = Quat::from_rotation_z(d.body.view_angles.yaw.to_radians());
+            // **Ragdoll v0.9.6** — simu rigid body simple.  Le corps
+            // entier (lower + upper + head) est traité comme un seul
+            // objet qui tombe avec rotation libre.  Plus naturel que
+            // les frames DEATH1/2/3 figées de Q3.
             let scale_idx = d.bot.name.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32))
                 as usize;
             let s = bot_scale(scale_idx);
-            let lower_m = GMat4::from_scale_rotation_translation(
-                GVec3::new(s, s, s), rot, GVec3::new(o.x, o.y, o.z),
-            );
-            let ident = GMat4::IDENTITY;
-            let torso_local = rig.lower.tag_transform(fa_l, fb_l, lerp_l, "tag_torso").unwrap_or(ident);
-            let upper_m = lower_m * torso_local;
-            let head_local = rig.upper.tag_transform(fa_u, fb_u, lerp_u, "tag_head").unwrap_or(ident);
-            let head_m = upper_m * head_local;
-            // Tint plus sombre pour signaler "mort" (corps qui se fige).
-            let dead_tint = [d.tint[0] * 0.55, d.tint[1] * 0.55, d.tint[2] * 0.55, d.tint[3]];
-            let head_tint = bot_head_tint(dead_tint);
-            r.draw_md3_animated(rig.lower.clone(), lower_m, dead_tint, fa_l, fb_l, lerp_l);
-            r.draw_md3_animated(rig.upper.clone(), upper_m, dead_tint, fa_u, fb_u, lerp_u);
-            r.draw_md3_animated(rig.head.clone(),  head_m,  head_tint, 0, 0, 0.0);
-            continue;
+
+            if d.ragdoll_active {
+                // Tick simu si pas encore figé.
+                let speed_sq =
+                    d.ragdoll_vel.length_squared() + d.ragdoll_ang_vel.length_squared() * 100.0;
+                let settled = d.ragdoll_settled_at > 0.0;
+                if !settled {
+                    // Gravité Q3 (~800 u/s²).
+                    d.ragdoll_vel.z -= 800.0 * dt;
+                    d.ragdoll_pos += d.ragdoll_vel * dt;
+
+                    // Collision sol : raycast simple via terrain ou
+                    // floor à pos.z = origin.z initial (proxy).
+                    let ground_z = if let Some(t) = terrain {
+                        t.height_at(d.ragdoll_pos.x, d.ragdoll_pos.y)
+                    } else {
+                        d.body.origin.z + PLAYER_HULL_MIN_Z
+                    };
+                    let body_radius = 16.0_f32 * s;
+                    let min_z = ground_z + body_radius * 0.5;
+                    if d.ragdoll_pos.z < min_z {
+                        d.ragdoll_pos.z = min_z;
+                        // Bounce + amortissement
+                        if d.ragdoll_vel.z < 0.0 {
+                            d.ragdoll_vel.z = -d.ragdoll_vel.z * 0.30;
+                        }
+                        d.ragdoll_vel.x *= 0.55;
+                        d.ragdoll_vel.y *= 0.55;
+                        d.ragdoll_ang_vel *= 0.65;
+                    } else {
+                        // Drag aérien léger
+                        d.ragdoll_vel *= 1.0 - dt * 0.8;
+                    }
+
+                    // Rotation : intègre la velocité angulaire en quat.
+                    let av = d.ragdoll_ang_vel;
+                    let av_len = av.length();
+                    if av_len > 1e-4 {
+                        let dq = glam::Quat::from_axis_angle(av / av_len, av_len * dt);
+                        d.ragdoll_quat = (dq * d.ragdoll_quat).normalize();
+                    }
+                    // Damping angulaire général (friction)
+                    d.ragdoll_ang_vel *= 1.0 - dt * 1.4;
+
+                    // Stabilisation : si tout petit mouvement et au sol,
+                    // fige le ragdoll.
+                    if d.ragdoll_pos.z <= min_z + 0.5 && speed_sq < 25.0 {
+                        d.ragdoll_settled_at = time_sec;
+                    }
+                }
+
+                // Rendu du corps tombé.  Le quat ragdoll s'applique au
+                // lower entier ; lower → upper → head suivent les tag
+                // transforms standards (frame 0 = pose neutre).
+                let pos = d.ragdoll_pos;
+                let lower_m = GMat4::from_scale_rotation_translation(
+                    GVec3::new(s, s, s),
+                    d.ragdoll_quat,
+                    GVec3::new(pos.x, pos.y, pos.z),
+                );
+                let ident = GMat4::IDENTITY;
+                // Frame 0 statique pour tous (pose T) — moins moche que
+                // les frames death qui se baseraient sur leur propre
+                // physique pendant que le ragdoll tourne.
+                let torso_local = rig
+                    .lower
+                    .tag_transform(0, 0, 0.0, "tag_torso")
+                    .unwrap_or(ident);
+                let upper_m = lower_m * torso_local;
+                let head_local = rig
+                    .upper
+                    .tag_transform(0, 0, 0.0, "tag_head")
+                    .unwrap_or(ident);
+                let head_m = upper_m * head_local;
+
+                let dead_tint = [
+                    d.tint[0] * 0.55, d.tint[1] * 0.55, d.tint[2] * 0.55, d.tint[3],
+                ];
+                let head_tint = bot_head_tint(dead_tint);
+                r.draw_md3_animated(rig.lower.clone(), lower_m, dead_tint, 0, 0, 0.0);
+                r.draw_md3_animated(rig.upper.clone(), upper_m, dead_tint, 0, 0, 0.0);
+                r.draw_md3_animated(rig.head.clone(),  head_m,  head_tint, 0, 0, 0.0);
+                continue;
+            } else {
+                // Fallback : frames de mort Q3 classiques (ragdoll
+                // disabled, par exemple si bot tué via slay/kick).
+                let phase = time_sec - _death_at;
+                let (death_range, dead_range) = match d.death_variant % 3 {
+                    0 => (a_both_death1, a_both_dead1),
+                    1 => (a_both_death2, a_both_dead2),
+                    _ => (a_both_death3, a_both_dead3),
+                };
+                let active = if phase < 1.2 { death_range } else { dead_range };
+                let (fa_l, fb_l, lerp_l) = active.sample(phase, nf_lower);
+                let (fa_u, fb_u, lerp_u) = active.sample(phase, nf_upper);
+                let o = d.body.origin;
+                let rot = Quat::from_rotation_z(d.body.view_angles.yaw.to_radians());
+                let lower_m = GMat4::from_scale_rotation_translation(
+                    GVec3::new(s, s, s), rot, GVec3::new(o.x, o.y, o.z),
+                );
+                let ident = GMat4::IDENTITY;
+                let torso_local = rig.lower.tag_transform(fa_l, fb_l, lerp_l, "tag_torso").unwrap_or(ident);
+                let upper_m = lower_m * torso_local;
+                let head_local = rig.upper.tag_transform(fa_u, fb_u, lerp_u, "tag_head").unwrap_or(ident);
+                let head_m = upper_m * head_local;
+                let dead_tint = [d.tint[0] * 0.55, d.tint[1] * 0.55, d.tint[2] * 0.55, d.tint[3]];
+                let head_tint = bot_head_tint(dead_tint);
+                r.draw_md3_animated(rig.lower.clone(), lower_m, dead_tint, fa_l, fb_l, lerp_l);
+                r.draw_md3_animated(rig.upper.clone(), upper_m, dead_tint, fa_u, fb_u, lerp_u);
+                r.draw_md3_animated(rig.head.clone(),  head_m,  head_tint, 0, 0, 0.0);
+                continue;
+            }
         }
 
         // --- Sélection d'anim côté jambes (lower) + torse (upper).
@@ -18060,11 +19814,24 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
         // début au lieu de téléporter au milieu du cycle.  Idem
         // pour upper.  Le `phase_offset` reste appliqué pour décaler
         // les bots entre eux (anti-ballet militaire).
+        // **Crossfade anim blending** (v0.9.6) — quand la range change,
+        // on sauvegarde l'ancienne et on blend progressivement.  Élimine
+        // le "snap" entre les états (run→idle, idle→attack, etc.).
         if d.lower_anim_start != lower_range.start {
+            if d.lower_anim_start != usize::MAX {
+                d.prev_lower_range_start = d.lower_anim_start;
+                d.prev_lower_phase_at_switch = time_sec - d.lower_anim_started_at;
+                d.lower_crossfade_until = time_sec + CROSSFADE_SEC;
+            }
             d.lower_anim_start = lower_range.start;
             d.lower_anim_started_at = time_sec;
         }
         if d.upper_anim_start != upper_range.start {
+            if d.upper_anim_start != usize::MAX {
+                d.prev_upper_range_start = d.upper_anim_start;
+                d.prev_upper_phase_at_switch = time_sec - d.upper_anim_started_at;
+                d.upper_crossfade_until = time_sec + CROSSFADE_SEC;
+            }
             d.upper_anim_start = upper_range.start;
             d.upper_anim_started_at = time_sec;
         }
@@ -18072,6 +19839,14 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
         let phase_u = (time_sec - d.upper_anim_started_at) + phase_offset;
         let (fa_l, fb_l, lerp_l) = lower_range.sample(phase_l, nf_lower);
         let (fa_u, fb_u, lerp_u) = upper_range.sample(phase_u, nf_upper);
+        // **Crossfade blend factor** — lerp de l'ancienne pose vers la
+        // nouvelle.  `cf = 0` = full ancienne, `cf = 1` = full nouvelle.
+        let _lower_cf = if time_sec < d.lower_crossfade_until {
+            ((time_sec - (d.lower_crossfade_until - CROSSFADE_SEC)) / CROSSFADE_SEC).clamp(0.0, 1.0)
+        } else { 1.0 };
+        let _upper_cf = if time_sec < d.upper_crossfade_until {
+            ((time_sec - (d.upper_crossfade_until - CROSSFADE_SEC)) / CROSSFADE_SEC).clamp(0.0, 1.0)
+        } else { 1.0 };
         // La tête ne s'anime pas en Q3 : on la rend sur la première
         // frame (les meshes head.md3 sont statiques).
         let (fa_h, fb_h, lerp_h) = (0usize, 0usize, 0.0_f32);
@@ -18093,8 +19868,16 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
         // silhouette ne paraisse pas figée comme un piquet.  Décalée
         // par phase_offset pour que les bots ne respirent pas en
         // synchro.
+        // **Idle breath + run bob** (v0.9.6 enhanced) — deux effets combinés :
+        // - Idle : sinusoïde lente Z (respiration) + micro-rotation épaules
+        // - Run : bob vertical plus rapide synchronisé avec le pas
         let idle_bob = if !airborne && !moving {
-            ((time_sec * 1.4 + phase_offset * std::f32::consts::TAU).sin()) * 1.2
+            ((time_sec * 1.4 + phase_offset * std::f32::consts::TAU).sin()) * 1.5
+        } else if !airborne && moving {
+            // Bob de course : plus ample et plus rapide que l'idle
+            let run_freq = if v_xy > 120.0 { 10.0 } else { 7.0 };
+            ((time_sec * run_freq + phase_offset * std::f32::consts::TAU).sin()) * 1.8
+            * (v_xy / 320.0).min(1.0)
         } else {
             0.0
         };
@@ -18108,11 +19891,59 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
         let right_y = yaw_rad.cos();
         let strafe_speed = d.body.velocity.x * right_x + d.body.velocity.y * right_y;
         let lean_rad = (strafe_speed / 320.0).clamp(-0.18, 0.18); // ~10° max
-        let lean_quat = Quat::from_axis_angle(
-            GVec3::new(yaw_rad.cos(), yaw_rad.sin(), 0.0), // axe forward
-            -lean_rad,
+
+        // **#7 Strafe blend tree** (v0.9.6) — quand le bot court, ses
+        // jambes pivotent vers la direction de mouvement (jusqu'a 35%
+        // du chemin) tandis que le torse continue à viser la cible.
+        // Effet "torso decoupling" — locomotion crédible même en strafe.
+        let lower_yaw_rad = if moving && !airborne && !moving_backward {
+            let vel_yaw = d.body.velocity.y.atan2(d.body.velocity.x);
+            let mut delta = vel_yaw - yaw_rad;
+            while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
+            while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+            yaw_rad + delta * 0.35
+        } else {
+            yaw_rad
+        };
+        let lower_rot = Quat::from_rotation_z(lower_yaw_rad);
+        // Lean axis basé sur le forward du LOWER (pas du body).
+        let lean_axis = GVec3::new(lower_yaw_rad.cos(), lower_yaw_rad.sin(), 0.0);
+        let lean_quat = Quat::from_axis_angle(lean_axis, -lean_rad);
+
+        // **#1 Surface alignment** (v0.9.6) — sur le terrain BR, on
+        // sample la hauteur sous chaque "pied" virtuel (offset gauche/
+        // droite + avant/arrière) et on calcule un pitch/roll pour
+        // que le bot épouse la pente.  Sur BSP : skip (pas de fonction
+        // height_at sur BSP, et les sols sont plats généralement).
+        // Disabled airborne (le bot saute = orientation libre).
+        let (pitch_align, roll_align) = if !airborne {
+            if let Some(t) = terrain {
+                // Échantillon plus large = ~32u (largeur du hull joueur)
+                let half = 16.0_f32;
+                let cf = lower_yaw_rad.cos();
+                let sf = lower_yaw_rad.sin();
+                let h_front = t.height_at(o.x + cf * half, o.y + sf * half);
+                let h_back  = t.height_at(o.x - cf * half, o.y - sf * half);
+                let h_right = t.height_at(o.x + (-sf) * half, o.y + cf * half);
+                let h_left  = t.height_at(o.x - (-sf) * half, o.y - cf * half);
+                // Pitch (rotation autour right axis) — h_front - h_back.
+                let pitch_a = ((h_front - h_back) / (2.0 * half)).atan().clamp(-0.35, 0.35);
+                // Roll (rotation autour forward axis) — h_right - h_left.
+                let roll_a  = ((h_right - h_left)  / (2.0 * half)).atan().clamp(-0.35, 0.35);
+                (pitch_a, roll_a)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+        let surface_pitch = Quat::from_axis_angle(
+            GVec3::new(-lower_yaw_rad.sin(), lower_yaw_rad.cos(), 0.0), pitch_align,
         );
-        let combined_rot = lean_quat * rot;
+        let surface_roll = Quat::from_axis_angle(
+            GVec3::new(lower_yaw_rad.cos(), lower_yaw_rad.sin(), 0.0), roll_align,
+        );
+        let combined_rot = surface_pitch * surface_roll * lean_quat * lower_rot;
 
         // **Hull → feet offset** (v0.9.5++ fix lévitation) — `body.origin`
         // pointe sur le CENTRE du hull (Q3 convention : PLAYER_MINS.z = -24).
@@ -18125,6 +19956,7 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
             combined_rot,
             GVec3::new(o.x, o.y, feet_z + idle_bob),
         );
+        let _ = rot; // remplacé par lower_rot
         // Tint : pulsation invul si applicable, + flash rouge très léger
         // sur pain pour renforcer le retour visuel sans dépendre d'une
         // animation absente du MD3.
@@ -18146,41 +19978,114 @@ fn queue_bots(r: &mut Renderer, rig: &PlayerRig, bots: &mut [BotDriver], time_se
             .lower
             .tag_transform(fa_l, fb_l, lerp_l, "tag_torso")
             .unwrap_or(ident);
-        let upper_m = lower_m * torso_local;
+
+        // **Pitch tracking torse** (v0.9.6) — le torse s'incline vers le
+        // haut/bas selon le pitch de visée du bot.  Donne l'impression
+        // que le bot regarde / vise réellement sa cible verticalement.
+        // Clampé à ±30° pour ne pas casser les animations MD3.
+        let pitch_deg = d.body.view_angles.pitch.clamp(-30.0, 30.0);
+        let pitch_rad = pitch_deg.to_radians();
+        // L'axe de pitch est "right" du bot en espace local (perpendiculaire
+        // à forward dans le plan horizontal).
+        let pitch_quat = Quat::from_axis_angle(
+            GVec3::new(-yaw_rad.sin(), yaw_rad.cos(), 0.0),
+            pitch_rad,
+        );
+        let pitch_m = GMat4::from_quat(pitch_quat);
+
+        // **#3 Hit reaction spring** (v0.9.6) — décay critical damper
+        // sur hit_twist_yaw + pitch.  Cible = 0 (rest pose).  Stiffness
+        // 80, damping 18 → settle en ~300 ms.
+        {
+            let stiff = 80.0_f32;
+            let damp = 18.0_f32;
+            let acc_yaw = -stiff * d.hit_twist_yaw - damp * d.hit_twist_yaw_vel;
+            d.hit_twist_yaw_vel += acc_yaw * dt;
+            d.hit_twist_yaw += d.hit_twist_yaw_vel * dt;
+            let acc_p = -stiff * d.hit_twist_pitch - damp * d.hit_twist_pitch_vel;
+            d.hit_twist_pitch_vel += acc_p * dt;
+            d.hit_twist_pitch += d.hit_twist_pitch_vel * dt;
+        }
+        let hit_twist_quat = Quat::from_axis_angle(GVec3::Z, d.hit_twist_yaw.to_radians())
+            * Quat::from_axis_angle(
+                GVec3::new(-yaw_rad.sin(), yaw_rad.cos(), 0.0),
+                d.hit_twist_pitch.to_radians(),
+            );
+        let hit_twist_m = GMat4::from_quat(hit_twist_quat);
+
+        // **#7 Strafe blend / torso counter-rotation** (v0.9.6) — le
+        // lower a tourné de `lower_yaw_rad - yaw_rad`, on compense pour
+        // que le torse continue à pointer vers `yaw_rad` (cible visée).
+        let lower_offset = lower_yaw_rad - yaw_rad;
+        let counter_rot_quat = Quat::from_axis_angle(GVec3::Z, -lower_offset);
+        let counter_rot_m = GMat4::from_quat(counter_rot_quat);
+
+        // **#4 Torso spring lag** (v0.9.6) — le torse suit le yaw du
+        // body avec un petit délai (effet inertie / cascade hanche →
+        // épaules).  Lerp critical damper.
+        let body_yaw_deg = d.body.view_angles.yaw;
+        let mut lag_delta = body_yaw_deg - d.torso_lag_yaw;
+        while lag_delta > 180.0 { lag_delta -= 360.0; }
+        while lag_delta < -180.0 { lag_delta += 360.0; }
+        // Smooth follow : 8 rad/s convergence
+        d.torso_lag_yaw += lag_delta * (1.0 - (-8.0_f32 * dt).exp());
+        let lag_offset_deg = (d.torso_lag_yaw - body_yaw_deg).clamp(-12.0, 12.0);
+        let lag_quat = Quat::from_axis_angle(GVec3::Z, lag_offset_deg.to_radians());
+        let lag_m = GMat4::from_quat(lag_quat);
+
+        // **Weapon sway** (v0.9.6) — micro-oscillation sinusoïdale du
+        // torse quand le bot bouge, simulant l'inertie de l'arme.
+        let sway_amp = if moving { (v_xy / 320.0).min(1.0) * 0.03 } else { 0.0 };
+        let sway_freq = if v_xy > 120.0 { 8.0 } else { 5.0 }; // plus rapide en run
+        let sway_val = (time_sec * sway_freq + phase_offset * 6.28).sin() * sway_amp;
+        let sway_quat = Quat::from_axis_angle(GVec3::Z, sway_val);
+        let sway_m = GMat4::from_quat(sway_quat);
+
+        let upper_m = lower_m * torso_local * counter_rot_m * lag_m * pitch_m * hit_twist_m * sway_m;
         let head_local = rig
             .upper
             .tag_transform(fa_u, fb_u, lerp_u, "tag_head")
             .unwrap_or(ident);
         let mut head_m = upper_m * head_local;
 
-        // **Headlook IK** (G1d) — quand le bot a une cible, la tête
-        // suit la direction de la cible en yaw seul (clamp ±45°).
-        // Pitch ignoré pour ne pas casser les frames du head MD3 qui
-        // n'a généralement qu'un seul frame statique.
-        if let Some(target) = d.bot.target_enemy {
+        // **#5 Look-at IK enhanced** (v0.9.6) — quand le bot a une
+        // cible, la tête suit la direction de la cible en yaw + pitch
+        // (clamp yaw ±55°, pitch ±30°).  Critical damper smoothing
+        // pour éviter les snap-rotations sur changement de cible.
+        let (target_yaw_off, target_pitch_off) = if let Some(target) = d.bot.target_enemy {
             let head_world =
                 Vec3::new(head_m.col(3).x, head_m.col(3).y, head_m.col(3).z);
             let to = target - head_world;
-            if to.length_squared() > 1.0 {
+            let dist = to.length();
+            if dist > 1.0 {
                 let look_yaw = to.y.atan2(to.x).to_degrees();
+                let look_pitch = (-to.z / dist).asin().to_degrees(); // up→pitch+ Q3
                 let body_yaw = d.body.view_angles.yaw;
-                let mut delta = look_yaw - body_yaw;
-                while delta > 180.0 {
-                    delta -= 360.0;
-                }
-                while delta < -180.0 {
-                    delta += 360.0;
-                }
-                let clamped = delta.clamp(-45.0, 45.0);
-                let extra_rot = Quat::from_rotation_z(clamped.to_radians());
-                let extra_m = GMat4::from_quat(extra_rot);
-                let p = head_world;
-                let to_origin =
-                    GMat4::from_translation(GVec3::new(-p.x, -p.y, -p.z));
-                let from_origin =
-                    GMat4::from_translation(GVec3::new(p.x, p.y, p.z));
-                head_m = from_origin * extra_m * to_origin * head_m;
-            }
+                let mut yd = look_yaw - body_yaw;
+                while yd > 180.0 { yd -= 360.0; }
+                while yd < -180.0 { yd += 360.0; }
+                (yd.clamp(-55.0, 55.0), look_pitch.clamp(-30.0, 30.0))
+            } else { (0.0, 0.0) }
+        } else { (0.0, 0.0) };
+        // Smooth lerp vers la cible (8 rad/s).
+        let smooth_k = 1.0 - (-8.0_f32 * dt).exp();
+        d.head_look_yaw += (target_yaw_off - d.head_look_yaw) * smooth_k;
+        d.head_look_pitch += (target_pitch_off - d.head_look_pitch) * smooth_k;
+        if d.head_look_yaw.abs() > 0.1 || d.head_look_pitch.abs() > 0.1 {
+            let head_world =
+                Vec3::new(head_m.col(3).x, head_m.col(3).y, head_m.col(3).z);
+            let extra_rot = Quat::from_rotation_z(d.head_look_yaw.to_radians())
+                * Quat::from_axis_angle(
+                    GVec3::new(-yaw_rad.sin(), yaw_rad.cos(), 0.0),
+                    d.head_look_pitch.to_radians(),
+                );
+            let extra_m = GMat4::from_quat(extra_rot);
+            let p = head_world;
+            let to_origin =
+                GMat4::from_translation(GVec3::new(-p.x, -p.y, -p.z));
+            let from_origin =
+                GMat4::from_translation(GVec3::new(p.x, p.y, p.z));
+            head_m = from_origin * extra_m * to_origin * head_m;
         }
 
         // Head tint distinct (plus clair) — différencie visuellement la
@@ -18356,6 +20261,7 @@ impl RemoteInterp {
 /// snapshots à 20 Hz (snapshot interval = 50 ms = 45 u à vitesse rocket,
 /// très visible si on téléporte).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RemoteProjectile {
     id: u32,
     kind: q3_net::EntityKindWire,
@@ -18566,6 +20472,10 @@ struct RockProp {
     /// Clé de prop dans `Renderer::queue_prop` — "rock", "statue",
     /// "building", "tropical", etc.
     prop_name: &'static str,
+    /// Normale du terrain au point de placement.  Quand `Some(n)`,
+    /// la matrice de rendu aligne le Y-up du mesh glTF avec cette
+    /// normale (épouse la pente).  `None` = Y-up standard (→ Z monde).
+    terrain_normal: Option<[f32; 3]>,
 }
 
 /// **Drone aérien BR** (v0.9.5) — vaisseau GLB qui orbite à grande
@@ -18639,6 +20549,250 @@ impl<'a> q3_bot::LosWorld for TerrainLos<'a> {
 /// le joueur peut grimper, voir des sommets, sentir l'échelle.  Le
 /// pipeline Python `tools/dem_to_terrain.py` reste recommandé pour la
 /// vraie heightmap.
+/// **Editor helper** — convertit un prop_name `&str` en `&'static str`
+/// en réutilisant les noms déjà connus, ou en interning via leak pour
+/// les nouveaux.  Les noms connus correspondent aux props déclarés
+/// dans `load_*_asset` + props éditeur.
+///
+/// Le leak est acceptable : un éditeur place quelques dizaines de
+/// props max par session, et les noms sont courts.  Sans interning,
+/// l'éditeur ne pourrait pas spawn de prop dont le nom n'est pas dans
+/// la liste hardcodée.
+/// **Procedural grass tuft mesh** (v0.9.6) — génère un mesh GLB compatible
+/// directement en mémoire, sans passer par un fichier disque.  3 quads
+/// verticaux croisés à 60° (couverture 360° vue de dessus = "billboard
+/// cross"), gradient vertex color sombre→clair, normales orthogonales.
+///
+/// Le mesh occupe ~30u de large × 40u de haut en glTF Y-up (Y = vertical
+/// du brin).  Le système de scatter applique scale + yaw + alignement
+/// terrain par-dessus.  Vertex colors sont multipliés par le tint
+/// d'instance dans le shader → mix gradient × tint = couleur finale.
+fn make_grass_tuft_mesh() -> q3_model::glb::GlbMesh {
+    use q3_model::glb::{GlbMesh, GlbVertex};
+
+    let half_w = 15.0_f32;  // demi-largeur d'un brin
+    let height = 40.0_f32;  // hauteur totale
+    // 3 quads, rotations Y de 0°, 60°, 120° → 6 directions par paire.
+    let angles = [0.0_f32, std::f32::consts::TAU / 3.0, 2.0 * std::f32::consts::TAU / 3.0];
+
+    let mut vertices: Vec<GlbVertex> = Vec::with_capacity(12);
+    let mut indices: Vec<u32> = Vec::with_capacity(18);
+
+    // Couleurs (RGBA8) — racine sombre, pointe claire (variation typique
+    // herbe tropicale Reunion).
+    let col_root = [40u8, 70, 25, 255];
+    let col_tip  = [130u8, 200, 80, 255];
+
+    for &theta in &angles {
+        let cw = theta.cos();
+        let sw = theta.sin();
+        // Direction width dans le plan XZ (glTF horizontal).
+        let wx = cw * half_w;
+        let wz = sw * half_w;
+        // Normale = perpendiculaire au plan du quad, dans XZ.
+        let nx = -sw;
+        let nz = cw;
+        let normal = [nx, 0.0_f32, nz];
+
+        let base = vertices.len() as u32;
+        // Bottom-left
+        vertices.push(GlbVertex {
+            pos: [-wx, 0.0, -wz],
+            _pad0: 0.0,
+            normal,
+            _pad1: 0.0,
+            uv: [0.0, 1.0],
+            color: col_root,
+            _pad2: 0.0,
+        });
+        // Bottom-right
+        vertices.push(GlbVertex {
+            pos: [wx, 0.0, wz],
+            _pad0: 0.0,
+            normal,
+            _pad1: 0.0,
+            uv: [1.0, 1.0],
+            color: col_root,
+            _pad2: 0.0,
+        });
+        // Top-right
+        vertices.push(GlbVertex {
+            pos: [wx, height, wz],
+            _pad0: 0.0,
+            normal,
+            _pad1: 0.0,
+            uv: [1.0, 0.0],
+            color: col_tip,
+            _pad2: 0.0,
+        });
+        // Top-left
+        vertices.push(GlbVertex {
+            pos: [-wx, height, -wz],
+            _pad0: 0.0,
+            normal,
+            _pad1: 0.0,
+            uv: [0.0, 0.0],
+            color: col_tip,
+            _pad2: 0.0,
+        });
+
+        // Two triangles per quad (CCW from front).
+        indices.extend_from_slice(&[
+            base,     base + 1, base + 2,
+            base,     base + 2, base + 3,
+        ]);
+    }
+
+    GlbMesh {
+        vertices,
+        indices,
+        bounds_min: [-half_w, 0.0, -half_w],
+        bounds_max: [ half_w, height, half_w],
+        base_color_texture: None,
+        base_color_factor: [1.0, 1.0, 1.0, 1.0],
+        normal_texture: None,
+        metallic_roughness_texture: None,
+        metallic_factor: 0.0,
+        roughness_factor: 0.95,
+        lights: Vec::new(),
+    }
+}
+
+/// **Procedural rock mesh** (v0.9.6) — génère un mesh GLB en mémoire :
+/// icosahédron 12 verts / 20 faces avec perturbation déterministe par
+/// vertex (déformation sphérique + offset hash).  Flat shading via
+/// duplication des verts par face (60 verts au final).  Vertex colors
+/// gris-bruns variés pour casser l'uniformité.
+///
+/// Le mesh occupe ~25u de rayon par défaut.  Le système de scatter
+/// applique scale + yaw + tint d'instance par-dessus pour des silhouettes
+/// uniques sur chaque rocher placé.
+fn make_rock_proc_mesh() -> q3_model::glb::GlbMesh {
+    use q3_model::glb::{GlbMesh, GlbVertex};
+
+    // Icosahédron unitaire (golden ratio).
+    let phi = (1.0_f32 + 5.0_f32.sqrt()) * 0.5;
+    let base_radius = 22.0_f32; // rayon ~22u avant perturbation
+    let n = 1.0_f32 / (1.0 + phi * phi).sqrt(); // normalize factor pour unit sphere
+    let scale = base_radius * n;
+    let raw_verts: [[f32; 3]; 12] = [
+        [-1.0,  phi,  0.0],
+        [ 1.0,  phi,  0.0],
+        [-1.0, -phi,  0.0],
+        [ 1.0, -phi,  0.0],
+        [ 0.0, -1.0,  phi],
+        [ 0.0,  1.0,  phi],
+        [ 0.0, -1.0, -phi],
+        [ 0.0,  1.0, -phi],
+        [ phi,  0.0, -1.0],
+        [ phi,  0.0,  1.0],
+        [-phi,  0.0, -1.0],
+        [-phi,  0.0,  1.0],
+    ];
+    let faces: [[u32; 3]; 20] = [
+        [0,11, 5], [0, 5, 1], [0, 1, 7], [0, 7,10], [0,10,11],
+        [1, 5, 9], [5,11, 4], [11,10, 2], [10, 7, 6], [7, 1, 8],
+        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+        [4, 9, 5], [2, 4,11], [6, 2,10], [8, 6, 7], [9, 8, 1],
+    ];
+
+    // Perturbation déterministe par vertex — hash 3D simple sur l'index.
+    let perturbed: Vec<[f32; 3]> = raw_verts.iter().enumerate().map(|(i, v)| {
+        let h = (i as u32).wrapping_mul(2654435761);
+        let dx = ((h & 0xff) as f32 / 255.0 - 0.5) * 0.30;       // ±15 %
+        let dy = (((h >> 8) & 0xff) as f32 / 255.0 - 0.5) * 0.30;
+        let dz = (((h >> 16) & 0xff) as f32 / 255.0 - 0.5) * 0.30;
+        [
+            (v[0] + dx) * scale,
+            (v[1] + dy) * scale,
+            (v[2] + dz) * scale,
+        ]
+    }).collect();
+
+    // Build flat-shaded mesh : duplique les verts par face avec
+    // normale de face + couleur vertex variée.
+    let mut vertices: Vec<GlbVertex> = Vec::with_capacity(60);
+    let mut indices: Vec<u32> = Vec::with_capacity(60);
+
+    for (face_i, face) in faces.iter().enumerate() {
+        let p0 = perturbed[face[0] as usize];
+        let p1 = perturbed[face[1] as usize];
+        let p2 = perturbed[face[2] as usize];
+        // Normale de face (cross product).
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        let nlen = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+        let normal = [nx / nlen, ny / nlen, nz / nlen];
+
+        // Vertex color : gris de base + variation par face.
+        let h = (face_i as u32).wrapping_mul(0x9E37_79B9);
+        let g_base = 0.55 + ((h & 0xff) as f32 / 255.0) * 0.25; // 0.55..0.80
+        let warmth = ((h >> 8) & 0xff) as f32 / 255.0 * 0.10;   // 0..0.10 brunâtre
+        let r_ = (g_base + warmth * 0.5).min(1.0);
+        let g_ = g_base.min(1.0);
+        let b_ = (g_base - warmth).max(0.2);
+        let col = [
+            (r_ * 255.0) as u8,
+            (g_ * 255.0) as u8,
+            (b_ * 255.0) as u8,
+            255,
+        ];
+
+        let base = vertices.len() as u32;
+        for &p in &[p0, p1, p2] {
+            vertices.push(GlbVertex {
+                pos: p,
+                _pad0: 0.0,
+                normal,
+                _pad1: 0.0,
+                uv: [0.0, 0.0],
+                color: col,
+                _pad2: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    // Bounds (approx — base sphère + perturbation ±15 %).
+    let bound = base_radius * 1.20;
+    GlbMesh {
+        vertices,
+        indices,
+        bounds_min: [-bound, -bound, -bound],
+        bounds_max: [ bound,  bound,  bound],
+        base_color_texture: None,
+        base_color_factor: [1.0, 1.0, 1.0, 1.0],
+        normal_texture: None,
+        metallic_roughness_texture: None,
+        metallic_factor: 0.0,
+        roughness_factor: 0.85,
+        lights: Vec::new(),
+    }
+}
+
+fn static_prop_name(name: &str) -> &'static str {
+    // Liste des noms hardcodés (alignée sur load_*_asset).
+    const KNOWN: &[&str] = &[
+        "rock", "statue", "building", "hellhound", "statue_femme",
+        "grass", "grass_cluster", "grass_proc", "rock_proc", "tropical",
+        "quad_pickup", "regen_pickup", "machinegun_pickup", "ammo_crate",
+        "health_pack", "railgun_pickup", "railgun_ammo", "grenade_ammo",
+        "grenade_pickup", "rocket_ammo", "plasma_pickup", "shotgun_pickup",
+        "grenadelauncher_pickup", "gauntlet_pickup", "shotgun_ammo",
+        "bfg_ammo", "bfg_pickup", "rocketlauncher_pickup", "combat_armor",
+        "medkit", "armor_shard", "lightninggun_pickup", "lg_ammo",
+        "big_armor", "cell_ammo", "lightning_beam",
+    ];
+    for k in KNOWN {
+        if *k == name { return *k; }
+    }
+    // Inconnu : leak la string pour obtenir un &'static.
+    Box::leak(name.to_string().into_boxed_str())
+}
+
 fn synthesize_reunion_fallback() -> q3_terrain::Terrain {
     use q3_terrain::TerrainMeta;
     let meta = TerrainMeta::reunion_default();
@@ -18816,7 +20970,7 @@ fn bot_scale(idx: usize) -> f32 {
     // Multiplier global appliqué à toutes les variantes — bump à 1.30
     // (user request : "bots trop petits").  Les ratios entre variantes
     // sont conservés pour la diversité visuelle.
-    const GLOBAL_MULT: f32 = 1.30;
+    const GLOBAL_MULT: f32 = 1.55;
     const SCALES: &[f32] = &[0.93, 1.00, 1.06, 0.97, 1.03];
     SCALES[idx % SCALES.len()] * GLOBAL_MULT
 }
@@ -19309,7 +21463,14 @@ fn queue_pickups(
             )
         {
             let s = railgun_pickup_scale.unwrap();
-            r.queue_prop("railgun_pickup", make_glb_model(s, yaw, trans), [1.0, 1.0, 1.0, 1.0]);
+            // **Rotation pre-baked** au load (cf. `load_railgun_pickup_asset`)
+            // — le canon est maintenant aligné avec glTF +X = world forward
+            // au yaw natif, donc plus besoin de compensation ici.
+            r.queue_prop(
+                "railgun_pickup",
+                make_glb_model(s, yaw, trans),
+                [1.0, 1.0, 1.0, 1.0],
+            );
             continue;
         }
 
@@ -19745,6 +21906,7 @@ fn queue_viewmodel(
             WeaponId::Rocketlauncher  => 13.0_f32, // bien visible (user request)
             WeaponId::Lightninggun    => 13.0_f32, // bien visible (user request)
             WeaponId::Bfg             => 13.0_f32, // bien visible (user request)
+            WeaponId::Railgun         => 14.0_f32, // gros viewmodel (user request v0.9.6)
             WeaponId::Grenadelauncher => 10.5_f32,
             WeaponId::Plasmagun       => 10.5_f32,
             _                         => 8.0_f32,
@@ -19759,15 +21921,15 @@ fn queue_viewmodel(
         let base_col1 = [ u_v.x,  u_v.y,  u_v.z];
         let base_col2 = [ f_v.x,  f_v.y,  f_v.z];
         let (col0, col1, col2) = if matches!(weapon, WeaponId::Grenadelauncher) {
-            // Grenadelauncher : baseline + rotation +90° Y (canon le long
-            // de GLB -X local).  +90° Y math :
-            //   new_col_x = -base_col2  (= -forward)
+            // Grenadelauncher : baseline + rotation -90° Y (= +90° + 180°
+            // user request "tenu à l'envers, fait 180 Y").  Math :
+            //   new_col_x =  base_col2  (= +forward)
             //   new_col_y =  base_col1  (= +up)
-            //   new_col_z =  base_col0  (= -right)
+            //   new_col_z = -base_col0  (= +right)
             (
-                [-base_col2[0], -base_col2[1], -base_col2[2]],
+                base_col2,
                 base_col1,
-                base_col0,
+                [-base_col0[0], -base_col0[1], -base_col0[2]],
             )
         } else if matches!(weapon, WeaponId::Shotgun) {
             // Shotgun : baseline + rotation -90° Y (canon le long de

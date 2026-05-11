@@ -50,6 +50,7 @@ struct VsIn {
     @location(5) m2: vec4<f32>,
     @location(6) m3: vec4<f32>,
     @location(7) tint: vec4<f32>,
+    @location(8) vcolor: vec4<f32>,
 };
 
 struct VsOut {
@@ -69,7 +70,10 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip_pos = camera.view_proj * world_pos4;
     let n4 = model * vec4<f32>(in.normal, 0.0);
     out.world_normal = normalize(n4.xyz);
-    out.tint = in.tint;
+    // **v0.9.6** : multiplie le tint instance par la vertex color
+    // (baked base_color_factor par primitive glTF).  Permet aux assets
+    // multi-material d'afficher leurs vraies couleurs distinctes.
+    out.tint = in.tint * in.vcolor;
     out.uv = in.uv;
     return out;
 }

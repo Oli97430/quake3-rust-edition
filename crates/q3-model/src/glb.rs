@@ -43,6 +43,13 @@ pub enum GlbError {
 ///
 /// **v0.9.5++** : ajout du champ `uv` (vec2) pour le sampling de la
 /// `baseColorTexture` glTF. Stride passé de 32 → 48 octets.
+///
+/// **v0.9.6** : ajout d'un champ `color` (RGBA8) qui réutilise le
+/// padding existant.  Permet de baker le `base_color_factor` de
+/// chaque primitive glTF en vertex color, donc supporter des assets
+/// multi-material où chaque sous-mesh a sa propre couleur (railgun
+/// avec orange + steel + cyan, par exemple).  Le shader multiplie
+/// vertex.color par la base color globale.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GlbVertex {
@@ -51,7 +58,9 @@ pub struct GlbVertex {
     pub normal: [f32; 3],
     pub _pad1: f32,
     pub uv: [f32; 2],
-    pub _pad2: [f32; 2],
+    /// Vertex color RGBA8 (0..255).  255 = blanc neutre (=> no-op).
+    pub color: [u8; 4],
+    pub _pad2: f32,
 }
 
 impl GlbVertex {
@@ -168,66 +177,51 @@ impl GlbMesh {
         let mut roughness_factor: f32 = 1.0;
 
         let mut prim_count = 0usize;
+
+        // **Scene graph traversal** (v0.9.6) — on parcourt récursivement
+        // les nodes de la scène par défaut en accumulant la world matrix
+        // (parent_world * local).  Chaque mesh accroché à un node voit
+        // ses vertex positions transformées par cette matrice.  Sans
+        // ça, des assets exportés de Blender (multi-mesh parentés à un
+        // empty `Gun_Root`) verraient leurs sous-meshes s'effondrer à
+        // l'origine puisqu'ils ne sont pas eux-mêmes au monde origin.
+        //
+        // Convention : on **bake** la world matrix dans les vertices.
+        // Les axes glTF natifs Y-up sont préservés tels quels — la
+        // conversion Y-up→Z-up reste appliquée à l'instance par les
+        // matrices côté engine (cf. commentaire historique).
+
+        // Collecte récursive : pour chaque mesh_idx on
+        // mémorise toutes les world matrices qui l'utilisent.
+        // (Un même mesh peut être instancié par plusieurs nodes,
+        //  cas rare mais on le supporte.)
+        let mut mesh_instances: hashbrown::HashMap<usize, Vec<glam::Mat4>> =
+            hashbrown::HashMap::new();
+        // Trouve la scène par défaut (ou la première).
+        let scene = doc.default_scene().or_else(|| doc.scenes().next());
+        if let Some(scene) = scene {
+            for node in scene.nodes() {
+                collect_node_meshes(&node, glam::Mat4::IDENTITY, &mut mesh_instances);
+            }
+        } else {
+            // Fallback : pas de scène — ajoute toutes les meshes avec identity.
+            for mesh in doc.meshes() {
+                mesh_instances.entry(mesh.index()).or_default().push(glam::Mat4::IDENTITY);
+            }
+        }
+
         for mesh in doc.meshes() {
+            let world_matrices = match mesh_instances.get(&mesh.index()) {
+                Some(v) if !v.is_empty() => v.clone(),
+                _ => continue, // mesh orphelin (pas dans la scène)
+            };
+
             for prim in mesh.primitives() {
-                let reader = prim.reader(|b| Some(&buffers[b.index()]));
-                let positions: Vec<[f32; 3]> = reader
-                    .read_positions()
-                    .ok_or(GlbError::NoPositions)?
-                    .collect();
-                let normals: Vec<[f32; 3]> = reader
-                    .read_normals()
-                    .map(|it| it.collect())
-                    .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
-                // **UVs** (v0.9.5++) — set 0 utilisé par baseColor.
-                // Si absent : (0, 0) par défaut (texture sample = pixel coin).
-                let uvs: Vec<[f32; 2]> = reader
-                    .read_tex_coords(0)
-                    .map(|tc| tc.into_f32().collect())
-                    .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-
-                let base = all_verts.len() as u32;
-                // **Note conventions axes GLB** : on PRÉSERVE les coords
-                // glTF natives (Y-up) en local mesh.  Les matrices de
-                // rendu côté engine (`queue_prop`, `queue_viewmodel`,
-                // `spawn_glb_lights_for_prop`) appliquent la conversion
-                // Y-up→Z-up via leurs `basis` vecteurs au moment de
-                // poser l'instance.  Convertir ici casserait toutes
-                // les orientations viewmodels tunées (plasma 180° Z,
-                // MG -90° Y, etc.).  Voir le commentaire dans
-                // `app.rs::queue_viewmodel` pour la convention.
-                for ((p, n), uv) in positions.iter().zip(normals.iter()).zip(uvs.iter()) {
-                    for k in 0..3 {
-                        if p[k] < bounds_min[k] { bounds_min[k] = p[k]; }
-                        if p[k] > bounds_max[k] { bounds_max[k] = p[k]; }
-                    }
-                    all_verts.push(GlbVertex {
-                        pos: *p,
-                        _pad0: 0.0,
-                        normal: *n,
-                        _pad1: 0.0,
-                        uv: *uv,
-                        _pad2: [0.0; 2],
-                    });
-                }
-
-                if let Some(idx_iter) = reader.read_indices() {
-                    for i in idx_iter.into_u32() {
-                        all_indices.push(base + i);
-                    }
-                } else {
-                    for i in 0..(positions.len() as u32) {
-                        all_indices.push(base + i);
-                    }
-                }
-
-                // **Material extraction** — premier prim qui a un
-                // baseColorTexture la fournit pour tout le mesh.
-                // Multi-material non supporté (asset moderne typique
-                // a un material global).
+                // Material : extrait factor + textures par primitive.
                 let material = prim.material();
                 let pbr = material.pbr_metallic_roughness();
-                base_color_factor = pbr.base_color_factor();
+                let prim_color = pbr.base_color_factor();
+                base_color_factor = [1.0, 1.0, 1.0, 1.0]; // global = neutre, le vrai code va dans vertex color
                 metallic_factor = pbr.metallic_factor();
                 roughness_factor = pbr.roughness_factor();
                 if base_color_texture.is_none() {
@@ -254,6 +248,72 @@ impl GlbMesh {
                         }
                     }
                 }
+
+                let reader = prim.reader(|b| Some(&buffers[b.index()]));
+                let positions: Vec<[f32; 3]> = reader
+                    .read_positions()
+                    .ok_or(GlbError::NoPositions)?
+                    .collect();
+                let normals: Vec<[f32; 3]> = reader
+                    .read_normals()
+                    .map(|it| it.collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
+                let uvs: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|tc| tc.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+
+                // Pack base_color_factor en RGBA8.
+                let prim_color8 = [
+                    (prim_color[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (prim_color[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (prim_color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                    (prim_color[3].clamp(0.0, 1.0) * 255.0) as u8,
+                ];
+
+                // Pour chaque world matrix instanciant ce mesh, ajoute
+                // une copie des vertices transformées.
+                for &world in &world_matrices {
+                    let normal_mat = glam::Mat3::from_mat4(world);
+                    // Inversion-transpose pour les normals (compensation
+                    // d'éventuels scales non-uniformes).
+                    let normal_mat = normal_mat.inverse().transpose();
+
+                    let base = all_verts.len() as u32;
+
+                    for ((p, n), uv) in
+                        positions.iter().zip(normals.iter()).zip(uvs.iter())
+                    {
+                        let p4 = world * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+                        let pw = [p4.x, p4.y, p4.z];
+                        let nw = (normal_mat * glam::Vec3::new(n[0], n[1], n[2]))
+                            .normalize_or_zero();
+                        for k in 0..3 {
+                            if pw[k] < bounds_min[k] { bounds_min[k] = pw[k]; }
+                            if pw[k] > bounds_max[k] { bounds_max[k] = pw[k]; }
+                        }
+                        all_verts.push(GlbVertex {
+                            pos: pw,
+                            _pad0: 0.0,
+                            normal: [nw.x, nw.y, nw.z],
+                            _pad1: 0.0,
+                            uv: *uv,
+                            color: prim_color8,
+                            _pad2: 0.0,
+                        });
+                    }
+
+                    if let Some(idx_iter) = reader.clone().read_indices() {
+                        for i in idx_iter.into_u32() {
+                            all_indices.push(base + i);
+                        }
+                    } else {
+                        for i in 0..(positions.len() as u32) {
+                            all_indices.push(base + i);
+                        }
+                    }
+                }
+                let _ = &world_matrices; // borrow check
                 prim_count += 1;
             }
         }
@@ -316,6 +376,26 @@ impl GlbMesh {
         let dy = (self.bounds_max[1] - c[1]).abs();
         let dz = (self.bounds_max[2] - c[2]).abs();
         (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+}
+
+/// **v0.9.6** — parcourt récursivement le scene graph et accumule les
+/// world matrices des nodes ayant un mesh attaché.  Permet au loader
+/// de baker les transforms des nodes parents dans les vertex positions
+/// (corrige les GLB multi-mesh exportés depuis Blender / DCC où chaque
+/// sous-objet est parenté à un empty avec sa propre translation).
+fn collect_node_meshes(
+    node: &gltf::Node<'_>,
+    parent_world: glam::Mat4,
+    out: &mut hashbrown::HashMap<usize, Vec<glam::Mat4>>,
+) {
+    let local = glam::Mat4::from_cols_array_2d(&node.transform().matrix());
+    let world = parent_world * local;
+    if let Some(mesh) = node.mesh() {
+        out.entry(mesh.index()).or_default().push(world);
+    }
+    for child in node.children() {
+        collect_node_meshes(&child, world, out);
     }
 }
 

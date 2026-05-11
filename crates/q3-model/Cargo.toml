@@ -16,3 +16,4 @@ gltf = { workspace = true }
 thiserror = { workspace = true }
 image = { workspace = true }
 glam = { workspace = true }
+hashbrown = { workspace = true }

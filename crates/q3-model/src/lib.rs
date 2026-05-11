@@ -43,7 +43,9 @@ const _: () = assert!(
 
 pub mod raw;
 pub mod glb;
+pub mod skin;
 pub use glb::{GlbMesh, GlbVertex, GlbError};
+pub use skin::SkinData;
 
 use bytemuck::try_cast_slice;
 use q3_common::{Error, Result};
