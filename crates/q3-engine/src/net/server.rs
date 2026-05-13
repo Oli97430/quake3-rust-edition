@@ -3458,7 +3458,7 @@ mod tests {
         assert_eq!(s.position_history.len(), LAG_COMP_HISTORY_LEN);
         // La plus vieille entrée doit avoir été éjectée — le 1er
         // server_time encore présent est `5` (5 entrées éjectées).
-        assert_eq!(s.position_history.front().unwrap().0, 5);
+        assert_eq!(s.position_history.front().unwrap().time_ms, 5);
     }
 
     #[test]

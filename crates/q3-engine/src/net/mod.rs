@@ -732,7 +732,7 @@ mod tests {
         let mut server_io = NetIo::bind(server_addr).expect("bind serveur");
         let real_server_addr = server_io.local_addr();
 
-        let mut client_io = NetIo::bind("127.0.0.1:0".parse().unwrap()).expect("bind client");
+        let client_io = NetIo::bind("127.0.0.1:0".parse().unwrap()).expect("bind client");
 
         client_io.send(real_server_addr, b"hello-server".to_vec());
 

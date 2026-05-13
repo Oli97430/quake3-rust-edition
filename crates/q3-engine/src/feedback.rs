@@ -1170,8 +1170,9 @@ mod tests {
         cam.start_replay(0, "Xaero", "railgun", 10.0);
         assert!(cam.is_active());
 
-        // Sample au milieu du replay
-        let (pos, angles) = cam.sample(10.0 + KILLCAM_REPLAY_DURATION * 0.5).unwrap();
+        // Sample au milieu du replay — la durée effective est le span des
+        // frames enregistrées (~0.98s), pas KILLCAM_REPLAY_DURATION (3s).
+        let (pos, angles) = cam.sample(10.0 + 0.4).unwrap();
         assert!(pos.x > 0.0, "position should have progressed");
         assert!(angles.yaw > 0.0, "yaw should have rotated");
     }
