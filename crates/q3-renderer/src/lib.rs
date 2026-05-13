@@ -1104,7 +1104,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
 
     /// Vérifie si le pipeline drone a un mesh chargé.
     pub fn drone_has_mesh(&self) -> bool {
-        self.drone_gpu.as_ref().map_or(false, |d| d.has_mesh())
+        self.drone_gpu.as_ref().is_some_and(|d| d.has_mesh())
     }
 
     /// Radius natif (unités mesh) du drone GLB. `0.0` si non chargé.
@@ -1122,7 +1122,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
     }
 
     pub fn has_prop(&self, name: &str) -> bool {
-        self.drone_gpu.as_ref().map_or(false, |d| d.has_prop(name))
+        self.drone_gpu.as_ref().is_some_and(|d| d.has_prop(name))
     }
 
     /// Radius natif (unités mesh) du prop GLB identifié par `name`.
@@ -1354,6 +1354,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
     }
 
     /// Spawne une particule billboard (smoke puff, gunspark, etc.).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_particle(
         &mut self,
         pos: Vec3,
@@ -1433,6 +1434,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
     /// Queue un beam en spirale (hélice) autour de l'axe `a→b` — utilisé
     /// pour le trail Railgun.  Le rayon fade à 0 aux deux extrémités pour
     /// que la spirale naisse et meure proprement sur l'axe.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_beam_spiral(
         &mut self,
         a: Vec3,
@@ -1572,6 +1574,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         // qu'on démarre le pass (qui a besoin de `self.camera_bind_group`
         // etc.).
         use self::material::BlendClass;
+        #[allow(clippy::type_complexity)]
         let mut buckets: Option<[Vec<(Arc<material::Material>, u32, u32)>; 4]> = None;
         let mut pipelines: Option<[Arc<wgpu::RenderPipeline>; 4]> = None;
         if let (Some(mesh), Some(mats), Some(pipes)) = (

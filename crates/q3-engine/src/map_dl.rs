@@ -92,7 +92,7 @@ impl DownloadStatus {
 /// Dispatcher des téléchargements de maps.  Un seul job en parallèle
 /// (queue série) pour éviter de saturer la bande passante du joueur
 /// + simplifier l'UI.  Si l'utilisateur en lance un 2e pendant un
-/// 1er, le 2e attend dans `pending`.
+///   1er, le 2e attend dans `pending`.
 pub struct MapDownloader {
     /// Statut du job courant (lu par l'App pour le HUD).
     pub status: Arc<Mutex<DownloadStatus>>,

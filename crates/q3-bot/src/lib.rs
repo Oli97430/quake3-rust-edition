@@ -74,16 +74,18 @@ pub enum BotState {
 
 /// Niveau de difficulté du bot — tuning Q3 historique (`bot_minplayers`
 /// + `g_spSkill`).  Chaque niveau module **la précision du tir**, **le
-/// temps de réaction** à une nouvelle cible, et **le cooldown** entre
-/// deux tirs.  `III` = équilibre de référence, `I` = "easy" (manque
-/// beaucoup), `V` = "nightmare" (aim presque parfait).
+///   temps de réaction** à une nouvelle cible, et **le cooldown** entre
+///   deux tirs.  `III` = équilibre de référence, `I` = "easy" (manque
+///   beaucoup), `V` = "nightmare" (aim presque parfait).
 ///
 /// On ne touche PAS à la vitesse de mouvement — la diff vient
 /// exclusivement du combat pour rester lisible côté joueur.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BotSkill {
     I,
     II,
+    #[default]
     III,
     IV,
     V,
@@ -159,11 +161,6 @@ impl BotSkill {
     }
 }
 
-impl Default for BotSkill {
-    fn default() -> Self {
-        Self::III
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Bot {

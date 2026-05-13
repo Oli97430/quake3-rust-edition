@@ -647,7 +647,7 @@ impl GpuParticleSystem {
             // ne l'utilise pas — le shader declare group(1) pour ses storage).
             pass.set_bind_group(0, camera_bind_group, &[]);
             pass.set_bind_group(1, &self.compute_bind_groups[self.ping], &[]);
-            let workgroups = (MAX_PARTICLES + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            let workgroups = MAX_PARTICLES.div_ceil(WORKGROUP_SIZE);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
 

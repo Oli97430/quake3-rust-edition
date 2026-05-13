@@ -58,7 +58,7 @@ impl Terrain {
         // Step taille = demi-sample pour respecter Nyquist horizontal.
         let step = (self.meta.units_per_sample * 0.5).max(1.0);
         let n_steps = (len / step).ceil() as usize;
-        let n_steps = n_steps.max(1).min(8192); // cap dur de sécurité
+        let n_steps = n_steps.clamp(1, 8192); // cap dur de sécurité
 
         let mut prev_t = 0.0_f32;
         let mut prev_above = self.is_above_terrain(start);

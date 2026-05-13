@@ -323,6 +323,7 @@ impl RtReflections {
     /// * `color_view` — vue de la scène HDR pleine résolution (Rgba16Float).
     /// * `camera_uniform` — données caméra de la frame courante.  On extrait
     ///   `view_proj` et `inv_view_proj` pour les passes de trace.
+    #[allow(clippy::too_many_arguments)]
     pub fn trace(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -436,8 +437,8 @@ impl RtReflections {
             pass.set_bind_group(0, &trace_bg, &[]);
             pass.set_bind_group(1, &hiz_bg, &[]);
             pass.dispatch_workgroups(
-                (dst_w + 7) / 8,
-                (dst_h + 7) / 8,
+                dst_w.div_ceil(8),
+                dst_h.div_ceil(8),
                 1,
             );
         }
@@ -451,8 +452,8 @@ impl RtReflections {
             pass.set_pipeline(&self.reflection_pipeline);
             pass.set_bind_group(0, &trace_bg, &[]);
             pass.dispatch_workgroups(
-                (self.half_width + 7) / 8,
-                (self.half_height + 7) / 8,
+                self.half_width.div_ceil(8),
+                self.half_height.div_ceil(8),
                 1,
             );
         }
@@ -466,8 +467,8 @@ impl RtReflections {
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &trace_bg, &[]);
             pass.dispatch_workgroups(
-                (self.half_width + 7) / 8,
-                (self.half_height + 7) / 8,
+                self.half_width.div_ceil(8),
+                self.half_height.div_ceil(8),
                 1,
             );
         }
@@ -585,7 +586,7 @@ fn create_blue_noise(
 
     // Constante irrationnelle pour la séquence R2 (2D low-discrepancy).
     // Basée sur le nombre plastique généralisé en 2D.
-    let g = 1.32471795724474602596;
+    let g = 1.324_717_957_244_746;
     let a1 = 1.0 / g;
     let a2 = 1.0 / (g * g);
 

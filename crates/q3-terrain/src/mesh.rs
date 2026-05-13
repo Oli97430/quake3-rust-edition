@@ -126,12 +126,12 @@ pub struct ChunkMesh {
 impl Terrain {
     /// Nombre de chunks horizontalement.
     pub fn n_chunks_x(&self) -> u32 {
-        ((self.width.saturating_sub(1) + CHUNK_QUADS - 1) / CHUNK_QUADS) as u32
+        self.width.saturating_sub(1).div_ceil(CHUNK_QUADS) as u32
     }
 
     /// Nombre de chunks verticalement.
     pub fn n_chunks_y(&self) -> u32 {
-        ((self.height.saturating_sub(1) + CHUNK_QUADS - 1) / CHUNK_QUADS) as u32
+        self.height.saturating_sub(1).div_ceil(CHUNK_QUADS) as u32
     }
 
     /// Centre monde d'un chunk (utilisé pour la sélection LOD côté

@@ -568,16 +568,13 @@ impl Menu {
                 }
                 _ => {}
             },
-            MenuPage::Video => match index {
-                1 => {
-                    // Cycle résolution.
-                    let n = RESOLUTIONS.len();
-                    let cur = self.resolution_idx as i32;
-                    let next = (cur + dir).rem_euclid(n as i32) as usize;
-                    self.resolution_idx = next;
-                }
-                _ => {} // les toggles/apply passent par activate_selected
-            },
+            MenuPage::Video => if index == 1 {
+                // Cycle résolution.
+                let n = RESOLUTIONS.len();
+                let cur = self.resolution_idx as i32;
+                let next = (cur + dir).rem_euclid(n as i32) as usize;
+                self.resolution_idx = next;
+            }, // les autres toggles/apply passent par activate_selected
             MenuPage::Audio => match index {
                 1 => {
                     let cur = cvars.get_f32("s_volume").unwrap_or(0.8);

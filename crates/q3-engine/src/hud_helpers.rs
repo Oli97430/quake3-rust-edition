@@ -89,6 +89,7 @@ pub fn push_panel(r: &mut Renderer, x: f32, y: f32, w: f32, h: f32) {
 /// Barre horizontale avec dégradé linéaire (8 quartiers) entre `low_color`
 /// (ratio=0) et `high_color` (ratio=1). Pas un vrai dégradé GPU mais un
 /// escalier qui passe à l'œil sur 80-200 px de barre.
+#[allow(clippy::too_many_arguments)]
 pub fn push_bar_gradient(
     r: &mut Renderer,
     x: f32,

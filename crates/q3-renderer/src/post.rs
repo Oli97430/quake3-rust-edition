@@ -508,6 +508,7 @@ impl PostFx {
     /// * `time` — anime le film grain (sinon pattern statique)
     /// * `sun_uv` — position UV du soleil pour le raymarch god rays
     /// * `sun_visibility` — 0.0 hors frustum, 1.0 visible
+    ///
     /// Doit être appelé chaque frame avant `apply`.
     pub fn set_compose_params(
         &self,

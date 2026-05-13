@@ -145,7 +145,6 @@ impl VrRuntime {
     /// controllers.  En mode disabled : no-op.
     pub fn begin_frame(&mut self) {
         if !self.enabled {
-            return;
         }
         // TODO(vr) : xrWaitFrame + sync action set + get_view_locate.
     }
@@ -166,7 +165,6 @@ impl VrRuntime {
     /// disabled.
     pub fn end_frame(&mut self) {
         if !self.enabled {
-            return;
         }
         // TODO(vr) : xrEndFrame avec les 2 composition layers.
     }

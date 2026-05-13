@@ -43,7 +43,7 @@ impl LightmapArray {
         });
 
         // Upload chaque couche. La BSP stocke en RGB ; on étend à RGBA avec α=255.
-        let mut rgba = vec![255u8; (LIGHTMAP_SIZE * LIGHTMAP_SIZE * 4) as usize];
+        let mut rgba = vec![255u8; LIGHTMAP_SIZE * LIGHTMAP_SIZE * 4];
         for layer in 0..n_map {
             let Some(rgb) = bsp.lightmap(layer as usize) else {
                 continue;

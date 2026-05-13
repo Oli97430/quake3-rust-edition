@@ -557,7 +557,7 @@ pub struct App {
     /// Prochain instant où un bot peut de nouveau parler (cooldown
     /// global anti-spam).  Q3 original a un système de personnalités
     /// + weights complexe ; nous prenons un simple throttle : un bot
-    /// au plus parle par fenêtre de `CHAT_GLOBAL_COOLDOWN`.
+    ///   au plus parle par fenêtre de `CHAT_GLOBAL_COOLDOWN`.
     next_chat_at: f32,
     /// Prochain instant où le joueur peut relancer une taunt F3.  Le
     /// cooldown dédié (plutôt que `next_chat_at`) évite qu'une taunt
@@ -3139,6 +3139,7 @@ impl Input {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vfs: Arc<Vfs>,
         width: u32,
@@ -4435,11 +4436,11 @@ impl App {
     /// `name` est le nom court sans préfixe `maps/` ni suffixe `.bsp`
     /// (ex `br_reunion`). On cherche les assets `assets/maps/<name>.r16`
     /// + `.splat.png` + `.terrain.json`.  Si les fichiers ne sont pas
-    /// présents (cas où l'utilisateur n'a pas encore lancé le pipeline
-    /// Python `tools/dem_to_terrain.py`), on **synthétise** un terrain
-    /// de test à partir du preset `TerrainMeta::reunion_default()` —
-    /// c'est plat (heightmap de 0) mais ça permet d'instancier le BR
-    /// (ring shrink, POIs, spawns) pour valider la stack haut niveau.
+    ///   présents (cas où l'utilisateur n'a pas encore lancé le pipeline
+    ///   Python `tools/dem_to_terrain.py`), on **synthétise** un terrain
+    ///   de test à partir du preset `TerrainMeta::reunion_default()` —
+    ///   c'est plat (heightmap de 0) mais ça permet d'instancier le BR
+    ///   (ring shrink, POIs, spawns) pour valider la stack haut niveau.
     fn load_terrain_map(&mut self, name: &str) {
         use q3_terrain::{br::RingShrink, br::reunion_br_phases, Terrain, TerrainMeta};
 
@@ -7627,7 +7628,7 @@ impl App {
                     mesh,
                     origin: Vec3::new(x, y, z),
                     angles: q3_math::Angles::ZERO,
-                    kind: spec.kind.clone(),
+                    kind: spec.kind,
                     // BR : pas de respawn (un item ramassé est perdu).
                     respawn_cooldown: 9999.0,
                     respawn_at: None,
@@ -7655,7 +7656,7 @@ impl App {
     ///   - bit 1 (2) = `LOOPED_OFF` — loop activable via target, démarre off
     ///   - bit 2 (4) = `RELIABLE`   — réseau (inutilisé ici)
     ///   - bit 3 (8) = `ACTIVATOR`  — joué sur le joueur déclencheur
-    ///                                uniquement ; pas de spatialisation
+    ///     uniquement ; pas de spatialisation
     /// * `wait` : période (s) pour les "random" speakers — non loopés,
     ///   rejoue périodiquement.  Pas implémenté ici (les q3dm* de base
     ///   n'en ont pas besoin ; on skip silencieusement).
@@ -8163,17 +8164,10 @@ impl App {
                     if let Some(my) = self
                         .net
                         .client_stage()
-                        .and(self.remote_names.get(&slot).cloned().or_else(|| {
-                            // Aucune entrée — on déduit si c'est nous ou pas.
-                            None
-                        }))
+                        .and(self.remote_names.get(&slot).cloned())
                     {
                         KillActor::Bot(my)
-                    } else if self
-                        .remote_names
-                        .get(&slot)
-                        .is_none()
-                    {
+                    } else if !self.remote_names.contains_key(&slot) {
                         // Pas de nom mais c'est peut-être nous (notre slot
                         // n'est pas dans remote_names puisqu'on s'exclut).
                         // En l'absence de connaissance précise, on log
@@ -9199,10 +9193,10 @@ impl App {
     ///   - 40 HP → 1.0 Hz (1 par seconde)
     ///   - 25 HP → ~1.7 Hz
     ///   - 1  HP → ~2.5 Hz
-    /// Réutilise `sfx_hit` (blip court et sec) joué à la position du
-    /// joueur : panning inchangé (le joueur est sa propre source), mais
-    /// atténué via `Priority::Low` pour ne pas masquer un bruit de pas
-    /// ennemi.  Silencieux pendant le warmup / la mort / l'intermission.
+    ///     Réutilise `sfx_hit` (blip court et sec) joué à la position du
+    ///     joueur : panning inchangé (le joueur est sa propre source), mais
+    ///     atténué via `Priority::Low` pour ne pas masquer un bruit de pas
+    ///     ennemi.  Silencieux pendant le warmup / la mort / l'intermission.
     fn tick_heartbeat(&mut self) {
         const HEARTBEAT_THRESHOLD: i32 = 40;
         if self.match_winner.is_some()
@@ -13389,6 +13383,10 @@ impl ApplicationHandler for App {
         // Audio : best-effort, on log juste un warn si indispo (headless CI).
         match SoundSystem::new() {
             Ok(s) => {
+                // SoundSystem uses rodio's OutputStream which is !Send+!Sync
+                // intentionally — audio is main-thread only, Arc is never
+                // sent across threads.
+                #[allow(clippy::arc_with_non_send_sync)]
                 let arc = Arc::new(s);
                 arc.set_master_volume(self.cvars.get_f32("s_volume").unwrap_or(0.8));
                 arc.set_music_volume(self.cvars.get_f32("s_musicvolume").unwrap_or(0.25));
@@ -14410,7 +14408,7 @@ impl ApplicationHandler for App {
                             for &(pos, mut prio, available) in &pickups_priority {
                                 if !available { continue; }
                                 let dd = (pos - bp).length();
-                                if dd > 2000.0 || dd < 1.0 { continue; }
+                                if !(1.0..=2000.0).contains(&dd) { continue; }
                                 if !need_health && prio < 5.0 {
                                     prio *= 0.3;
                                 }
@@ -14743,7 +14741,7 @@ impl ApplicationHandler for App {
                             best.map(|(_, p)| p)
                         });
                         if let Some(target) = target {
-                            let target_eye = target + Vec3::Z * (BOT_CENTER_HEIGHT as f32);
+                            let target_eye = target + Vec3::Z * BOT_CENTER_HEIGHT;
                             // Orbite : angle qui tourne à 20°/s, rayon
                             // 220 u, hauteur +80 u au-dessus de la cible.
                             let t = self.time_sec * 20.0f32.to_radians();
@@ -16698,7 +16696,7 @@ fn find_lock_target(
         let center = d.body.origin + Vec3::Z * BOT_CENTER_HEIGHT;
         let to_t = center - eye;
         let dist = to_t.length();
-        if dist > LOCK_RANGE || dist < 1.0 {
+        if !(1.0..=LOCK_RANGE).contains(&dist) {
             continue;
         }
         let dot = to_t.dot(forward) / dist;
@@ -16816,7 +16814,7 @@ fn draw_minimap(
             // Distance joueur ↔ centre + rayon, plafond doux pour ne
             // pas trop dézoomer si le ring est énorme (premières phases).
             let d = (player_pos.truncate() - center.truncate()).length();
-            (d + radius * 1.2).max(1024.0).min(15000.0)
+            (d + radius * 1.2).clamp(1024.0, 15000.0)
         }
         None => 1024.0,
     };
@@ -17662,7 +17660,7 @@ fn draw_hud(
     // viewmodel qu'on baisse puis relève.  Alpha fade symétrique pour
     // éviter un clignotement de rectangle quand le panel est bas.
     let swap_elapsed = now - weapon_switch_at;
-    let (panel_y, panel_alpha) = if swap_elapsed >= 0.0 && swap_elapsed < WEAPON_SWITCH_ANIM_SEC {
+    let (panel_y, panel_alpha) = if (0.0..WEAPON_SWITCH_ANIM_SEC).contains(&swap_elapsed) {
         let t = (swap_elapsed / WEAPON_SWITCH_ANIM_SEC).clamp(0.0, 1.0);
         let drop = (t * std::f32::consts::PI).sin() * WEAPON_SWITCH_DROP_PX;
         // Fade : 1.0 aux bornes, 0.35 au creux — on garde un peu de
@@ -18457,15 +18455,14 @@ fn draw_hud(
             let to_bot = bd.body.origin - *player_origin;
             let to_bot_xy = Vec3::new(to_bot.x, to_bot.y, 0.0);
             let dist = to_bot_xy.length();
-            if dist < 1.0 || dist > PROX_DIST {
+            if !(1.0..=PROX_DIST).contains(&dist) {
                 continue;
             }
             let dir = to_bot_xy / dist;
-            if fwd_xy.dot(dir) < -0.3 {
-                if closest.map_or(true, |(d, _)| dist < d) {
+            if fwd_xy.dot(dir) < -0.3
+                && closest.map_or(true, |(d, _)| dist < d) {
                     closest = Some((dist, dir));
                 }
-            }
         }
         if let Some((dist, _)) = closest {
             let prox = 1.0 - (dist / PROX_DIST).clamp(0.0, 1.0);
@@ -18516,6 +18513,7 @@ fn draw_hud(
 /// Dessine un overlay semi-transparent listant le joueur et chaque bot
 /// avec leur score (frags / deaths). Centré à l'écran, trié par frags
 /// décroissants pour que le leader soit en tête.
+#[allow(clippy::too_many_arguments)]
 fn draw_scoreboard(
     r: &mut Renderer,
     w: f32,
@@ -19106,6 +19104,7 @@ fn bot_hitscan_profile(dist: f32) -> HitscanProfile {
 ///
 /// `player_alive=false` → les bots perdent l'agro et patrouillent, sans
 /// tirer. On laisse `target_enemy` à `None` dans ce cas.
+#[allow(clippy::too_many_arguments)]
 fn tick_bots(
     bots: &mut [BotDriver],
     dt: f32,
@@ -19163,7 +19162,7 @@ fn tick_bots(
             for &(pos, mut prio, available) in pickups_priority {
                 if !available { continue; }
                 let dist = (pos - bot_pos).length();
-                if dist > 2000.0 || dist < 1.0 { continue; }
+                if !(1.0..=2000.0).contains(&dist) { continue; }
                 // Health items dévalués si HP plein.
                 if !need_health && prio < 5.0 {
                     prio *= 0.3;
@@ -20037,7 +20036,7 @@ fn queue_bots(
         // torse quand le bot bouge, simulant l'inertie de l'arme.
         let sway_amp = if moving { (v_xy / 320.0).min(1.0) * 0.03 } else { 0.0 };
         let sway_freq = if v_xy > 120.0 { 8.0 } else { 5.0 }; // plus rapide en run
-        let sway_val = (time_sec * sway_freq + phase_offset * 6.28).sin() * sway_amp;
+        let sway_val = (time_sec * sway_freq + phase_offset * std::f32::consts::TAU).sin() * sway_amp;
         let sway_quat = Quat::from_axis_angle(GVec3::Z, sway_val);
         let sway_m = GMat4::from_quat(sway_quat);
 
@@ -20787,7 +20786,7 @@ fn static_prop_name(name: &str) -> &'static str {
         "big_armor", "cell_ammo", "lightning_beam",
     ];
     for k in KNOWN {
-        if *k == name { return *k; }
+        if *k == name { return k; }
     }
     // Inconnu : leak la string pour obtenir un &'static.
     Box::leak(name.to_string().into_boxed_str())
@@ -20836,7 +20835,7 @@ fn synthesize_reunion_fallback() -> q3_terrain::Terrain {
     let mut splat = Vec::with_capacity(w * h);
 
     let z_range = meta.z_max - meta.z_min;
-    let max_radius = (cx.min(cy)) as f32;
+    let max_radius = cx.min(cy);
 
     // 2 massifs : Piton des Neiges (centre île ~ grid 1200,1100) et
     // Piton de la Fournaise (~est de l'île).
@@ -21265,6 +21264,7 @@ fn queue_projectiles(r: &mut Renderer, projectiles: &[Projectile], time_sec: f32
 /// `unavailable_remote` : IDs (= entity_index) des pickups que le serveur
 /// a marqués indispo. Ignoré en mode solo (`is_client = false`) — l'état
 /// `respawn_at` local fait foi. En mode client, l'autorité serveur prime.
+#[allow(clippy::too_many_arguments)]
 fn queue_pickups(
     r: &mut Renderer,
     pickups: &[PickupGpu],

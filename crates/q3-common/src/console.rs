@@ -31,6 +31,7 @@ use tracing::{info, warn};
 /// `Arc<Mutex<Option<Box<FnMut>>>>` pour permettre une prise et une pose
 /// dynamique par l'hôte.
 #[derive(Clone, Default)]
+#[allow(clippy::type_complexity)]
 pub struct EngineHooks {
     quit: Arc<Mutex<Option<Box<dyn FnMut() + Send + 'static>>>>,
     map: Arc<Mutex<Option<Box<dyn FnMut(&str) + Send + 'static>>>>,

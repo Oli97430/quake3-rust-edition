@@ -48,9 +48,11 @@ use tracing::{debug, info, warn};
 /// Mode de l'application réseau. Sélectionné au démarrage par les
 /// flags CLI ou la commande console `connect <addr>` / `map <mapname>`.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum NetMode {
     /// Mode solo — aucun socket, aucun tick réseau. Les bots locaux
     /// remplissent l'arène. C'est le mode historique de ce port.
+    #[default]
     SinglePlayer,
 
     /// Serveur autoritatif écoutant sur `bind_addr`. Reçoit les
@@ -75,10 +77,12 @@ pub enum NetMode {
 }
 
 impl NetMode {
-    /// Construit le mode depuis les flags CLI. Priorité : `--connect`
-    /// > `--host` > solo. Une erreur de parsing revient en solo avec
-    /// un warning plutôt que planter — UX : « si ton adresse est
-    /// cassée, tu peux au moins jouer en solo ».
+    /// Construit le mode depuis les flags CLI.
+    ///
+    /// Priorité : `--connect` → `--host` → solo.
+    /// Une erreur de parsing revient en solo avec un warning plutôt que
+    /// planter — UX : « si ton adresse est cassée, tu peux au moins jouer
+    /// en solo ».
     pub fn from_cli(host: Option<&str>, connect: Option<&str>, max_clients: u8) -> Self {
         Self::from_cli_full(host, connect, max_clients, GameType::FreeForAll, true)
     }
@@ -139,11 +143,6 @@ impl NetMode {
     }
 }
 
-impl Default for NetMode {
-    fn default() -> Self {
-        NetMode::SinglePlayer
-    }
-}
 
 // ---------------------------------------------------------------------------
 // NetIo — pont sync/async pour le socket UDP

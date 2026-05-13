@@ -197,12 +197,7 @@ impl HdrOutput {
     /// Detecte si les capacites de surface incluent un format HDR.
     /// Retourne le meilleur format HDR disponible, ou None.
     pub fn detect_hdr(caps: &wgpu::SurfaceCapabilities) -> Option<TextureFormat> {
-        for &fmt in HDR_SURFACE_FORMATS {
-            if caps.formats.contains(&fmt) {
-                return Some(fmt);
-            }
-        }
-        None
+        HDR_SURFACE_FORMATS.iter().find(|&&fmt| caps.formats.contains(&fmt)).copied()
     }
 
     /// Applique la conversion HDR10 (PQ curve) sur la scene HDR → surface.

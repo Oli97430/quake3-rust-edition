@@ -125,10 +125,10 @@ impl LightProbe {
     /// scalaire `color * basis_i(dir)`.
     pub fn add_directional(&mut self, dir: Vec3, color: Vec3) {
         let basis = sh_project_direction(dir);
-        for i in 0..9 {
-            self.sh[i][0] += basis[i] * color.x;
-            self.sh[i][1] += basis[i] * color.y;
-            self.sh[i][2] += basis[i] * color.z;
+        for (i, &b) in basis.iter().enumerate() {
+            self.sh[i][0] += b * color.x;
+            self.sh[i][1] += b * color.y;
+            self.sh[i][2] += b * color.z;
         }
     }
 
@@ -169,10 +169,10 @@ impl LightProbe {
             let blend = z_sign * 0.5 + 0.5; // remappage [-1,1] → [0,1]
             let color = bottom_color.lerp(top_color, blend);
             let basis = sh_project_direction(dir);
-            for i in 0..9 {
-                self.sh[i][0] += weight * basis[i] * color.x;
-                self.sh[i][1] += weight * basis[i] * color.y;
-                self.sh[i][2] += weight * basis[i] * color.z;
+            for (i, &b) in basis.iter().enumerate() {
+                self.sh[i][0] += weight * b * color.x;
+                self.sh[i][1] += weight * b * color.y;
+                self.sh[i][2] += weight * b * color.z;
             }
         }
     }
@@ -307,9 +307,7 @@ impl ProbeGrid {
                             iy as f32 * spacing_vec.y,
                             iz as f32 * spacing_vec.z,
                         );
-                    let mut probe = LightProbe::default();
-                    probe.position = pos;
-                    probes.push(probe);
+                    probes.push(LightProbe { position: pos, ..LightProbe::default() });
                 }
             }
         }

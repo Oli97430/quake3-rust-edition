@@ -851,6 +851,7 @@ impl PlayerMove {
         ledge_z > self.origin.z + 8.0
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_step_up(
         &mut self,
         cmd: MoveCmd,

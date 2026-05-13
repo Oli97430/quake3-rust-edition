@@ -97,7 +97,7 @@ pub struct LocalInput {
 }
 
 impl LocalInput {
-    fn to_buttons(&self) -> u16 {
+    fn to_buttons(self) -> u16 {
         let mut b = 0u16;
         if self.fire {
             b |= q3_net::buttons::FIRE;

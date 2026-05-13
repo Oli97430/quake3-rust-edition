@@ -110,7 +110,7 @@ pub struct DroneMeshGpu {
     pub index_count: u32,
     /// Bind group PBR : baseColor + sampler + normal + metallicRoughness
     /// + material factors uniform.  Si une texture est absente, on
-    /// bind le fallback approprié (blanc pour albedo, flat (0.5, 0.5,
+    ///   bind le fallback approprié (blanc pour albedo, flat (0.5, 0.5,
     /// 1) pour normalmap, (0, 1, 0) pour MR = roughness 1 metallic 0).
     pub material_bg: wgpu::BindGroup,
     /// Buffer factors (live) — 32 octets : base_color (vec4) + mr (vec4).
@@ -128,6 +128,7 @@ struct MaterialFactors {
 }
 
 impl DroneMeshGpu {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_mesh(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

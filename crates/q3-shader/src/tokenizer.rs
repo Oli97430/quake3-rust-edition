@@ -19,6 +19,7 @@ impl<'a> Tokenizer<'a> {
         Self { src, pos: 0, peeked: None }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<String> {
         if let Some(p) = self.peeked.take() {
             return Some(p);
@@ -64,6 +65,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    #[allow(clippy::never_loop)]
     fn read_token(&mut self) -> Option<String> {
         let bytes = self.src.as_bytes();
         loop {

@@ -122,6 +122,7 @@ pub fn tessellate_patch(
                     st[k] += w0 * c0.st[k] + w1 * c1.st[k] + w2 * c2.st[k];
                     lm[k] += w0 * c0.lightmap[k] + w1 * c1.lightmap[k] + w2 * c2.lightmap[k];
                 }
+                #[allow(clippy::needless_range_loop)]
                 for k in 0..4 {
                     col[k] +=
                         w0 * c0.color[k] as f32 + w1 * c1.color[k] as f32 + w2 * c2.color[k] as f32;

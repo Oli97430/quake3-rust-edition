@@ -19,7 +19,7 @@
 //!      reçoit une `Snapshot` personnalisée :
 //!      - `client_slot` = SON id de slot (pour qu'il reconnaisse son joueur),
 //!      - `ack_cmd`     = SA dernière `cmd_number` appliquée.
-//!      Les autres champs (positions, projectiles, pickups) sont partagés.
+//!        Les autres champs (positions, projectiles, pickups) sont partagés.
 //!
 //! # Ce qui n'est PAS fait en v1
 //! - Pas de delta-compression — chaque snapshot est full state. Coût ~50
@@ -1266,7 +1266,7 @@ impl ServerState {
                 );
                 let resp = OobMessage {
                     command: "infoResponse".into(),
-                    payload: info[12..].as_bytes().to_vec(),
+                    payload: info.as_bytes()[12..].to_vec(),
                 };
                 self.send_raw(dg.addr, resp.to_bytes());
                 return;
@@ -1755,10 +1755,10 @@ impl ServerState {
             // d'égalité possible vu qu'on déclenche dès qu'un slot
             // monte à FRAG_LIMIT — ils ne montent pas en même temps
             // sur le même tick).
-            let winner = if tied_at_top || leader_id.is_none() {
-                MATCH_DRAW
-            } else {
-                leader_id.unwrap()
+            let winner = match leader_id {
+                None => MATCH_DRAW,
+                Some(id) if tied_at_top => { let _ = id; MATCH_DRAW }
+                Some(id) => id,
             };
             self.end_match(winner);
         }
@@ -2637,6 +2637,7 @@ impl ServerState {
     /// `range` cap la portée du trace (gauntlet 32, lightning 768, autres
     /// HITSCAN_RANGE = ~∞). `trail` pilote l'event visuel émis (rail
     /// spirale, lightning zigzag, ou rien). `weapon` propage au kill-feed.
+    #[allow(clippy::too_many_arguments)]
     fn fire_hitscan(
         &mut self,
         origin: Vec3,
@@ -2973,7 +2974,7 @@ fn apply_client_packet(
                                     basis.forward,
                                     basis.right,
                                     basis.up,
-                                    cmd.cmd_number ^ (pellet as u32),
+                                    cmd.cmd_number ^ pellet,
                                     slot.slot_id,
                                 );
                                 hitscans.push(HitscanRequest {

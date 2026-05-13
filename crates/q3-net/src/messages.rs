@@ -133,7 +133,7 @@ impl UserCmd {
         let q = (wrapped / 360.0 * 65536.0).round() as i32;
         // 65536 → 0 après wrap. Cast explicite via i32→i16 pour wrapping
         // safe sur les valeurs limites.
-        (q as i32 & 0xFFFF) as i16
+        (q & 0xFFFF) as i16
     }
 
     /// Décode l'angle en degrés depuis `i16` quantifié, dans [0, 360).
@@ -1252,6 +1252,7 @@ impl SnapshotDelta {
         // Override avec les dirty — l'ordre dans `dirty_players` correspond
         // à l'ordre des bits dans `dirty_players_bits` (du LSB au MSB).
         let mut dirty_iter = self.dirty_players.iter();
+        #[allow(clippy::needless_range_loop)]
         for i in 0..64 {
             if self.dirty_players_bits & (1u64 << i) != 0 {
                 if let Some(p) = dirty_iter.next() {

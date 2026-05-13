@@ -222,6 +222,7 @@ impl BeamRenderer {
     /// suivent un cercle de rayon `radius` autour de l'axe `a→b`, avec
     /// `turns` tours complets.  `color_a` est appliquée en `a`, `color_b`
     /// en `b` — gradient linéaire entre les deux pour un fade propre.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_spiral(
         &mut self,
         a: [f32; 3],

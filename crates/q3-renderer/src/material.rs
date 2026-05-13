@@ -522,6 +522,10 @@ impl MaterialCache {
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
 }
 
 /// Cache de `RenderPipeline` par `BlendClass` + format de surface.
@@ -534,6 +538,7 @@ pub struct PipelineCache {
 }
 
 impl PipelineCache {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: Arc<wgpu::Device>,
         shader_wgsl: &str,

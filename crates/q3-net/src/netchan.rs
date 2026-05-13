@@ -126,7 +126,7 @@ impl NetChannel {
         };
         if end > MAX_REASSEMBLY {
             return Err(Error::Network(
-                format!("fragment trop grand : {end} > {MAX_REASSEMBLY}").into(),
+                format!("fragment trop grand : {end} > {MAX_REASSEMBLY}"),
             ));
         }
         if self.reassembly.len() < end {

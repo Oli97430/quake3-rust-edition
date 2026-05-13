@@ -216,7 +216,7 @@ impl FloatingDamage {
     /// Retourne `None` si le nombre est expire (purge par le systeme).
     pub fn alpha(&self, now: f32) -> Option<f32> {
         let elapsed = now - self.start_time;
-        if elapsed < 0.0 || elapsed > FLOAT_DAMAGE_LIFETIME {
+        if !(0.0..=FLOAT_DAMAGE_LIFETIME).contains(&elapsed) {
             return None;
         }
         let t = elapsed / FLOAT_DAMAGE_LIFETIME;
@@ -268,7 +268,7 @@ impl DamageIndicator {
     /// Retourne `None` si l'indicateur est expire.
     pub fn alpha(&self, now: f32) -> Option<f32> {
         let elapsed = now - self.start_time;
-        if elapsed < 0.0 || elapsed > DAMAGE_INDICATOR_LIFETIME {
+        if !(0.0..=DAMAGE_INDICATOR_LIFETIME).contains(&elapsed) {
             return None;
         }
         let t = elapsed / DAMAGE_INDICATOR_LIFETIME;
@@ -517,7 +517,7 @@ impl KillcamSystem {
         // Duree effective : on prend la fenetre temporelle reelle des frames
         // copiees, plafonnee a KILLCAM_REPLAY_DURATION.
         let time_span = frames.last().unwrap().time - frames.first().unwrap().time;
-        let duration = time_span.min(KILLCAM_REPLAY_DURATION).max(0.5);
+        let duration = time_span.clamp(0.5, KILLCAM_REPLAY_DURATION);
 
         self.replay = Some(KillcamReplay {
             frames,
@@ -901,7 +901,7 @@ impl AnnouncerSystem {
         if self.active_announcement.is_none() && !self.pending.is_empty() {
             // Trier par priorite decroissante et prendre la premiere.
             // La queue est petite (< 5 elements en pratique), le sort est negligeable.
-            self.pending.sort_by(|a, b| b.priority().cmp(&a.priority()));
+            self.pending.sort_by_key(|b| std::cmp::Reverse(b.priority()));
             let next = self.pending.remove(0);
             self.active_announcement = Some((next, now));
             return Some(next);
