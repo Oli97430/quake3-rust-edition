@@ -94,6 +94,12 @@ pub struct PlayerMove {
     /// (sinon climb infini sur une seule paroi). Le re-jump est OK
     /// dès qu'on a touché un autre mur ou le sol.
     pub last_wall_normal: Option<Vec3>,
+    /// Temps passé en l'air (secondes). Remis à 0 au contact sol.
+    /// Utilisé pour gate le wall-jump : on exige un minimum d'airborne
+    /// time pour ne pas déclencher un wall-kick sur la première frame
+    /// après un saut normal depuis le sol (sinon le joueur rebondit
+    /// en arrière quand il saute devant un mur).
+    pub airborne_time: f32,
     /// **Mantling** (M2) — temps restant en secondes. > 0 = on est
     /// en train de "grimper" un rebord : la velocity verticale est
     /// forcée vers le haut, l'air control est suspendu. Termine au
@@ -115,6 +121,7 @@ impl PlayerMove {
             dash_cooldown: 0.0,
             wall_jump_cooldown: 0.0,
             last_wall_normal: None,
+            airborne_time: 0.0,
             mantling_remaining: 0.0,
         }
     }
@@ -312,14 +319,27 @@ impl PlayerMove {
         // Mise à jour de on_ground : petit trace vers le bas.
         self.update_ground(world, hull, mask);
 
+        // Track airborne time — reset au sol, incrémente en l'air.
+        if self.on_ground {
+            self.airborne_time = 0.0;
+        } else {
+            self.airborne_time += cmd.delta_time;
+        }
+
         // **Wall-jump** (M1) — touche jump pressée en l'air avec un mur
         // dans la fenêtre de probe latérale → kick. Détection via 4
         // probes orthogonales (avant/arrière/gauche/droite) en
         // `trace_box`. Premier hit avec normale presque verticale (mur
         // pas plafond) gagne. Cooldown + interdiction de re-wall-jump
         // sur le même mur empêche le climb infini.
+        //
+        // Gate airborne_time > 0.15s : empêche le wall-kick involontaire
+        // quand le joueur saute depuis le sol près d'un mur (cmd.jump
+        // encore held = la première frame airborne triggerait le kick).
+        const WALL_JUMP_MIN_AIRBORNE: f32 = 0.15;
         if cmd.jump
             && !self.on_ground
+            && self.airborne_time >= WALL_JUMP_MIN_AIRBORNE
             && self.wall_jump_cooldown <= 0.0
         {
             let basis = self.view_angles.to_vectors();
@@ -887,6 +907,7 @@ impl PlayerMove {
             dash_cooldown: self.dash_cooldown,
             wall_jump_cooldown: self.wall_jump_cooldown,
             last_wall_normal: self.last_wall_normal,
+            airborne_time: self.airborne_time,
             mantling_remaining: self.mantling_remaining,
         };
         // On refait juste le slide (sans ré-intégrer la vitesse), en réutilisant
