@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quake 3 RUST EDITION</title>
+<meta name="description" content="id Tech 3 reimagined in Rust. Modern wgpu renderer, classic Quake III Arena gameplay. Open source.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── RESET ── */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+/* ── CSS VARIABLES ── */
+:root {
+  --bg-deep:    #04050b;
+  --bg-panel:   #0c0d14;
+  --bg-card:    #12131d;
+  --orange-hot: #ffb24c;
+  --orange-dim: #d96a1c;
+  --amber:      #ffe28a;
+  --cyan:       #26a8f0;
+  --cyan-dim:   #1d8fd8;
+  --cream:      #e8dcc8;
+  --gray-400:   #6b7280;
+  --gray-600:   #374151;
+  --rust:       #ce422b;
+  --green:      #22c55e;
+  --red-glow:   #3a1908;
+  --font-display: 'Orbitron', sans-serif;
+  --font-mono:    'JetBrains Mono', monospace;
+  --font-body:    'Space Grotesk', sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg-deep);
+  color: var(--cream);
+  font-family: var(--font-body);
+  line-height: 1.65;
+  overflow-x: hidden;
+}
+
+/* ── SCANLINE OVERLAY ── */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── NOISE GRAIN ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  pointer-events: none;
+  z-index: 9998;
+}
+
+/* ── SELECTION ── */
+::selection { background: var(--orange-hot); color: var(--bg-deep); }
+
+/* ── UTILITIES ── */
+.container { max-width: 1200px; margin: 0 auto; padding: 0 2rem; }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+
+/* ── HERO ── */
+.hero {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 4rem 2rem;
+  overflow: hidden;
+}
+
+.hero__bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(58,25,8,0.5) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 40% at 80% 80%, rgba(29,143,216,0.12) 0%, transparent 60%),
+    var(--bg-deep);
+  z-index: -2;
+}
+
+.hero__grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(38,168,240,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(38,168,240,0.04) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black 20%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black 20%, transparent 70%);
+  z-index: -1;
+  animation: grid-drift 20s linear infinite;
+}
+
+@keyframes grid-drift {
+  from { transform: translateY(0); }
+  to   { transform: translateY(60px); }
+}
+
+.hero__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(38,168,240,0.1);
+  border: 1px solid rgba(38,168,240,0.25);
+  border-radius: 100px;
+  padding: 0.4rem 1.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--cyan);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 2rem;
+  animation: fade-in 0.8s ease both;
+}
+
+.hero__badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.hero__title {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: clamp(2.5rem, 7vw, 5.5rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.3em;
+  animation: fade-in 0.8s ease 0.1s both;
+}
+
+.hero__title .q3 {
+  background: linear-gradient(180deg, var(--amber) 0%, var(--orange-hot) 50%, var(--orange-dim) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 30px rgba(255,178,76,0.4));
+}
+
+.hero__title .rust {
+  color: var(--rust);
+  font-size: 0.55em;
+  display: block;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  -webkit-text-fill-color: var(--rust);
+}
+
+.hero__sub {
+  font-family: var(--font-mono);
+  font-size: clamp(0.85rem, 1.5vw, 1.05rem);
+  color: var(--gray-400);
+  font-weight: 300;
+  max-width: 640px;
+  margin-bottom: 2.5rem;
+  animation: fade-in 0.8s ease 0.25s both;
+}
+
+.hero__actions {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  animation: fade-in 0.8s ease 0.4s both;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 2rem;
+  border-radius: 4px;
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  border: none;
+}
+
+.btn--primary {
+  background: linear-gradient(135deg, var(--orange-hot), var(--orange-dim));
+  color: var(--bg-deep);
+  box-shadow: 0 0 30px rgba(255,178,76,0.25), inset 0 1px 0 rgba(255,255,255,0.15);
+}
+.btn--primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 50px rgba(255,178,76,0.4), inset 0 1px 0 rgba(255,255,255,0.2);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--cyan);
+  border: 1px solid rgba(38,168,240,0.3);
+}
+.btn--ghost:hover {
+  background: rgba(38,168,240,0.08);
+  border-color: var(--cyan);
+  transform: translateY(-2px);
+}
+
+.hero__stats {
+  display: flex;
+  gap: 3rem;
+  margin-top: 4rem;
+  animation: fade-in 0.8s ease 0.6s both;
+}
+
+.stat {
+  text-align: center;
+}
+
+.stat__value {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 900;
+  color: var(--orange-hot);
+}
+
+.stat__label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--gray-400);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  margin-top: 0.2rem;
+}
+
+/* ── SCROLL CUE ── */
+.hero__scroll {
+  position: absolute;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--gray-600);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  animation: bob 2s ease-in-out infinite;
+}
+
+.hero__scroll svg {
+  width: 20px;
+  stroke: var(--gray-600);
+  stroke-width: 2;
+  fill: none;
+}
+
+@keyframes bob {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50% { transform: translateX(-50%) translateY(8px); }
+}
+
+/* ── SECTIONS ── */
+section {
+  padding: 6rem 0;
+  position: relative;
+}
+
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.25em;
+  margin-bottom: 0.8rem;
+}
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 3.5vw, 2.5rem);
+  font-weight: 700;
+  margin-bottom: 1rem;
+  color: var(--cream);
+}
+
+.section-desc {
+  max-width: 640px;
+  color: var(--gray-400);
+  font-size: 0.95rem;
+  margin-bottom: 3rem;
+}
+
+/* ── DIVIDER ── */
+.divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cyan-dim), transparent);
+  opacity: 0.2;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* ── FEATURES GRID ── */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+}
+
+.feature-card {
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 2rem;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.feature-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--orange-hot), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.feature-card:hover {
+  border-color: rgba(255,178,76,0.15);
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+}
+
+.feature-card:hover::before { opacity: 1; }
+
+.feature-card__icon {
+  font-size: 1.8rem;
+  margin-bottom: 1rem;
+  display: block;
+}
+
+.feature-card__title {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--cream);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 0.6rem;
+}
+
+.feature-card__desc {
+  font-size: 0.85rem;
+  color: var(--gray-400);
+  line-height: 1.6;
+}
+
+/* ── WEAPONS TABLE ── */
+.weapons-section { background: var(--bg-panel); }
+
+.weapons-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1rem;
+}
+
+.weapon-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.8rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.weapon-chip:hover {
+  border-color: rgba(255,178,76,0.2);
+  background: rgba(255,178,76,0.04);
+}
+
+.weapon-chip__status {
+  width: 8px; height: 8px;
+  background: var(--green);
+  border-radius: 50%;
+  box-shadow: 0 0 6px rgba(34,197,94,0.5);
+  flex-shrink: 0;
+}
+
+.weapon-chip__name {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--cream);
+  font-weight: 500;
+}
+
+/* ── ARCH SECTION ── */
+.arch-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: start;
+}
+
+.arch-tree {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 2;
+  color: var(--gray-400);
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 2rem;
+  overflow-x: auto;
+}
+
+.arch-tree .crate-name { color: var(--cyan); font-weight: 500; }
+.arch-tree .crate-desc { color: var(--gray-400); }
+
+.tech-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.tech-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.tech-item:hover { border-color: rgba(38,168,240,0.15); }
+
+.tech-item__name {
+  font-family: var(--font-display);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--cream);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  min-width: 90px;
+}
+
+.tech-item__desc {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--gray-400);
+}
+
+/* ── PERF TABLE ── */
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.perf-table th {
+  text-align: left;
+  padding: 0.8rem 1rem;
+  font-family: var(--font-display);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  border-bottom: 1px solid rgba(38,168,240,0.15);
+}
+
+.perf-table td {
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  color: var(--cream);
+}
+
+.perf-table tr:hover td { background: rgba(255,178,76,0.03); }
+
+.perf-table .fps { color: var(--green); font-weight: 500; }
+
+/* ── CHANGELOG ── */
+.changelog-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.changelog-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  font-size: 0.85rem;
+  color: var(--gray-400);
+}
+
+.changelog-list .tag {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.tag--new  { background: rgba(34,197,94,0.15); color: var(--green); }
+.tag--fix  { background: rgba(38,168,240,0.15); color: var(--cyan); }
+.tag--perf { background: rgba(255,178,76,0.15); color: var(--orange-hot); }
+
+/* ── FOOTER ── */
+.footer {
+  padding: 3rem 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--gray-600);
+}
+
+.footer a {
+  color: var(--cyan-dim);
+  text-decoration: none;
+}
+.footer a:hover { color: var(--cyan); }
+
+.footer__legal {
+  margin-top: 1rem;
+  font-size: 0.6rem;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ── NAV ── */
+.nav {
+  position: fixed;
+  top: 0;
+  left: 0; right: 0;
+  z-index: 100;
+  background: rgba(4,5,11,0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  padding: 0.8rem 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transform: translateY(-100%);
+  transition: transform 0.3s ease;
+}
+
+.nav--visible { transform: translateY(0); }
+
+.nav__logo {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 0.85rem;
+  color: var(--orange-hot);
+  text-decoration: none;
+  letter-spacing: 0.05em;
+}
+
+.nav__links {
+  display: flex;
+  gap: 2rem;
+  list-style: none;
+}
+
+.nav__links a {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--gray-400);
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  transition: color 0.2s;
+}
+
+.nav__links a:hover { color: var(--cream); }
+
+/* ── ANIMATIONS ── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+}
+.reveal--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── RESPONSIVE ── */
+@media (max-width: 768px) {
+  .hero__stats { gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
+  .arch-container { grid-template-columns: 1fr; }
+  .features-grid { grid-template-columns: 1fr; }
+  .nav__links { display: none; }
+  .weapons-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="nav" id="nav" aria-label="Main navigation">
+  <a href="#" class="nav__logo">Q3 RUST</a>
+  <ul class="nav__links">
+    <li><a href="#features">Features</a></li>
+    <li><a href="#arsenal">Arsenal</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#performance">Performance</a></li>
+    <li><a href="#changelog">Changelog</a></li>
+    <li><a href="https://github.com/Oli97430/quake3-rust-edition" target="_blank">GitHub</a></li>
+  </ul>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero__bg"></div>
+  <div class="hero__grid"></div>
+
+  <span class="hero__badge">v0.10.0 released</span>
+
+  <h1 class="hero__title">
+    <span class="q3">QUAKE III</span>
+    <span class="rust">Rust Edition</span>
+  </h1>
+
+  <p class="hero__sub">
+    id Tech 3 reimagined in Rust &mdash; wgpu renderer, classic gameplay, modern codebase.
+    Vulkan &bull; DX12 &bull; Metal. Open&nbsp;source.
+  </p>
+
+  <div class="hero__actions">
+    <a href="https://github.com/Oli97430/quake3-rust-edition/releases/latest" class="btn btn--primary">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download q3.exe
+    </a>
+    <a href="https://github.com/Oli97430/quake3-rust-edition" class="btn btn--ghost" target="_blank">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      Source Code
+    </a>
+  </div>
+
+  <div class="hero__stats">
+    <div class="stat">
+      <div class="stat__value">15</div>
+      <div class="stat__label">Rust Crates</div>
+    </div>
+    <div class="stat">
+      <div class="stat__value">9/9</div>
+      <div class="stat__label">Weapons GLB</div>
+    </div>
+    <div class="stat">
+      <div class="stat__value">160+</div>
+      <div class="stat__label">Tests</div>
+    </div>
+    <div class="stat">
+      <div class="stat__value">0</div>
+      <div class="stat__label">Unsafe Gameplay</div>
+    </div>
+  </div>
+
+  <div class="hero__scroll">
+    <span>Scroll</span>
+    <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="container">
+    <div class="section-label reveal">// Core Systems</div>
+    <h2 class="section-title reveal">Built from scratch. Zero legacy C.</h2>
+    <p class="section-desc reveal">
+      Every subsystem rewritten in idiomatic Rust &mdash; from BSP parsing to PBR rendering.
+    </p>
+
+    <div class="features-grid">
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#9881;</span>
+        <h3 class="feature-card__title">wgpu HDR Renderer</h3>
+        <p class="feature-card__desc">Rgba16Float scene buffer, ACES tonemapping, multi-mip bloom, SSAO, cascaded shadow maps (PCF 3&times;3), TAA, SSR water, god rays, volumetric fog.</p>
+      </div>
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#9876;</span>
+        <h3 class="feature-card__title">PBR Cook-Torrance</h3>
+        <p class="feature-card__desc">GGX NDF + Smith geometry + Schlick Fresnel. Normal maps via cotangent frame (Mikkelsen). Metallic/roughness from glTF materials.</p>
+      </div>
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#129302;</span>
+        <h3 class="feature-card__title">Physics Bot Animations</h3>
+        <p class="feature-card__desc">Ragdoll death, hit-reaction springs, look-at IK, torso lag, strafe blending, and terrain surface alignment. All on MD3's 3-piece model system.</p>
+      </div>
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#128736;</span>
+        <h3 class="feature-card__title">In-Game Level Editor</h3>
+        <p class="feature-card__desc">Free mouse cursor, side panel UI, native file dialog for GLB import. Spawn, select, move, scale, rotate, align to terrain. JSON save/load.</p>
+      </div>
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#127758;</span>
+        <h3 class="feature-card__title">Battle Royale: Reunion</h3>
+        <p class="feature-card__desc">Procedural terrain, POI tiers, optional ring shrink. 1,800 procedural grass tufts + 1,200 icosahedron rocks. Terrain-aligned props.</p>
+      </div>
+      <div class="feature-card reveal">
+        <span class="feature-card__icon">&#128274;</span>
+        <h3 class="feature-card__title">Server Anti-Cheat</h3>
+        <p class="feature-card__desc">720&deg;/s angular cap, teleport detection, dt budget, lag-comp 250ms max rewind, saturating arithmetic, magic file check on downloads.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ARSENAL -->
+<section id="arsenal" class="weapons-section">
+  <div class="container">
+    <div class="section-label reveal">// Arsenal</div>
+    <h2 class="section-title reveal">9/9 Weapons &mdash; All GLB</h2>
+    <p class="section-desc reveal">
+      Every weapon has a modern GLB model for both world pickup and first-person viewmodel, with per-weapon orientation tuning.
+    </p>
+
+    <div class="weapons-grid reveal">
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Gauntlet</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Machine Gun</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Shotgun</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Grenade Launcher</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Rocket Launcher</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Lightning Gun</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Railgun</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">Plasma Gun</span></div>
+      <div class="weapon-chip"><span class="weapon-chip__status"></span><span class="weapon-chip__name">BFG10K</span></div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="container">
+    <div class="section-label reveal">// Architecture</div>
+    <h2 class="section-title reveal">15-crate workspace</h2>
+    <p class="section-desc reveal">
+      Clean separation of concerns. Each crate is independently testable.
+    </p>
+
+    <div class="arch-container">
+      <div class="arch-tree reveal">
+<span class="crate-name">q3-engine</span>    <span class="crate-desc">binary, main loop, app state</span>
+<span class="crate-name">q3-renderer</span>  <span class="crate-desc">wgpu pipelines, PBR, terrain, sky</span>
+<span class="crate-name">q3-bsp</span>      <span class="crate-desc">IBSP v46 parser, zero-copy</span>
+<span class="crate-name">q3-model</span>    <span class="crate-desc">MD3 + glTF/GLB + scene graph</span>
+<span class="crate-name">q3-bot</span>      <span class="crate-desc">FSM AI + animation ranges</span>
+<span class="crate-name">q3-game</span>     <span class="crate-desc">movement physics, strafe-jump</span>
+<span class="crate-name">q3-collision</span><span class="crate-desc"> BSP trace + bbox</span>
+<span class="crate-name">q3-terrain</span>  <span class="crate-desc">heightmap, ring shrink, POI</span>
+<span class="crate-name">q3-net</span>      <span class="crate-desc">snapshots + UserCmd protocol</span>
+<span class="crate-name">q3-sound</span>    <span class="crate-desc">rodio spatial 3D + taunts</span>
+<span class="crate-name">q3-image</span>    <span class="crate-desc">TGA/JPG/PNG decoder + cache</span>
+<span class="crate-name">q3-shader</span>   <span class="crate-desc">Q3 shader script parser</span>
+<span class="crate-name">q3-filesystem</span><span class="crate-desc">VFS pk3 + symlink protection</span>
+<span class="crate-name">q3-math</span>     <span class="crate-desc">glam wrappers, Z-up conventions</span>
+<span class="crate-name">q3-common</span>   <span class="crate-desc">cvars, logging, error types</span>
+      </div>
+
+      <div class="tech-stack reveal">
+        <div class="tech-item">
+          <span class="tech-item__name">Rust 1.78+</span>
+          <span class="tech-item__desc">Stable, edition 2021, zero unsafe gameplay</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">wgpu 22</span>
+          <span class="tech-item__desc">Vulkan / DX12 / Metal backends</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">glam</span>
+          <span class="tech-item__desc">SIMD math, Vec3/Mat4/Quat</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">rodio</span>
+          <span class="tech-item__desc">Spatial audio, channel pooling</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">gltf</span>
+          <span class="tech-item__desc">glTF 2.0 + GLB scene graph</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">rfd</span>
+          <span class="tech-item__desc">Native file dialogs (editor)</span>
+        </div>
+        <div class="tech-item">
+          <span class="tech-item__name">ureq</span>
+          <span class="tech-item__desc">Pure Rust HTTP, map downloader</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- PERFORMANCE -->
+<section id="performance">
+  <div class="container">
+    <div class="section-label reveal">// Benchmarks</div>
+    <h2 class="section-title reveal">Performance</h2>
+    <p class="section-desc reveal">RTX 3090 @ 1920&times;1080, Ultra settings.</p>
+
+    <table class="perf-table reveal">
+      <thead>
+        <tr><th>Map</th><th>FPS Avg</th><th>1% Low</th><th>0.1% Low</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>q3dm6</td><td class="fps">280</td><td>240</td><td>195</td></tr>
+        <tr><td>q3dm17</td><td class="fps">320</td><td>290</td><td>260</td></tr>
+        <tr><td>q3tourney2</td><td class="fps">350</td><td>310</td><td>280</td></tr>
+        <tr><td>br_reunion</td><td class="fps">165</td><td>130</td><td>105</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- CHANGELOG -->
+<section id="changelog">
+  <div class="container">
+    <div class="section-label reveal">// What's New</div>
+    <h2 class="section-title reveal">Changelog v0.10.0</h2>
+
+    <ul class="changelog-list reveal">
+      <li><span class="tag tag--new">New</span>In-game level editor with panel UI, native GLB import, JSON save/load</li>
+      <li><span class="tag tag--new">New</span>Bot ragdoll physics, hit-reaction springs, look-at IK, strafe blending</li>
+      <li><span class="tag tag--new">New</span>28 voice taunts from Q3 paks, triggered on bot death</li>
+      <li><span class="tag tag--new">New</span>Lightning Gun 3D beam GLB effect</li>
+      <li><span class="tag tag--new">New</span>Procedural grass (1,800 tufts) + rocks (1,200 icosahedra) on Reunion</li>
+      <li><span class="tag tag--new">New</span>Baked GLB models: railgun, quad damage, shotgun ammo box</li>
+      <li><span class="tag tag--fix">Fix</span>GLB scene graph traversal &mdash; multi-mesh models no longer collapse</li>
+      <li><span class="tag tag--fix">Fix</span>Per-primitive vertex colors &mdash; multi-material GLBs show correct colors</li>
+      <li><span class="tag tag--fix">Fix</span>Railgun &amp; grenade launcher viewmodel orientation</li>
+      <li><span class="tag tag--fix">Fix</span>Wall-jump no longer triggers on ground jumps near walls</li>
+      <li><span class="tag tag--perf">Perf</span>Procedural mesh: shared vertex buffer, zero per-instance allocation</li>
+    </ul>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<div class="divider"></div>
+<footer class="footer">
+  <p>
+    <a href="https://github.com/Oli97430/quake3-rust-edition">GitHub</a> &middot;
+    <a href="https://github.com/Oli97430/quake3-rust-edition/releases">Releases</a> &middot;
+    GPL-2.0-or-later
+  </p>
+  <p class="footer__legal">
+    Quake III Arena is a trademark of id Software. This is an independent educational reimplementation.
+    Original pak0.pk3 assets are NOT redistributed &mdash; a legal copy of Q3A is required.
+  </p>
+</footer>
+
+<script>
+// Sticky nav after scroll
+const nav = document.getElementById('nav');
+let lastY = 0;
+window.addEventListener('scroll', () => {
+  const y = window.scrollY;
+  nav.classList.toggle('nav--visible', y > 400);
+  lastY = y;
+}, { passive: true });
+
+// Reveal on scroll
+const reveals = document.querySelectorAll('.reveal');
+const io = new IntersectionObserver((entries) => {
+  entries.forEach((e, i) => {
+    if (e.isIntersecting) {
+      setTimeout(() => e.target.classList.add('reveal--visible'), i * 60);
+      io.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+reveals.forEach(el => io.observe(el));
+</script>
+</body>
+</html>
