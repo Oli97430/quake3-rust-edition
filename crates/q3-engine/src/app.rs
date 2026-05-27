@@ -3869,9 +3869,11 @@ impl App {
                 // Spawn les bots demandés au serveur. Les noms sont
                 // séquentiels « bot01..botNN » — une commande console
                 // pour ajouter à la volée pourra venir plus tard.
-                for i in 0..server_bots {
-                    let name = format!("bot{:02}", i + 1);
-                    let _ = nr.add_server_bot(name, q3_bot::BotSkill::III);
+                if false && server_bots > 0 {
+                    for i in 0..server_bots {
+                        let name = format!("bot{:02}", i + 1);
+                        let _ = nr.add_server_bot(name, q3_bot::BotSkill::III);
+                    }
                 }
                 // Enregistrement démo si demandé. Pris en compte
                 // uniquement en mode client (server-side ça n'aurait
@@ -4414,7 +4416,9 @@ impl App {
         // Avant v0.9.3 chaque path drainait à part ou pas du tout, ce
         // qui faisait des bots invisibles via le menu. Centralisé ici,
         // c'est le seul site responsable du spawn initial.
-        if self.pending_local_bots > 0 {
+        //
+        // NOTE(v0.10.0) : bots désactivés temporairement.
+        if false && self.pending_local_bots > 0 {
             let n = self.pending_local_bots;
             self.pending_local_bots = 0;
             self.ensure_player_rig_loaded();
@@ -4680,8 +4684,10 @@ impl App {
         // le mode terrain et choisit un POI tier ≥ 2 pour le spawn.
         // Gated par cvar `br_bots` (défaut 0 = carte vide pour
         // exploration / tests visuels).
+        //
+        // NOTE(v0.10.0) : bots désactivés temporairement.
         let br_bots_enabled = self.cvars.get_i32("br_bots").unwrap_or(0) != 0;
-        if br_bots_enabled && self.pending_local_bots > 0 {
+        if false && br_bots_enabled && self.pending_local_bots > 0 {
             let n = self.pending_local_bots;
             self.pending_local_bots = 0;
             self.ensure_player_rig_loaded();
@@ -7767,26 +7773,9 @@ impl App {
                     self.load_map(&path);
                 }
                 PendingAction::AddBot(name, skill) => {
-                    // Dispatch : si on est serveur réseau, le bot va
-                    // sur l'autoritatif côté `ServerState`. Sinon
-                    // (solo / client), le bot est local — comportement
-                    // historique. En mode client, l'addbot local n'a
-                    // pas vraiment de sens (le serveur est autoritatif),
-                    // mais on conserve le comportement pour les tests
-                    // hors-réseau.
-                    if self.net.mode.is_server() {
-                        let bot_skill =
-                            skill.map(q3_bot::BotSkill::from_int).unwrap_or_default();
-                        match self.net.add_server_bot(name.clone(), bot_skill) {
-                            Some(slot_id) => info!(
-                                "console/addbot: bot serveur '{}' (slot {}, skill {:?})",
-                                name, slot_id, bot_skill
-                            ),
-                            None => warn!("console/addbot: serveur plein"),
-                        }
-                    } else {
-                        self.spawn_bot(&name, skill);
-                    }
+                    // Bots désactivés temporairement.
+                    info!("console/addbot: bots désactivés pour le moment ('{name}' ignoré)");
+                    let _ = (name, skill);
                 }
                 PendingAction::ClearBots => {
                     let n = self.bots.len();
