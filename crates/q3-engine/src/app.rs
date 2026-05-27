@@ -4438,6 +4438,10 @@ impl App {
                 self.bots.len()
             );
         }
+
+        // **Zombie mobs** (v0.10.1) — spawn sur les maps BSP aussi.
+        self.load_zombie_asset();
+        self.spawn_zombies_bsp();
     }
 
     /// **Battle Royale terrain loader** (v0.9.5) — pendant de
@@ -4866,6 +4870,94 @@ impl App {
         );
     }
 
+    /// **Spawn zombies BSP** (v0.10.1) — place des zombies sur les
+    /// maps BSP classiques.  On utilise les spawn points DM comme
+    /// ancres, en décalant chaque zombie de 200-400u autour du spawn
+    /// point.  ~2 zombies par spawn point, max 16.
+    fn spawn_zombies_bsp(&mut self) {
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("ogre_zombie"))
+            .unwrap_or(false);
+        if !has_mesh {
+            warn!("spawn_zombies_bsp: ogre_zombie mesh absent, skip");
+            return;
+        }
+        let world = match self.world.as_ref() {
+            Some(w) => w,
+            None => return,
+        };
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("ogre_zombie"))
+            .unwrap_or(1.0);
+        let base_scale = if r_native > 0.001 {
+            ZOMBIE_TARGET_SIZE / r_native
+        } else {
+            1.0
+        };
+        self.zombies.clear();
+        let spawns = &world.spawn_points;
+        if spawns.is_empty() {
+            return;
+        }
+        // On place ~2 zombies par spawn point, avec un offset aléatoire
+        // déterministe (hash du spawn index). Max 16 zombies par map
+        // pour ne pas surcharger les petites arènes.
+        const MAX_ZOMBIES_BSP: usize = 16;
+        let mut count = 0usize;
+        for (i, sp) in spawns.iter().enumerate() {
+            if count >= MAX_ZOMBIES_BSP {
+                break;
+            }
+            // 2 zombies par spawn point, décalés de ~300u à des angles
+            // différents.
+            for k in 0..2 {
+                if count >= MAX_ZOMBIES_BSP {
+                    break;
+                }
+                let hash = ((i * 7 + k * 13 + 37) as u32).wrapping_mul(2654435761);
+                let theta = (hash as f32 / u32::MAX as f32) * std::f32::consts::TAU;
+                let dist = 200.0 + (hash.wrapping_shr(16) as f32 / 65535.0) * 200.0;
+                let x = sp.origin.x + theta.cos() * dist;
+                let y = sp.origin.y + theta.sin() * dist;
+                // Z : on trace vers le sol pour trouver la hauteur.
+                // Sur BSP on utilise trace_ray du monde collision.
+                let start = Vec3::new(x, y, sp.origin.z + 200.0);
+                let end = Vec3::new(x, y, sp.origin.z - 2000.0);
+                let z = {
+                    let result = world.collision.trace_ray(
+                        start,
+                        end,
+                        q3_collision::Contents::SOLID,
+                    );
+                    if result.fraction < 1.0 {
+                        start.z + (end.z - start.z) * result.fraction
+                    } else {
+                        sp.origin.z // fallback
+                    }
+                };
+                self.zombies.push(Zombie {
+                    pos: Vec3::new(x, y, z),
+                    yaw: theta + std::f32::consts::PI, // face à l'opposé du spawn
+                    health: Health::new(ZOMBIE_MAX_HP),
+                    state: ZombieState::Idle,
+                    next_attack_at: 0.0,
+                    last_damage_at: -10.0,
+                    death_started_at: None,
+                    scale: base_scale,
+                });
+                count += 1;
+            }
+        }
+        info!(
+            "BSP: {} zombies placés autour de {} spawn points (scale={:.2})",
+            count, spawns.len(), base_scale
+        );
+    }
+
     /// **Spawn zombies BR** (v0.10.1) — place des zombies autour des
     /// POI sombres (Forest, Volcano, Cirque).  Chaque POI reçoit un
     /// petit groupe de zombies en ring.
@@ -4970,9 +5062,20 @@ impl App {
                     // Avancer à ZOMBIE_SPEED.
                     let dir = Vec3::new(z.yaw.cos(), z.yaw.sin(), 0.0);
                     z.pos += dir * ZOMBIE_SPEED * dt;
-                    // Coller au terrain.
+                    // Coller au terrain (BR) ou au sol BSP.
                     if let Some(ref t) = terrain {
                         z.pos.z = t.height_at(z.pos.x, z.pos.y);
+                    } else if let Some(ref w) = self.world {
+                        let above = Vec3::new(z.pos.x, z.pos.y, z.pos.z + 64.0);
+                        let below = Vec3::new(z.pos.x, z.pos.y, z.pos.z - 256.0);
+                        let tr = w.collision.trace_ray(
+                            above,
+                            below,
+                            q3_collision::Contents::SOLID,
+                        );
+                        if tr.fraction < 1.0 {
+                            z.pos.z = above.z + (below.z - above.z) * tr.fraction;
+                        }
                     }
                 }
                 ZombieState::Attack => {
