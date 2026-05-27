@@ -126,6 +126,10 @@ pub struct App {
     /// le terrain pour casser la monotonie. Position+yaw+scale fixés
     /// au load, pas d'animation. Cosmétique pure.
     rocks: Vec<RockProp>,
+    /// **Zombie mobs** (v0.10.1) — ennemis IA lents, gros PV, melee
+    /// uniquement.  Modèle GLB `ogre_zombie`.  Spawn sur terrain BR
+    /// autour des POI. Tickés chaque frame (IA + physique basique).
+    zombies: Vec<Zombie>,
     /// **Ammo crate GLB** scale auto-calculé au load à partir de
     /// `mesh.radius()` pour matcher la taille des MD3 pickup standard
     /// (~25u). `None` = asset pas chargé → fallback MD3.
@@ -3647,6 +3651,7 @@ impl App {
             br_ring: None,
             drones: Vec::new(),
             rocks: Vec::new(),
+            zombies: Vec::new(),
             ammo_crate_scale: None,
             quad_pickup_scale: None,
             health_pack_scale: None,
@@ -4060,6 +4065,7 @@ impl App {
         self.lightning_flash_until = 0.0;
         self.drones.clear();
         self.rocks.clear();
+        self.zombies.clear();
         self.match_winner = None;
 
         let bytes = match self.vfs.read(path) {
@@ -4603,6 +4609,9 @@ impl App {
             self.load_statue_femme_asset();
             self.spawn_br_statue_femme(&terrain);
         }
+        // **Zombie mobs** (v0.10.1) — ogres méchants corps-à-corps.
+        self.load_zombie_asset();
+        self.spawn_zombies(&terrain);
         // **Buildings / Hellhounds / Grass** déjà désactivés.
         // **Spawn lights GLB** (v0.9.5++) — pour chaque prop placé,
         // émet ses lights KHR_lights_punctual à la position monde.
@@ -4849,6 +4858,160 @@ impl App {
             &["assets/models/hellhound.glb"],
         );
     }
+    /// **Zombie GLB asset** (v0.10.1) — charge `ogre_zombie.glb`.
+    fn load_zombie_asset(&mut self) {
+        self.load_prop_glb(
+            "ogre_zombie",
+            &["assets/models/ogre_zombie.glb"],
+        );
+    }
+
+    /// **Spawn zombies BR** (v0.10.1) — place des zombies autour des
+    /// POI sombres (Forest, Volcano, Cirque).  Chaque POI reçoit un
+    /// petit groupe de zombies en ring.
+    fn spawn_zombies(&mut self, terrain: &q3_terrain::Terrain) {
+        use q3_terrain::PoiKind;
+        let has_mesh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.has_prop("ogre_zombie"))
+            .unwrap_or(false);
+        if !has_mesh {
+            warn!("spawn_zombies: ogre_zombie mesh absent, skip");
+            return;
+        }
+        let r_native = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.prop_radius("ogre_zombie"))
+            .unwrap_or(1.0);
+        let base_scale = if r_native > 0.001 {
+            ZOMBIE_TARGET_SIZE / r_native
+        } else {
+            1.0
+        };
+        self.zombies.clear();
+        let mut spawned = 0usize;
+        for (i, poi) in terrain.pois().iter().enumerate() {
+            let count = match poi.kind {
+                PoiKind::Forest => 4,
+                PoiKind::Volcano => 6,
+                PoiKind::Cirque => 3,
+                _ => 0,
+            };
+            if count == 0 {
+                continue;
+            }
+            let ring = poi.radius * 0.35;
+            for k in 0..count {
+                let theta = (k as f32 / count as f32) * std::f32::consts::TAU
+                    + (i as f32 * 0.37);
+                let x = poi.x + theta.cos() * ring;
+                let y = poi.y + theta.sin() * ring;
+                let z = terrain.height_at(x, y);
+                if z <= terrain.meta.water_level + 5.0 {
+                    continue;
+                }
+                self.zombies.push(Zombie {
+                    pos: Vec3::new(x, y, z),
+                    yaw: theta,
+                    health: Health::new(ZOMBIE_MAX_HP),
+                    state: ZombieState::Idle,
+                    next_attack_at: 0.0,
+                    last_damage_at: -10.0,
+                    death_started_at: None,
+                    scale: base_scale,
+                });
+                spawned += 1;
+            }
+        }
+        info!(
+            "BR: {} zombies placés (Forest+Volcano+Cirque, radius={:.2}, scale={:.2})",
+            spawned, r_native, base_scale
+        );
+    }
+
+    /// **Tick zombies** (v0.10.1) — IA + mouvement + melee chaque frame.
+    fn tick_zombies(&mut self, dt: f32) {
+        let player_pos = self.player.origin;
+        let player_dead = self.player_health.is_dead();
+        let now = self.time_sec;
+
+        // Ramasse la hauteur terrain si disponible.
+        let terrain = self.terrain.clone();
+
+        for z in &mut self.zombies {
+            // Morts : on les laisse au sol, rien à ticker.
+            if z.death_started_at.is_some() {
+                continue;
+            }
+            if z.health.is_dead() {
+                z.death_started_at = Some(now);
+                continue;
+            }
+
+            let to_player = player_pos - z.pos;
+            let dist_xz = Vec3::new(to_player.x, to_player.y, 0.0).length();
+
+            // IA : choix d'état.
+            if player_dead || dist_xz > ZOMBIE_AGGRO_RANGE {
+                z.state = ZombieState::Idle;
+            } else if dist_xz <= ZOMBIE_MELEE_RANGE {
+                z.state = ZombieState::Attack;
+            } else {
+                z.state = ZombieState::Chase;
+            }
+
+            match z.state {
+                ZombieState::Idle => {}
+                ZombieState::Chase => {
+                    // Orienter vers le joueur.
+                    z.yaw = to_player.y.atan2(to_player.x);
+                    // Avancer à ZOMBIE_SPEED.
+                    let dir = Vec3::new(z.yaw.cos(), z.yaw.sin(), 0.0);
+                    z.pos += dir * ZOMBIE_SPEED * dt;
+                    // Coller au terrain.
+                    if let Some(ref t) = terrain {
+                        z.pos.z = t.height_at(z.pos.x, z.pos.y);
+                    }
+                }
+                ZombieState::Attack => {
+                    // Face au joueur.
+                    z.yaw = to_player.y.atan2(to_player.x);
+                    // Attaque melee si cooldown passé.
+                    if now >= z.next_attack_at {
+                        z.next_attack_at = now + ZOMBIE_MELEE_COOLDOWN;
+                        // Inflige dégâts au joueur.
+                        if self.player_invul_until <= now {
+                            let taken =
+                                self.player_health.take_damage(ZOMBIE_MELEE_DAMAGE);
+                            if taken > 0 {
+                                self.pain_flash_until = now + 0.15;
+                                // Direction d'attaque pour le HUD pain indicator.
+                                self.last_damage_dir = (z.pos - player_pos).normalize_or_zero();
+                                self.last_damage_until = now + DAMAGE_DIR_SHOW_SEC;
+                                if let (Some(snd), Some(h)) =
+                                    (self.sound.as_ref(), self.sfx_pain_player)
+                                {
+                                    play_at(snd, h, player_pos, Priority::High);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Nettoyage des cadavres expirés.
+        self.zombies.retain(|z| {
+            if let Some(t) = z.death_started_at {
+                now - t < ZOMBIE_CORPSE_LINGER
+            } else {
+                true
+            }
+        });
+    }
+
     fn load_statue_femme_asset(&mut self) {
         self.load_prop_glb(
             "statue_femme",
@@ -11423,6 +11586,60 @@ impl App {
                 }
             }
 
+            // ── Zombie hitscan (v0.10.1) ──────────────────────
+            // Même test sphère-rayon que les bots. On prend le zombie
+            // le plus proche QUI est aussi plus proche que le meilleur
+            // bot (le projectile touche ce qu'il rencontre en premier).
+            let mut best_zombie: Option<(f32, usize)> = None;
+            for (zi, z) in self.zombies.iter().enumerate() {
+                if z.health.is_dead() || z.death_started_at.is_some() {
+                    continue;
+                }
+                let center = z.pos + Vec3::Z * ZOMBIE_CENTER_HEIGHT;
+                let oc = center - eye;
+                let t_closest = oc.dot(fwd);
+                let t_limit = best.map(|(t, _)| t).unwrap_or(t_wall);
+                if t_closest < 0.0 || t_closest > t_limit {
+                    continue;
+                }
+                let d_perp_sq = oc.length_squared() - t_closest * t_closest;
+                if d_perp_sq > ZOMBIE_HIT_RADIUS * ZOMBIE_HIT_RADIUS {
+                    continue;
+                }
+                match best_zombie {
+                    Some((t, _)) if t <= t_closest => {}
+                    _ => best_zombie = Some((t_closest, zi)),
+                }
+            }
+
+            // Si un zombie est plus proche qu'un bot, on le touche.
+            let mut hit_zombie = false;
+            if let Some((t_z, zi)) = best_zombie {
+                hit_zombie = true;
+                let dmg = params.damage * self.player_damage_multiplier();
+                let zombie = &mut self.zombies[zi];
+                let was_alive = !zombie.health.is_dead();
+                let taken = zombie.health.take_damage(dmg);
+                if taken > 0 {
+                    zombie.last_damage_at = self.time_sec;
+                    any_hit = true;
+                    let hit_pt = eye + fwd * t_z;
+                    let zombie_center = zombie.pos + Vec3::Z * ZOMBIE_CENTER_HEIGHT;
+                    pending_damage_nums.push((zombie_center, taken, false));
+                    pending_sparks.push((hit_pt, -fwd, spark_flesh_color));
+                }
+                if was_alive && zombie.health.is_dead() {
+                    self.frags = self.frags.saturating_add(1);
+                    pending_player_frags += 1;
+                    any_kill = true;
+                    info!(
+                        "frag! zombie #{} abattu (frags={})",
+                        zi, self.frags
+                    );
+                }
+            }
+
+            if !hit_zombie {
             if let Some((t_bot, idx)) = best {
                 // **Headshot detection** (G2a) — l'impact est calculé à
                 // `eye + fwd * t_bot`. Si sa Z relative au pied du bot
@@ -11574,8 +11791,10 @@ impl App {
                     ));
                     pending_gibs.push(bot_pos);
                 }
-            } else if wt_frac < 1.0 {
-                // Pas touché de bot mais bien tapé un mur → sparks + bullet
+            }
+            } // fin `if !hit_zombie`
+            if !hit_zombie && best.is_none() && wt_frac < 1.0 {
+                // Pas touché de bot/zombie mais bien tapé un mur → sparks + bullet
                 // hole persistant.  La décale se pose sur la surface via
                 // `plane_normal` (orientation alignée au mur, pas
                 // camera-facing) — elle reste visible même quand le
@@ -11714,9 +11933,10 @@ impl App {
             // - Railgun : lifetime long (0.6s) pour un trail rose qui
             //   persiste après le tir unique.
             if matches!(weapon, WeaponId::Lightninggun | WeaponId::Railgun) {
-                let t_hit = match best {
-                    Some((t_bot, _)) => t_bot.min(t_wall),
-                    None => t_wall,
+                let t_hit = match (best_zombie, best) {
+                    (Some((t_z, _)), _) => t_z.min(t_wall),
+                    (_, Some((t_bot, _))) => t_bot.min(t_wall),
+                    _ => t_wall,
                 };
                 let hit_pt = eye + fwd * t_hit;
                 // **Muzzle position par arme** — utilise le helper
@@ -14589,6 +14809,11 @@ impl ApplicationHandler for App {
                     self.respawn_dead_bots();
                 }
 
+                // **Zombie mobs tick** (v0.10.1) — IA + mouvement + melee.
+                if self.match_winner.is_none() {
+                    self.tick_zombies(dt);
+                }
+
                 // Projectiles en vol → avance + impact + splash damage.
                 // Tick même pendant l'intermission pour que les particules
                 // / explosions en cours se dissipent proprement.
@@ -15183,6 +15408,36 @@ impl ApplicationHandler for App {
                                 ]
                             };
                             r.queue_prop(prop_name, model, rk.tint);
+                        }
+                    }
+
+                    // **Zombies** (v0.10.1) — rendus comme props GLB avec
+                    // rotation vers le joueur.  Les morts restent au sol
+                    // (alpha fade quand le corpse_linger approche sa fin).
+                    if !self.zombies.is_empty() {
+                        for z in &self.zombies {
+                            let cy = z.yaw.cos();
+                            let sy = z.yaw.sin();
+                            let s = z.scale;
+                            // Tint : rouge flash si dégâts récents, gris si mort.
+                            let tint = if z.death_started_at.is_some() {
+                                let elapsed = self.time_sec - z.death_started_at.unwrap_or(0.0);
+                                let alpha = (1.0 - elapsed / ZOMBIE_CORPSE_LINGER).clamp(0.0, 1.0);
+                                [0.5, 0.5, 0.5, alpha]
+                            } else if self.time_sec - z.last_damage_at < 0.15 {
+                                [1.0, 0.3, 0.3, 1.0]
+                            } else {
+                                [1.0, 1.0, 1.0, 1.0]
+                            };
+                            // Standard Y-up → Z-up + yaw rotation (identique
+                            // aux drones/rocks).
+                            let model = [
+                                [cy * s,  sy * s, 0.0, 0.0],
+                                [0.0,     0.0,    s,   0.0],
+                                [sy * s, -cy * s, 0.0, 0.0],
+                                [z.pos.x, z.pos.y, z.pos.z, 1.0],
+                            ];
+                            r.queue_prop("ogre_zombie", model, tint);
                         }
                     }
 
@@ -20509,6 +20764,56 @@ impl Drone {
         let dx = -self.angular_speed * theta.sin();
         dy.atan2(dx)
     }
+}
+
+// ─────────────────── Zombie mob (v0.10.1) ───────────────────
+
+/// Vitesse de déplacement zombie — très lent par rapport au joueur (320).
+const ZOMBIE_SPEED: f32 = 80.0;
+/// HP max — tank lourd.
+const ZOMBIE_MAX_HP: i32 = 500;
+/// Portée de l'attaque corps-à-corps.
+const ZOMBIE_MELEE_RANGE: f32 = 120.0;
+/// Dégâts infligés par coup de melee.
+const ZOMBIE_MELEE_DAMAGE: i32 = 15;
+/// Temps entre deux coups (secondes).
+const ZOMBIE_MELEE_COOLDOWN: f32 = 1.2;
+/// Distance max de détection du joueur — au-delà le zombie est idle.
+const ZOMBIE_AGGRO_RANGE: f32 = 2000.0;
+/// Rayon de la hitbox sphérique pour le hitscan player → zombie.
+const ZOMBIE_HIT_RADIUS: f32 = 40.0;
+/// Hauteur du centre de la hitbox au-dessus de `pos.z`.
+const ZOMBIE_CENTER_HEIGHT: f32 = 40.0;
+/// Durée du freeze cadavre avant disparition (secondes).
+const ZOMBIE_CORPSE_LINGER: f32 = 8.0;
+/// Scale cible du modèle en unités monde (~90u = gros ogre).
+const ZOMBIE_TARGET_SIZE: f32 = 90.0;
+
+/// État IA simplifié du zombie.
+#[derive(Clone, Copy, PartialEq)]
+enum ZombieState {
+    /// Pas de cible, immobile.
+    Idle,
+    /// Marche vers le joueur.
+    Chase,
+    /// En train de frapper (animation).
+    Attack,
+}
+
+/// Un zombie mob vivant dans le monde.
+struct Zombie {
+    pos: Vec3,
+    yaw: f32,
+    health: Health,
+    state: ZombieState,
+    /// Prochain instant où le zombie peut attaquer (secondes app).
+    next_attack_at: f32,
+    /// Dernier instant où le zombie a pris des dégâts (pain flash).
+    last_damage_at: f32,
+    /// Instant du début de mort — `None` = vivant.
+    death_started_at: Option<f32>,
+    /// Scale de rendu (auto-calculé au spawn depuis le rayon GLB).
+    scale: f32,
 }
 
 /// **Adapter Terrain → LosWorld** (v0.9.5) — permet aux bots de
