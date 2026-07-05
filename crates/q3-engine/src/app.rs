@@ -126,10 +126,6 @@ pub struct App {
     /// le terrain pour casser la monotonie. Position+yaw+scale fixés
     /// au load, pas d'animation. Cosmétique pure.
     rocks: Vec<RockProp>,
-    /// **Zombie mobs** (v0.10.1) — ennemis IA lents, gros PV, melee
-    /// uniquement.  Modèle GLB `ogre_zombie`.  Spawn sur terrain BR
-    /// autour des POI. Tickés chaque frame (IA + physique basique).
-    zombies: Vec<Zombie>,
     /// **Ammo crate GLB** scale auto-calculé au load à partir de
     /// `mesh.radius()` pour matcher la taille des MD3 pickup standard
     /// (~25u). `None` = asset pas chargé → fallback MD3.
@@ -3651,7 +3647,6 @@ impl App {
             br_ring: None,
             drones: Vec::new(),
             rocks: Vec::new(),
-            zombies: Vec::new(),
             ammo_crate_scale: None,
             quad_pickup_scale: None,
             health_pack_scale: None,
@@ -4065,7 +4060,6 @@ impl App {
         self.lightning_flash_until = 0.0;
         self.drones.clear();
         self.rocks.clear();
-        self.zombies.clear();
         self.match_winner = None;
 
         let bytes = match self.vfs.read(path) {
@@ -4113,6 +4107,11 @@ impl App {
             // pas côté physique.
             self.player = PlayerMove::new(spawn);
             self.player.view_angles = world.player_start_angles;
+            // **Santé + respawn** : reset obligatoire à chaque load —
+            // sinon un joueur mort sur la map précédente restait mort
+            // sur la suivante (le guard `!is_dead()` bloquait la physique).
+            self.player_health = Health::full();
+            self.respawn_at = None;
             // Invul initiale : même fenêtre que les respawns courants,
             // pour ne pas être sniper au chargement de la map.
             self.player_invul_until = self.time_sec + RESPAWN_INVUL_SEC;
@@ -4439,9 +4438,6 @@ impl App {
             );
         }
 
-        // **Zombie mobs** (v0.10.1) — spawn sur les maps BSP aussi.
-        self.load_zombie_asset();
-        self.spawn_zombies_bsp();
     }
 
     /// **Battle Royale terrain loader** (v0.9.5) — pendant de
@@ -4520,6 +4516,9 @@ impl App {
         self.player = PlayerMove::new(spawn);
         self.player.view_angles =
             q3_math::Angles { pitch: 0.0, yaw: spawn_yaw, roll: 0.0 };
+        // Santé + respawn : reset obligatoire à chaque load (cf. load_map).
+        self.player_health = Health::full();
+        self.respawn_at = None;
         self.player_invul_until = self.time_sec + RESPAWN_INVUL_SEC;
         self.last_damage_until = 0.0;
         self.shake_intensity = 0.0;
@@ -4582,40 +4581,43 @@ impl App {
         // terrain, sans statues / statue_femme / drones / hellhounds /
         // ring shrink.  Carte propre pour visite touristique.
         let exploration_mode = self.cvars.get_i32("br_bots").unwrap_or(0) == 0;
-        // **Rochers GLB** — gardés sur les autres maps BR, retirés sur
-        // Reunion à la demande utilisateur (v0.9.6).
-        let is_reunion = name.eq_ignore_ascii_case("reunion");
+        // **Détection Reunion** (v0.10.2) — la carte s'appelle
+        // `br_reunion` (cf. `TerrainMeta::reunion_default`), pas
+        // `reunion`.  L'ancien check `== "reunion"` était donc TOUJOURS
+        // faux → `spawn_br_rocks` scatterait des rochers sur Reunion et
+        // le bloc `if is_reunion` (grass_proc/rock_proc) ne tournait
+        // jamais.  On matche les deux formes pour corriger.
+        let is_reunion = name.eq_ignore_ascii_case("reunion")
+            || name.eq_ignore_ascii_case("br_reunion");
+        // **Reunion = carte vierge** (v0.10.2, demande utilisateur :
+        // « supprime tous les GLB »).  On nettoie les props hérités
+        // d'une éventuelle map précédente — `spawn_br_rocks` le faisait
+        // avant via son `rocks.clear()`, mais il ne tourne plus ici.
+        self.rocks.clear();
+        // **Rochers GLB scatter** — uniquement hors Reunion.
         if !is_reunion {
             self.load_rock_asset();
             self.spawn_br_rocks(&terrain);
         }
-        // **Grass cluster GLB** — chargé pour usage éditeur uniquement
-        // (v0.9.6).  L'auto-spawn `spawn_reunion_grass_clusters` est
-        // désactivé : l'utilisateur place l'herbe à la main via le mode
-        // éditeur (commande `editor` ou bouton menu Options).
+        // **Meshes éditeur** — chargés (mesh dispo dans la palette de
+        // l'éditeur) mais SANS scatter automatique.  Sur Reunion on ne
+        // spawn AUCUN prop GLB : l'utilisateur place tout à la main.
         self.load_grass_cluster_asset();
-        // **Procedural grass** (v0.9.6) — herbe générée en code, scatter
-        // dense sur les zones végétales de Reunion.  Réactivé à la
-        // demande utilisateur après le retrait du grass_cluster auto.
         if is_reunion {
             self.load_grass_proc_asset();
-            self.spawn_reunion_grass_proc(&terrain);
-            // **Procedural rocks** (v0.9.6) — icosahédron 20-tri varié,
-            // 1200 instances scatter selon biome rock + altitude.
             self.load_rock_proc_asset();
-            self.spawn_reunion_rocks_proc(&terrain);
+            // Scatter auto désactivé (grass_proc / rock_proc) — carte
+            // vierge.  Réactivable en rappelant spawn_reunion_*_proc.
         }
-        // **Statues GLB** — désactivées en exploration (user request).
-        if !exploration_mode {
+        // **Statues GLB** — désactivées en exploration ET sur Reunion
+        // (aucun GLB auto sur Reunion, quel que soit le mode).
+        if !exploration_mode && !is_reunion {
             self.load_statue_asset();
             self.spawn_br_statues(&terrain);
             // **Statues femme GLB** — élément décoratif sur les plages.
             self.load_statue_femme_asset();
             self.spawn_br_statue_femme(&terrain);
         }
-        // **Zombie mobs** (v0.10.1) — ogres méchants corps-à-corps.
-        self.load_zombie_asset();
-        self.spawn_zombies(&terrain);
         // **Buildings / Hellhounds / Grass** déjà désactivés.
         // **Spawn lights GLB** (v0.9.5++) — pour chaque prop placé,
         // émet ses lights KHR_lights_punctual à la position monde.
@@ -4862,259 +4864,6 @@ impl App {
             &["assets/models/hellhound.glb"],
         );
     }
-    /// **Zombie GLB asset** (v0.10.1) — charge `ogre_zombie.glb`.
-    fn load_zombie_asset(&mut self) {
-        self.load_prop_glb(
-            "ogre_zombie",
-            &["assets/models/ogre_zombie.glb"],
-        );
-    }
-
-    /// **Spawn zombies BSP** (v0.10.1) — place des zombies sur les
-    /// maps BSP classiques.  On utilise les spawn points DM comme
-    /// ancres, en décalant chaque zombie de 200-400u autour du spawn
-    /// point.  ~2 zombies par spawn point, max 16.
-    fn spawn_zombies_bsp(&mut self) {
-        let has_mesh = self
-            .renderer
-            .as_ref()
-            .map(|r| r.has_prop("ogre_zombie"))
-            .unwrap_or(false);
-        if !has_mesh {
-            warn!("spawn_zombies_bsp: ogre_zombie mesh absent, skip");
-            return;
-        }
-        let world = match self.world.as_ref() {
-            Some(w) => w,
-            None => return,
-        };
-        let r_native = self
-            .renderer
-            .as_ref()
-            .and_then(|r| r.prop_radius("ogre_zombie"))
-            .unwrap_or(1.0);
-        let base_scale = if r_native > 0.001 {
-            ZOMBIE_TARGET_SIZE / r_native
-        } else {
-            1.0
-        };
-        self.zombies.clear();
-        let spawns = &world.spawn_points;
-        if spawns.is_empty() {
-            return;
-        }
-        // On place ~2 zombies par spawn point, avec un offset aléatoire
-        // déterministe (hash du spawn index). Max 16 zombies par map
-        // pour ne pas surcharger les petites arènes.
-        const MAX_ZOMBIES_BSP: usize = 16;
-        let mut count = 0usize;
-        for (i, sp) in spawns.iter().enumerate() {
-            if count >= MAX_ZOMBIES_BSP {
-                break;
-            }
-            // 2 zombies par spawn point, décalés de ~300u à des angles
-            // différents.
-            for k in 0..2 {
-                if count >= MAX_ZOMBIES_BSP {
-                    break;
-                }
-                let hash = ((i * 7 + k * 13 + 37) as u32).wrapping_mul(2654435761);
-                let theta = (hash as f32 / u32::MAX as f32) * std::f32::consts::TAU;
-                let dist = 200.0 + (hash.wrapping_shr(16) as f32 / 65535.0) * 200.0;
-                let x = sp.origin.x + theta.cos() * dist;
-                let y = sp.origin.y + theta.sin() * dist;
-                // Z : on trace vers le sol pour trouver la hauteur.
-                // Sur BSP on utilise trace_ray du monde collision.
-                let start = Vec3::new(x, y, sp.origin.z + 200.0);
-                let end = Vec3::new(x, y, sp.origin.z - 2000.0);
-                let z = {
-                    let result = world.collision.trace_ray(
-                        start,
-                        end,
-                        q3_collision::Contents::SOLID,
-                    );
-                    if result.fraction < 1.0 {
-                        start.z + (end.z - start.z) * result.fraction
-                    } else {
-                        sp.origin.z // fallback
-                    }
-                };
-                self.zombies.push(Zombie {
-                    pos: Vec3::new(x, y, z),
-                    yaw: theta + std::f32::consts::PI, // face à l'opposé du spawn
-                    health: Health::new(ZOMBIE_MAX_HP),
-                    state: ZombieState::Idle,
-                    next_attack_at: 0.0,
-                    last_damage_at: -10.0,
-                    death_started_at: None,
-                    scale: base_scale,
-                });
-                count += 1;
-            }
-        }
-        info!(
-            "BSP: {} zombies placés autour de {} spawn points (scale={:.2})",
-            count, spawns.len(), base_scale
-        );
-    }
-
-    /// **Spawn zombies BR** (v0.10.1) — place des zombies autour des
-    /// POI sombres (Forest, Volcano, Cirque).  Chaque POI reçoit un
-    /// petit groupe de zombies en ring.
-    fn spawn_zombies(&mut self, terrain: &q3_terrain::Terrain) {
-        use q3_terrain::PoiKind;
-        let has_mesh = self
-            .renderer
-            .as_ref()
-            .map(|r| r.has_prop("ogre_zombie"))
-            .unwrap_or(false);
-        if !has_mesh {
-            warn!("spawn_zombies: ogre_zombie mesh absent, skip");
-            return;
-        }
-        let r_native = self
-            .renderer
-            .as_ref()
-            .and_then(|r| r.prop_radius("ogre_zombie"))
-            .unwrap_or(1.0);
-        let base_scale = if r_native > 0.001 {
-            ZOMBIE_TARGET_SIZE / r_native
-        } else {
-            1.0
-        };
-        self.zombies.clear();
-        let mut spawned = 0usize;
-        for (i, poi) in terrain.pois().iter().enumerate() {
-            let count = match poi.kind {
-                PoiKind::Forest => 4,
-                PoiKind::Volcano => 6,
-                PoiKind::Cirque => 3,
-                _ => 0,
-            };
-            if count == 0 {
-                continue;
-            }
-            let ring = poi.radius * 0.35;
-            for k in 0..count {
-                let theta = (k as f32 / count as f32) * std::f32::consts::TAU
-                    + (i as f32 * 0.37);
-                let x = poi.x + theta.cos() * ring;
-                let y = poi.y + theta.sin() * ring;
-                let z = terrain.height_at(x, y);
-                if z <= terrain.meta.water_level + 5.0 {
-                    continue;
-                }
-                self.zombies.push(Zombie {
-                    pos: Vec3::new(x, y, z),
-                    yaw: theta,
-                    health: Health::new(ZOMBIE_MAX_HP),
-                    state: ZombieState::Idle,
-                    next_attack_at: 0.0,
-                    last_damage_at: -10.0,
-                    death_started_at: None,
-                    scale: base_scale,
-                });
-                spawned += 1;
-            }
-        }
-        info!(
-            "BR: {} zombies placés (Forest+Volcano+Cirque, radius={:.2}, scale={:.2})",
-            spawned, r_native, base_scale
-        );
-    }
-
-    /// **Tick zombies** (v0.10.1) — IA + mouvement + melee chaque frame.
-    fn tick_zombies(&mut self, dt: f32) {
-        let player_pos = self.player.origin;
-        let player_dead = self.player_health.is_dead();
-        let now = self.time_sec;
-
-        // Ramasse la hauteur terrain si disponible.
-        let terrain = self.terrain.clone();
-
-        for z in &mut self.zombies {
-            // Morts : on les laisse au sol, rien à ticker.
-            if z.death_started_at.is_some() {
-                continue;
-            }
-            if z.health.is_dead() {
-                z.death_started_at = Some(now);
-                continue;
-            }
-
-            let to_player = player_pos - z.pos;
-            let dist_xz = Vec3::new(to_player.x, to_player.y, 0.0).length();
-
-            // IA : choix d'état.
-            if player_dead || dist_xz > ZOMBIE_AGGRO_RANGE {
-                z.state = ZombieState::Idle;
-            } else if dist_xz <= ZOMBIE_MELEE_RANGE {
-                z.state = ZombieState::Attack;
-            } else {
-                z.state = ZombieState::Chase;
-            }
-
-            match z.state {
-                ZombieState::Idle => {}
-                ZombieState::Chase => {
-                    // Orienter vers le joueur.
-                    z.yaw = to_player.y.atan2(to_player.x);
-                    // Avancer à ZOMBIE_SPEED.
-                    let dir = Vec3::new(z.yaw.cos(), z.yaw.sin(), 0.0);
-                    z.pos += dir * ZOMBIE_SPEED * dt;
-                    // Coller au terrain (BR) ou au sol BSP.
-                    if let Some(ref t) = terrain {
-                        z.pos.z = t.height_at(z.pos.x, z.pos.y);
-                    } else if let Some(ref w) = self.world {
-                        let above = Vec3::new(z.pos.x, z.pos.y, z.pos.z + 64.0);
-                        let below = Vec3::new(z.pos.x, z.pos.y, z.pos.z - 256.0);
-                        let tr = w.collision.trace_ray(
-                            above,
-                            below,
-                            q3_collision::Contents::SOLID,
-                        );
-                        if tr.fraction < 1.0 {
-                            z.pos.z = above.z + (below.z - above.z) * tr.fraction;
-                        }
-                    }
-                }
-                ZombieState::Attack => {
-                    // Face au joueur.
-                    z.yaw = to_player.y.atan2(to_player.x);
-                    // Attaque melee si cooldown passé.
-                    if now >= z.next_attack_at {
-                        z.next_attack_at = now + ZOMBIE_MELEE_COOLDOWN;
-                        // Inflige dégâts au joueur.
-                        if self.player_invul_until <= now {
-                            let taken =
-                                self.player_health.take_damage(ZOMBIE_MELEE_DAMAGE);
-                            if taken > 0 {
-                                self.pain_flash_until = now + 0.15;
-                                // Direction d'attaque pour le HUD pain indicator.
-                                self.last_damage_dir = (z.pos - player_pos).normalize_or_zero();
-                                self.last_damage_until = now + DAMAGE_DIR_SHOW_SEC;
-                                if let (Some(snd), Some(h)) =
-                                    (self.sound.as_ref(), self.sfx_pain_player)
-                                {
-                                    play_at(snd, h, player_pos, Priority::High);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Nettoyage des cadavres expirés.
-        self.zombies.retain(|z| {
-            if let Some(t) = z.death_started_at {
-                now - t < ZOMBIE_CORPSE_LINGER
-            } else {
-                true
-            }
-        });
-    }
-
     fn load_statue_femme_asset(&mut self) {
         self.load_prop_glb(
             "statue_femme",
@@ -5183,6 +4932,10 @@ impl App {
     /// selon biome rock + altitude.  Trois échelles : pebbles (petits
     /// cailloux), rocks (rochers moyens), boulders (gros rochers).
     /// Yaw + scale + tint aléatoires par instance.
+    ///
+    /// **Désactivé v0.10.2** — Reunion est une carte vierge (aucun GLB
+    /// auto).  Conservé pour réactivation console / future.
+    #[allow(dead_code)]
     fn spawn_reunion_rocks_proc(&mut self, terrain: &q3_terrain::Terrain) {
         let has_mesh = self
             .renderer
@@ -5288,6 +5041,10 @@ impl App {
     /// < 600m, hors océan).  Variation par tuft : yaw aléatoire,
     /// scale [0.7..1.4], tint vert ±10 %.  Aligné sur la normale du
     /// terrain pour épouser les pentes.
+    ///
+    /// **Désactivé v0.10.2** — Reunion est une carte vierge (aucun GLB
+    /// auto).  Conservé pour réactivation console / future.
+    #[allow(dead_code)]
     fn spawn_reunion_grass_proc(&mut self, terrain: &q3_terrain::Terrain) {
         let has_mesh = self
             .renderer
@@ -6115,6 +5872,76 @@ impl App {
         }
     }
 
+    /// **Editor: sélectionne le prop placé le plus proche du curseur**
+    /// (raycast depuis la position curseur, pas le crosshair).
+    fn editor_select_at_cursor(&mut self, cx: f32, cy: f32) {
+        let (sw, sh) = self
+            .window
+            .as_ref()
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width as f32, s.height as f32)
+            })
+            .unwrap_or((self.init_width as f32, self.init_height as f32));
+        // Vérif : on est bien hors du panneau éditeur.
+        let (panel_x, _, _, _) = crate::editor::panel_bounds(&self.editor_panel, sw, sh);
+        if cx >= panel_x { return; }
+
+        let Some(r) = self.renderer.as_mut() else { return; };
+        let inv_vp = r.camera_mut().view_proj().inverse();
+        let cam_pos_q3 = self.player.origin + Vec3::Z * PLAYER_EYE_HEIGHT;
+        let cam_pos = glam::Vec3::new(cam_pos_q3.x, cam_pos_q3.y, cam_pos_q3.z);
+        let (origin, dir) = crate::editor::screen_to_ray(
+            glam::Vec2::new(cx, cy),
+            glam::Vec2::new(sw, sh),
+            inv_vp, cam_pos,
+        );
+        if dir.length_squared() < 1e-6 { return; }
+        let q3_origin = Vec3::new(origin.x, origin.y, origin.z);
+        let q3_dir = Vec3::new(dir.x, dir.y, dir.z);
+
+        // Trace vers le monde pour obtenir le point d'impact max.
+        const MAX_DIST: f32 = 8192.0;
+        let q3_end = q3_origin + q3_dir * MAX_DIST;
+        let hit_pos = if let Some(terrain) = self.terrain.as_ref() {
+            let tr = terrain.trace_ray(q3_origin, q3_end);
+            if tr.fraction < 1.0 {
+                q3_origin + (q3_end - q3_origin) * tr.fraction
+            } else { q3_end }
+        } else if let Some(world) = self.world.as_ref() {
+            let tr = world.collision.trace_ray(
+                q3_origin, q3_end, q3_collision::Contents::MASK_SHOT,
+            );
+            if tr.fraction < 1.0 {
+                q3_origin + (q3_end - q3_origin) * tr.fraction
+            } else { q3_end }
+        } else { return; };
+
+        // Trouve le prop le plus proche du point d'impact.
+        let mut best: Option<(usize, f32)> = None;
+        for (i, p) in self.rocks.iter().enumerate() {
+            let d2 = (p.pos - hit_pos).length_squared();
+            if d2 < 400.0 * 400.0 {
+                if best.map_or(true, |(_, bd)| d2 < bd) {
+                    best = Some((i, d2));
+                }
+            }
+        }
+        if let Some((i, d2)) = best {
+            self.editor_selected = Some(i);
+            // Auto-scroll la liste pour garder la sélection visible.
+            self.editor_panel.placed_scroll = (i as i32 - 3).max(0);
+            let p = &self.rocks[i];
+            info!(
+                "editor: select #{} '{}' ({:.0}u du curseur)",
+                i, p.prop_name, d2.sqrt()
+            );
+        } else {
+            self.editor_selected = None;
+            info!("editor: aucun prop sous le curseur");
+        }
+    }
+
     /// **Editor: import GLB via dialog natif Windows** — ouvre un
     /// FileDialog rfd, l'utilisateur choisit un .glb local, on déduit
     /// le prop_name du nom de fichier (sans extension) et on charge.
@@ -6188,6 +6015,8 @@ impl App {
             }
             EditorClick::SelectPlaced(idx) => {
                 self.editor_selected = Some(idx);
+                // Auto-scroll pour garder la sélection visible.
+                self.editor_panel.placed_scroll = (idx as i32 - 3).max(0);
                 if let Some(p) = self.rocks.get(idx) {
                     info!(
                         "editor: sélectionné #{} '{}' pos=({:.0},{:.0},{:.0})",
@@ -6230,9 +6059,29 @@ impl App {
             EditorClick::Delete => {
                 if let Some(i) = self.editor_selected {
                     if i < self.rocks.len() {
+                        let name = self.rocks[i].prop_name;
                         self.rocks.remove(i);
-                        self.editor_selected = None;
+                        info!("editor: supprimé #{} '{}'", i, name);
+                        // Sélectionne le suivant (ou le précédent si fin de liste).
+                        self.editor_selected = if self.rocks.is_empty() {
+                            None
+                        } else {
+                            Some(i.min(self.rocks.len() - 1))
+                        };
                     }
+                }
+            }
+            EditorClick::DeletePlaced(idx) => {
+                if idx < self.rocks.len() {
+                    let name = self.rocks[idx].prop_name;
+                    self.rocks.remove(idx);
+                    info!("editor: supprimé #{} '{}' (inline)", idx, name);
+                    // Re-select intelligemment.
+                    self.editor_selected = if self.rocks.is_empty() {
+                        None
+                    } else {
+                        Some(idx.min(self.rocks.len() - 1))
+                    };
                 }
             }
             EditorClick::Save => {
@@ -6343,6 +6192,9 @@ impl App {
     /// Free helper (pas de méthode) pour éviter les conflits de
     /// borrow avec `self.renderer.as_mut()` qui détient `r`.
     /// Appelé depuis le HUD pass quand `editor_enabled` est vrai.
+    /// **v0.10.2** — refonte lisibilité : polices 16px, lignes 34px,
+    /// hover highlight, scroll molette sur la liste des placements,
+    /// infos sélection (scale / yaw / align) en bas du panneau.
     #[allow(clippy::too_many_arguments)]
     fn editor_draw_panel_static(
         r: &mut q3_renderer::Renderer,
@@ -6354,108 +6206,184 @@ impl App {
         sh: f32,
     ) {
         let (px, py, pw, ph) = crate::editor::panel_bounds(panel, sw, sh);
-        // Fond semi-opaque sombre.
-        r.push_rect(px, py, pw, ph, [0.05, 0.05, 0.08, 0.85]);
-        // Bordure en trait jaune.
-        let bc = [0.9, 0.85, 0.30, 1.0];
-        r.push_rect(px, py, pw, 1.0, bc);
-        r.push_rect(px, py + ph - 1.0, pw, 1.0, bc);
-        r.push_rect(px, py, 1.0, ph, bc);
-        r.push_rect(px + pw - 1.0, py, 1.0, ph, bc);
+
+        // ── Fond ──
+        r.push_rect(px, py, pw, ph, [0.04, 0.04, 0.07, 0.92]);
+        // Bordure 2px jaune.
+        let bc = [0.95, 0.85, 0.25, 1.0];
+        r.push_rect(px, py, pw, 2.0, bc);
+        r.push_rect(px, py + ph - 2.0, pw, 2.0, bc);
+        r.push_rect(px, py, 2.0, ph, bc);
+        r.push_rect(px + pw - 2.0, py, 2.0, ph, bc);
 
         let lh = panel.line_h;
-        let mut y = py + 12.0;
-        let scale = 12.0_f32;
-        let pad_x = 8.0;
-        let txt_y_off = 4.0;
+        let mut y = py + 14.0;
+        // push_text scale : multiplier sur la grille 8×8 native.
+        // scale=2.5 → 20×20 px par glyphe — lisible dans 28px de lh.
+        let font = 2.5_f32;
+        let font_sm = 2.0_f32;     // sous-texte (16px)
+        let font_lg = 3.0_f32;     // titre (24px)
+        let char_h = 8.0 * font;   // = 20.0
+        let pad_x = 10.0;
+        let txt_y = (lh - char_h) * 0.5; // centrage vertical
+        let btn_m = 4.0;                  // marge interne bouton
 
-        // Titre
-        let title = format!("EDITOR ({} props)", rocks.len());
-        r.push_text(px + pad_x, y + txt_y_off, scale + 2.0, [1.0, 0.85, 0.30, 1.0], &title);
+        // Hover : index de la ligne sous le curseur (-1 = rien).
+        let hover_idx = if let Some((hx, hy)) = panel.hover_pos {
+            crate::editor::hover_line_index(
+                panel, hx, hy, sw, sh,
+                editor_prop_scales.len(), rocks.len(),
+            )
+        } else { -1 };
+        let mut line_idx: i32 = 0;
+
+        // Helper : couleur brightened si hovered.
+        let hov = |base: [f32; 4], idx: i32| -> [f32; 4] {
+            if idx == hover_idx {
+                [base[0] + 0.12, base[1] + 0.12, base[2] + 0.12, base[3]]
+            } else {
+                base
+            }
+        };
+
+        // ── Titre ──
+        let title = format!("SCENE EDITOR  ({} props)", rocks.len());
+        r.push_text(px + pad_x, y + txt_y, font_lg, bc, &title);
         y += lh;
+        line_idx += 1;
 
-        // Bouton IMPORT GLB
-        r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, [0.20, 0.40, 0.20, 1.0]);
-        r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], "  + IMPORT GLB...");
-        y += lh + 6.0;
+        // ── IMPORT GLB ──
+        let import_bg = hov([0.18, 0.45, 0.22, 1.0], line_idx);
+        r.push_rect(px + btn_m, y, pw - btn_m * 2.0, lh - 3.0, import_bg);
+        r.push_text(px + pad_x + 4.0, y + txt_y, font, [1.0, 1.0, 1.0, 1.0], "+ IMPORT GLB...");
+        y += lh + 8.0;
+        line_idx += 1;
 
-        // Section: props chargés
-        r.push_text(px + pad_x, y + txt_y_off, scale, [0.7, 0.7, 0.7, 1.0], "PROPS CHARGES (clic = actif)");
+        // ── Section : props chargés ──
+        r.push_text(px + pad_x, y + txt_y, font_sm, [0.60, 0.60, 0.55, 1.0], "PROPS DISPONIBLES");
         y += lh;
-        // Liste
+        line_idx += 1;
+
         let active = panel.active_prop.as_deref().unwrap_or("");
         let mut loaded: Vec<&String> = editor_prop_scales.keys().collect();
         loaded.sort();
         for name in &loaded {
             let is_active = name.as_str() == active;
-            let bg = if is_active { [0.30, 0.30, 0.55, 1.0] } else { [0.10, 0.10, 0.14, 1.0] };
-            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, bg);
-            let prefix = if is_active { ">> " } else { "   " };
-            r.push_text(
-                px + pad_x, y + txt_y_off, scale,
-                [0.95, 0.95, 0.95, 1.0],
-                &format!("{}{}", prefix, name),
-            );
+            let base_bg = if is_active { [0.28, 0.28, 0.55, 1.0] } else { [0.10, 0.10, 0.16, 1.0] };
+            let bg = hov(base_bg, line_idx);
+            r.push_rect(px + btn_m, y, pw - btn_m * 2.0, lh - 3.0, bg);
+            let marker = if is_active { "\u{25b6} " } else { "  " };
+            let tc = if is_active { [1.0, 0.95, 0.55, 1.0] } else { [0.90, 0.90, 0.90, 1.0] };
+            r.push_text(px + pad_x, y + txt_y, font, tc, &format!("{}{}", marker, name));
             y += lh;
+            line_idx += 1;
         }
-        y += 6.0;
+        y += 8.0;
 
-        // Boutons d'action
-        let actions = [
-            ("scale +",       [0.20, 0.30, 0.50, 1.0]),
-            ("scale -",       [0.20, 0.30, 0.50, 1.0]),
-            ("yaw +15",       [0.20, 0.30, 0.50, 1.0]),
-            ("yaw -15",       [0.20, 0.30, 0.50, 1.0]),
-            ("toggle align",  [0.30, 0.30, 0.20, 1.0]),
-            ("delete",        [0.55, 0.15, 0.15, 1.0]),
+        // ── Boutons d'action ──
+        let actions: &[(&str, [f32; 4])] = &[
+            ("SCALE +10%",     [0.18, 0.28, 0.50, 1.0]),
+            ("SCALE -10%",     [0.18, 0.28, 0.50, 1.0]),
+            ("YAW +15\u{00b0}",  [0.18, 0.28, 0.50, 1.0]),
+            ("YAW -15\u{00b0}",  [0.18, 0.28, 0.50, 1.0]),
+            ("TOGGLE ALIGN",   [0.32, 0.32, 0.18, 1.0]),
+            ("DELETE",         [0.60, 0.14, 0.14, 1.0]),
         ];
-        for (label, color) in &actions {
-            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, *color);
-            r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], label);
+        for (label, color) in actions {
+            let bg = hov(*color, line_idx);
+            r.push_rect(px + btn_m, y, pw - btn_m * 2.0, lh - 3.0, bg);
+            r.push_text(px + pad_x + 4.0, y + txt_y, font, [1.0, 1.0, 1.0, 1.0], label);
             y += lh;
+            line_idx += 1;
         }
-        y += 6.0;
+        y += 8.0;
 
-        // Save/Load/Close
-        let footer = [
-            ("save",         [0.15, 0.40, 0.20, 1.0]),
-            ("load",         [0.15, 0.40, 0.20, 1.0]),
-            ("close editor", [0.40, 0.20, 0.20, 1.0]),
+        // ── Save / Load / Close ──
+        let footer: &[(&str, [f32; 4])] = &[
+            ("SAVE",           [0.14, 0.42, 0.22, 1.0]),
+            ("LOAD",           [0.14, 0.42, 0.22, 1.0]),
+            ("CLOSE EDITOR",   [0.50, 0.18, 0.18, 1.0]),
         ];
-        for (label, color) in &footer {
-            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, *color);
-            r.push_text(px + pad_x, y + txt_y_off, scale, [1.0, 1.0, 1.0, 1.0], label);
+        for (label, color) in footer {
+            let bg = hov(*color, line_idx);
+            r.push_rect(px + btn_m, y, pw - btn_m * 2.0, lh - 3.0, bg);
+            r.push_text(px + pad_x + 4.0, y + txt_y, font, [1.0, 1.0, 1.0, 1.0], label);
             y += lh;
+            line_idx += 1;
         }
-        y += 6.0;
+        y += 8.0;
 
-        // Section: props placés (cliquable)
-        r.push_text(px + pad_x, y + txt_y_off, scale, [0.7, 0.7, 0.7, 1.0], "PROPS PLACES (clic = select)");
+        // ── Info sélection ──
+        if let Some(sel) = editor_selected {
+            if let Some(p) = rocks.get(sel) {
+                let sep_c = [0.40, 0.35, 0.15, 0.8];
+                r.push_rect(px + btn_m, y, pw - btn_m * 2.0, 1.0, sep_c);
+                y += 4.0;
+                let info = format!(
+                    "#{} {} s={:.2} y={:.0}\u{00b0} {}",
+                    sel, p.prop_name, p.scale,
+                    p.yaw.to_degrees(),
+                    if p.terrain_normal.is_some() { "ALN" } else { "" }
+                );
+                r.push_text(px + pad_x, y + 2.0, font_sm, [1.0, 0.85, 0.40, 1.0], &info);
+                y += lh;
+            }
+        }
+
+        // ── Section : props placés ──
+        r.push_text(px + pad_x, y + txt_y, font_sm, [0.60, 0.60, 0.55, 1.0], "PROPS PLACES (clic = select)");
         y += lh;
+        line_idx += 1;
 
-        // Détermine combien de lignes restent dans la zone visible
-        let max_lines = ((py + ph - y - 8.0) / lh).floor() as usize;
+        // Scroll : skip `placed_scroll` entrées.
+        let max_lines = ((py + ph - y - 8.0) / lh).floor().max(0.0) as usize;
         let total = rocks.len();
-        let show = total.min(max_lines);
+        let scroll = (panel.placed_scroll.max(0) as usize).min(
+            total.saturating_sub(max_lines),
+        );
+        let show = total.saturating_sub(scroll).min(max_lines);
+        // Scroll indicator
+        if total > max_lines {
+            let pct = if total > max_lines { scroll as f32 / (total - max_lines) as f32 } else { 0.0 };
+            let track_h = max_lines as f32 * lh;
+            let thumb_h = (max_lines as f32 / total as f32 * track_h).max(12.0);
+            let thumb_y = y + pct * (track_h - thumb_h);
+            r.push_rect(px + pw - 8.0, y, 4.0, track_h, [0.15, 0.15, 0.20, 0.6]);
+            r.push_rect(px + pw - 8.0, thumb_y, 4.0, thumb_h, [0.70, 0.65, 0.30, 0.8]);
+        }
+        let del_zone_w = 30.0;
         for k in 0..show {
-            let idx = k;
+            let idx = k + scroll;
             let p = &rocks[idx];
             let is_sel = editor_selected == Some(idx);
-            let bg = if is_sel { [0.50, 0.30, 0.15, 1.0] } else { [0.10, 0.10, 0.14, 1.0] };
-            r.push_rect(px + 4.0, y, pw - 8.0, lh - 2.0, bg);
+            let base_bg = if is_sel { [0.55, 0.30, 0.12, 1.0] } else { [0.10, 0.10, 0.16, 1.0] };
+            let bg = hov(base_bg, line_idx);
+            let row_w = pw - btn_m * 2.0 - 10.0;
+            // Fond ligne
+            r.push_rect(px + btn_m, y, row_w, lh - 3.0, bg);
+            // Texte prop
             let line = format!(
-                "#{:3} {:<14} ({:>5.0},{:>5.0})",
-                idx, &p.prop_name[..p.prop_name.len().min(14)], p.pos.x, p.pos.y
+                "#{:<3} {:<12} ({:.0},{:.0})",
+                idx, &p.prop_name[..p.prop_name.len().min(12)], p.pos.x, p.pos.y
             );
-            r.push_text(px + pad_x, y + txt_y_off, scale, [0.95, 0.95, 0.95, 1.0], &line);
+            let tc = if is_sel { [1.0, 0.90, 0.55, 1.0] } else { [0.88, 0.88, 0.88, 1.0] };
+            r.push_text(px + pad_x, y + txt_y, font, tc, &line);
+            // Bouton [X] suppression inline
+            let xbtn_x = px + btn_m + row_w - del_zone_w;
+            let xbtn_bg = hov([0.55, 0.12, 0.12, 0.85], line_idx);
+            r.push_rect(xbtn_x, y + 2.0, del_zone_w, lh - 7.0, xbtn_bg);
+            r.push_text(xbtn_x + 6.0, y + txt_y, font_sm, [1.0, 0.6, 0.6, 1.0], "X");
             y += lh;
+            line_idx += 1;
         }
 
-        // Réticule au centre écran (croix simple) pour aim spawn fallback.
+        // Réticule au centre écran (croix + point).
         let cx = sw * 0.5;
         let cy = sh * 0.5;
-        r.push_rect(cx - 6.0, cy - 0.5, 12.0, 1.0, [1.0, 0.85, 0.30, 0.9]);
-        r.push_rect(cx - 0.5, cy - 6.0, 1.0, 12.0, [1.0, 0.85, 0.30, 0.9]);
+        let ret_c = [1.0, 0.85, 0.30, 0.85];
+        r.push_rect(cx - 10.0, cy - 1.0, 20.0, 2.0, ret_c);
+        r.push_rect(cx - 1.0, cy - 10.0, 2.0, 20.0, ret_c);
+        r.push_rect(cx - 2.0, cy - 2.0, 4.0, 4.0, ret_c);
     }
 
     /// **Editor: sauvegarde** la liste des props dans
@@ -11689,60 +11617,6 @@ impl App {
                 }
             }
 
-            // ── Zombie hitscan (v0.10.1) ──────────────────────
-            // Même test sphère-rayon que les bots. On prend le zombie
-            // le plus proche QUI est aussi plus proche que le meilleur
-            // bot (le projectile touche ce qu'il rencontre en premier).
-            let mut best_zombie: Option<(f32, usize)> = None;
-            for (zi, z) in self.zombies.iter().enumerate() {
-                if z.health.is_dead() || z.death_started_at.is_some() {
-                    continue;
-                }
-                let center = z.pos + Vec3::Z * ZOMBIE_CENTER_HEIGHT;
-                let oc = center - eye;
-                let t_closest = oc.dot(fwd);
-                let t_limit = best.map(|(t, _)| t).unwrap_or(t_wall);
-                if t_closest < 0.0 || t_closest > t_limit {
-                    continue;
-                }
-                let d_perp_sq = oc.length_squared() - t_closest * t_closest;
-                if d_perp_sq > ZOMBIE_HIT_RADIUS * ZOMBIE_HIT_RADIUS {
-                    continue;
-                }
-                match best_zombie {
-                    Some((t, _)) if t <= t_closest => {}
-                    _ => best_zombie = Some((t_closest, zi)),
-                }
-            }
-
-            // Si un zombie est plus proche qu'un bot, on le touche.
-            let mut hit_zombie = false;
-            if let Some((t_z, zi)) = best_zombie {
-                hit_zombie = true;
-                let dmg = params.damage * self.player_damage_multiplier();
-                let zombie = &mut self.zombies[zi];
-                let was_alive = !zombie.health.is_dead();
-                let taken = zombie.health.take_damage(dmg);
-                if taken > 0 {
-                    zombie.last_damage_at = self.time_sec;
-                    any_hit = true;
-                    let hit_pt = eye + fwd * t_z;
-                    let zombie_center = zombie.pos + Vec3::Z * ZOMBIE_CENTER_HEIGHT;
-                    pending_damage_nums.push((zombie_center, taken, false));
-                    pending_sparks.push((hit_pt, -fwd, spark_flesh_color));
-                }
-                if was_alive && zombie.health.is_dead() {
-                    self.frags = self.frags.saturating_add(1);
-                    pending_player_frags += 1;
-                    any_kill = true;
-                    info!(
-                        "frag! zombie #{} abattu (frags={})",
-                        zi, self.frags
-                    );
-                }
-            }
-
-            if !hit_zombie {
             if let Some((t_bot, idx)) = best {
                 // **Headshot detection** (G2a) — l'impact est calculé à
                 // `eye + fwd * t_bot`. Si sa Z relative au pied du bot
@@ -11895,9 +11769,8 @@ impl App {
                     pending_gibs.push(bot_pos);
                 }
             }
-            } // fin `if !hit_zombie`
-            if !hit_zombie && best.is_none() && wt_frac < 1.0 {
-                // Pas touché de bot/zombie mais bien tapé un mur → sparks + bullet
+            if best.is_none() && wt_frac < 1.0 {
+                // Pas touché de bot mais bien tapé un mur → sparks + bullet
                 // hole persistant.  La décale se pose sur la surface via
                 // `plane_normal` (orientation alignée au mur, pas
                 // camera-facing) — elle reste visible même quand le
@@ -12036,9 +11909,8 @@ impl App {
             // - Railgun : lifetime long (0.6s) pour un trail rose qui
             //   persiste après le tir unique.
             if matches!(weapon, WeaponId::Lightninggun | WeaponId::Railgun) {
-                let t_hit = match (best_zombie, best) {
-                    (Some((t_z, _)), _) => t_z.min(t_wall),
-                    (_, Some((t_bot, _))) => t_bot.min(t_wall),
+                let t_hit = match best {
+                    Some((t_bot, _)) => t_bot.min(t_wall),
                     _ => t_wall,
                 };
                 let hit_pt = eye + fwd * t_hit;
@@ -13830,6 +13702,12 @@ impl ApplicationHandler for App {
                         .unwrap_or((self.init_width as f32, self.init_height as f32));
                     self.menu.on_mouse_move(x, y, w, h);
                 }
+                // **Editor hover** (v0.10.2) — le panneau tracke la
+                // position curseur pour le feedback visuel (highlight
+                // de la ligne survolée).
+                if self.editor_enabled {
+                    self.editor_panel.hover_pos = Some((x, y));
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::MouseButton;
@@ -13853,8 +13731,9 @@ impl ApplicationHandler for App {
                         self.apply_menu_action(action, event_loop);
                     }
                 } else if self.editor_enabled {
-                    // **Editor mode** — clic gauche = action panneau
-                    // ou spawn 3D, clic droit = sélectionne prop placé.
+                    // **Editor mode** (v0.10.2) — clic gauche = action
+                    // panneau ou spawn 3D, clic droit = sélectionne le
+                    // prop placé le plus proche du curseur (raycast).
                     if state == ElementState::Pressed {
                         match button {
                             MouseButton::Left => {
@@ -13862,7 +13741,8 @@ impl ApplicationHandler for App {
                                 self.editor_handle_click(cx, cy);
                             }
                             MouseButton::Right => {
-                                self.editor_select_aim();
+                                let (cx, cy) = self.cursor_pos;
+                                self.editor_select_at_cursor(cx, cy);
                             }
                             _ => {}
                         }
@@ -13904,6 +13784,12 @@ impl ApplicationHandler for App {
                 };
                 if self.menu.open {
                     self.menu.on_scroll(lines);
+                } else if self.editor_enabled {
+                    // **Editor scroll** (v0.10.2) — molette scrolle la
+                    // liste des props placés.
+                    let step = if lines > 0.0 { -3_i32 } else { 3 };
+                    self.editor_panel.placed_scroll =
+                        (self.editor_panel.placed_scroll + step).max(0);
                 } else if !self.console.is_open() && !self.player_health.is_dead() {
                     // Q3 convention : molette haut = arme précédente, bas = suivante.
                     if lines.abs() >= 0.5 {
@@ -14273,10 +14159,22 @@ impl ApplicationHandler for App {
                 // le joueur est vivant et que le match n'est pas terminé.
                 // Intermission → tout est gelé, on laisse juste l'audio
                 // et les particules vivre leur vie.
-                if !self.console.is_open()
+                let physics_ok = !self.console.is_open()
                     && !self.player_health.is_dead()
-                    && self.match_winner.is_none()
-                {
+                    && self.match_winner.is_none();
+                // **Debug one-shot** : log les conditions une seule fois
+                // si la physique est bloquée (diagnostic "WASD ne fait rien").
+                if !physics_ok && self.time_sec < 10.0 {
+                    warn!(
+                        "PHYSICS BLOCKED: console={}, dead={}, winner={:?}, hp={}/{}",
+                        self.console.is_open(),
+                        self.player_health.is_dead(),
+                        self.match_winner,
+                        self.player_health.current,
+                        self.player_health.max,
+                    );
+                }
+                if physics_ok {
                     // Pas fixe Q3 : 8ms (125Hz). L'original simule la
                     // physique à cette fréquence quelle que soit la
                     // framerate GPU — sans ce pas fixe, la friction et
@@ -14912,10 +14810,6 @@ impl ApplicationHandler for App {
                     self.respawn_dead_bots();
                 }
 
-                // **Zombie mobs tick** (v0.10.1) — IA + mouvement + melee.
-                if self.match_winner.is_none() {
-                    self.tick_zombies(dt);
-                }
 
                 // Projectiles en vol → avance + impact + splash damage.
                 // Tick même pendant l'intermission pour que les particules
@@ -15492,11 +15386,18 @@ impl ApplicationHandler for App {
                                 let fwd = (raw_fwd - up * raw_fwd.dot(up)).normalize();
                                 let right = up.cross(fwd);
                                 // Matrice colonnes : glTF X→right, Y→up,
-                                // Z→(-fwd) avec le scale appliqué.
+                                // Z→fwd avec le scale appliqué.
+                                // **BUG FIX** : l'ancien code utilisait -fwd
+                                // en colonne 2, ce qui donnait un déterminant
+                                // négatif (base miroir) → flip du winding →
+                                // backface cull tuait TOUS les triangles.
+                                // Avec +fwd le repère est direct (det > 0),
+                                // le winding CCW est préservé, et le grass
+                                // (+ tout prop terrain-aligned) s'affiche.
                                 [
                                     [right.x * s, right.y * s, right.z * s, 0.0],
                                     [up.x    * s, up.y    * s, up.z    * s, 0.0],
-                                    [-fwd.x  * s, -fwd.y  * s, -fwd.z  * s, 0.0],
+                                    [fwd.x   * s, fwd.y   * s, fwd.z   * s, 0.0],
                                     [rk.pos.x, rk.pos.y, rk.pos.z, 1.0],
                                 ]
                             } else {
@@ -15511,36 +15412,6 @@ impl ApplicationHandler for App {
                                 ]
                             };
                             r.queue_prop(prop_name, model, rk.tint);
-                        }
-                    }
-
-                    // **Zombies** (v0.10.1) — rendus comme props GLB avec
-                    // rotation vers le joueur.  Les morts restent au sol
-                    // (alpha fade quand le corpse_linger approche sa fin).
-                    if !self.zombies.is_empty() {
-                        for z in &self.zombies {
-                            let cy = z.yaw.cos();
-                            let sy = z.yaw.sin();
-                            let s = z.scale;
-                            // Tint : rouge flash si dégâts récents, gris si mort.
-                            let tint = if z.death_started_at.is_some() {
-                                let elapsed = self.time_sec - z.death_started_at.unwrap_or(0.0);
-                                let alpha = (1.0 - elapsed / ZOMBIE_CORPSE_LINGER).clamp(0.0, 1.0);
-                                [0.5, 0.5, 0.5, alpha]
-                            } else if self.time_sec - z.last_damage_at < 0.15 {
-                                [1.0, 0.3, 0.3, 1.0]
-                            } else {
-                                [1.0, 1.0, 1.0, 1.0]
-                            };
-                            // Standard Y-up → Z-up + yaw rotation (identique
-                            // aux drones/rocks).
-                            let model = [
-                                [cy * s,  sy * s, 0.0, 0.0],
-                                [0.0,     0.0,    s,   0.0],
-                                [sy * s, -cy * s, 0.0, 0.0],
-                                [z.pos.x, z.pos.y, z.pos.z, 1.0],
-                            ];
-                            r.queue_prop("ogre_zombie", model, tint);
                         }
                     }
 
@@ -20870,54 +20741,6 @@ impl Drone {
 }
 
 // ─────────────────── Zombie mob (v0.10.1) ───────────────────
-
-/// Vitesse de déplacement zombie — très lent par rapport au joueur (320).
-const ZOMBIE_SPEED: f32 = 80.0;
-/// HP max — tank lourd.
-const ZOMBIE_MAX_HP: i32 = 500;
-/// Portée de l'attaque corps-à-corps.
-const ZOMBIE_MELEE_RANGE: f32 = 120.0;
-/// Dégâts infligés par coup de melee.
-const ZOMBIE_MELEE_DAMAGE: i32 = 15;
-/// Temps entre deux coups (secondes).
-const ZOMBIE_MELEE_COOLDOWN: f32 = 1.2;
-/// Distance max de détection du joueur — au-delà le zombie est idle.
-const ZOMBIE_AGGRO_RANGE: f32 = 2000.0;
-/// Rayon de la hitbox sphérique pour le hitscan player → zombie.
-const ZOMBIE_HIT_RADIUS: f32 = 40.0;
-/// Hauteur du centre de la hitbox au-dessus de `pos.z`.
-const ZOMBIE_CENTER_HEIGHT: f32 = 40.0;
-/// Durée du freeze cadavre avant disparition (secondes).
-const ZOMBIE_CORPSE_LINGER: f32 = 8.0;
-/// Scale cible du modèle en unités monde (~90u = gros ogre).
-const ZOMBIE_TARGET_SIZE: f32 = 90.0;
-
-/// État IA simplifié du zombie.
-#[derive(Clone, Copy, PartialEq)]
-enum ZombieState {
-    /// Pas de cible, immobile.
-    Idle,
-    /// Marche vers le joueur.
-    Chase,
-    /// En train de frapper (animation).
-    Attack,
-}
-
-/// Un zombie mob vivant dans le monde.
-struct Zombie {
-    pos: Vec3,
-    yaw: f32,
-    health: Health,
-    state: ZombieState,
-    /// Prochain instant où le zombie peut attaquer (secondes app).
-    next_attack_at: f32,
-    /// Dernier instant où le zombie a pris des dégâts (pain flash).
-    last_damage_at: f32,
-    /// Instant du début de mort — `None` = vivant.
-    death_started_at: Option<f32>,
-    /// Scale de rendu (auto-calculé au spawn depuis le rayon GLB).
-    scale: f32,
-}
 
 /// **Adapter Terrain → LosWorld** (v0.9.5) — permet aux bots de
 /// passer le LOS sur la heightmap BR via le trait abstrait défini

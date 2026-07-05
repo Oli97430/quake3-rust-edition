@@ -42,6 +42,8 @@ pub enum EditorClick {
     ToggleAlign,
     /// Supprimer le sélectionné.
     Delete,
+    /// Supprimer un prop placé par index (bouton [X] sur la ligne).
+    DeletePlaced(usize),
     /// Sauver les placements (`reunion_edits.txt`).
     Save,
     /// Recharger les placements depuis le disque.
@@ -78,17 +80,20 @@ pub struct EditorPanel {
     /// Quand l'utilisateur clique en monde, c'est ce prop qui est spawné.
     pub active_prop: Option<String>,
     /// Scroll offset pour la liste des placements (si > N visibles).
-    pub placed_scroll: usize,
+    pub placed_scroll: i32,
+    /// Position curseur en pixels pour le hover feedback.
+    pub hover_pos: Option<(f32, f32)>,
 }
 
 impl Default for EditorPanel {
     fn default() -> Self {
         Self {
-            width: 280.0,
-            margin_right: 16.0,
-            line_h: 22.0,
+            width: 380.0,
+            margin_right: 12.0,
+            line_h: 28.0,
             active_prop: None,
             placed_scroll: 0,
+            hover_pos: None,
         }
     }
 }
@@ -122,22 +127,22 @@ pub fn hit_test(
     sw: f32,
     sh: f32,
 ) -> EditorClick {
-    let (panel_x, panel_y, _, _) = panel_bounds(panel, sw, sh);
+    let (panel_x, panel_y, pw, ph) = panel_bounds(panel, sw, sh);
     // Si le clic n'est pas dans la bande verticale du panneau, c'est
     // un clic 3D → SpawnAtAim (l'App décide si elle fait quelque chose).
     if px < panel_x {
         return EditorClick::SpawnAtAim;
     }
 
-    let mut y = panel_y + 12.0;
+    let mut y = panel_y + 14.0;
     let lh = panel.line_h;
-    let pad = 6.0;
+    let pad = 8.0;
 
     // ── Ligne 1 : titre (non cliquable) ──
     y += lh;
 
     // ── Ligne 2 : bouton "IMPORT GLB" ──
-    if hit_line(px, py, panel_x, y, panel.width, lh) {
+    if hit_line(px, py, panel_x, y, pw, lh) {
         return EditorClick::ImportGlb;
     }
     y += lh + pad;
@@ -147,7 +152,7 @@ pub fn hit_test(
 
     // ── Liste des props chargés ──
     for (name, _) in view.loaded_props {
-        if hit_line(px, py, panel_x, y, panel.width, lh) {
+        if hit_line(px, py, panel_x, y, pw, lh) {
             return EditorClick::SelectActiveProp(name.clone());
         }
         y += lh;
@@ -156,15 +161,15 @@ pub fn hit_test(
 
     // ── Boutons d'action sur le sélectionné ──
     let action_buttons: &[(&str, EditorClick)] = &[
-        ("scale +",   EditorClick::ScaleMul(1.10)),
-        ("scale -",   EditorClick::ScaleMul(1.0 / 1.10)),
-        ("yaw +15",   EditorClick::YawAdd(15.0)),
-        ("yaw -15",   EditorClick::YawAdd(-15.0)),
-        ("toggle align", EditorClick::ToggleAlign),
-        ("delete",    EditorClick::Delete),
+        ("SCALE +10%",     EditorClick::ScaleMul(1.10)),
+        ("SCALE -10%",     EditorClick::ScaleMul(1.0 / 1.10)),
+        ("YAW +15\u{00b0}",  EditorClick::YawAdd(15.0)),
+        ("YAW -15\u{00b0}",  EditorClick::YawAdd(-15.0)),
+        ("TOGGLE ALIGN",   EditorClick::ToggleAlign),
+        ("DELETE",         EditorClick::Delete),
     ];
     for (_, action) in action_buttons {
-        if hit_line(px, py, panel_x, y, panel.width, lh) {
+        if hit_line(px, py, panel_x, y, pw, lh) {
             return action.clone();
         }
         y += lh;
@@ -173,12 +178,12 @@ pub fn hit_test(
 
     // ── Boutons Save/Load/Close ──
     let footer: &[(&str, EditorClick)] = &[
-        ("save", EditorClick::Save),
-        ("load", EditorClick::Load),
-        ("close editor", EditorClick::Close),
+        ("SAVE", EditorClick::Save),
+        ("LOAD", EditorClick::Load),
+        ("CLOSE EDITOR", EditorClick::Close),
     ];
     for (_, action) in footer {
-        if hit_line(px, py, panel_x, y, panel.width, lh) {
+        if hit_line(px, py, panel_x, y, pw, lh) {
             return action.clone();
         }
         y += lh;
@@ -188,15 +193,83 @@ pub fn hit_test(
     // ── Section "Props placés" — header ──
     y += lh;
 
-    // ── Liste des props placés (cliquable pour sélection) ──
-    for (idx, _name, _pos) in view.placed_props {
-        if hit_line(px, py, panel_x, y, panel.width, lh) {
+    // ── Liste des props placés ──
+    // Scroll : on saute `placed_scroll` entrées.
+    // Clic droit de la ligne (30px) = [X] delete, le reste = select.
+    let max_lines = ((panel_y + ph - y - 8.0) / lh).floor().max(0.0) as usize;
+    let scroll = (panel.placed_scroll.max(0) as usize).min(
+        view.placed_props.len().saturating_sub(max_lines),
+    );
+    let visible = &view.placed_props[scroll..];
+    let del_zone_w = 30.0; // largeur du bouton [X] à droite
+    for (idx, _name, _pos) in visible.iter().take(max_lines) {
+        if hit_line(px, py, panel_x, y, pw, lh) {
+            // Zone [X] à l'extrême droite ?
+            if px >= panel_x + pw - del_zone_w - 8.0 {
+                return EditorClick::DeletePlaced(*idx);
+            }
             return EditorClick::SelectPlaced(*idx);
         }
         y += lh;
     }
 
     EditorClick::None
+}
+
+/// Retourne l'index de la ligne survolée (hover) pour le feedback
+/// visuel. -1 = rien. L'index est interne au layout — le draw
+/// l'utilise pour savoir quoi highlighter.
+pub fn hover_line_index(
+    panel: &EditorPanel,
+    px: f32,
+    py: f32,
+    sw: f32,
+    sh: f32,
+    total_loaded: usize,
+    total_placed: usize,
+) -> i32 {
+    let (panel_x, panel_y, _, _) = panel_bounds(panel, sw, sh);
+    if px < panel_x { return -1; }
+
+    let lh = panel.line_h;
+    let pad = 8.0;
+    let mut y = panel_y + 14.0;
+    let mut idx: i32 = 0;
+
+    // Titre
+    y += lh; idx += 1;
+    // Import
+    if py >= y && py < y + lh { return idx; }
+    y += lh + pad; idx += 1;
+    // Header props chargés
+    y += lh; idx += 1;
+    // Props chargés
+    for _ in 0..total_loaded {
+        if py >= y && py < y + lh { return idx; }
+        y += lh; idx += 1;
+    }
+    y += pad;
+    // 6 action buttons
+    for _ in 0..6 {
+        if py >= y && py < y + lh { return idx; }
+        y += lh; idx += 1;
+    }
+    y += pad;
+    // 3 footer buttons
+    for _ in 0..3 {
+        if py >= y && py < y + lh { return idx; }
+        y += lh; idx += 1;
+    }
+    y += pad;
+    // Header placés
+    y += lh; idx += 1;
+    // Props placés
+    for _ in 0..total_placed {
+        if py >= y && py < y + lh { return idx; }
+        y += lh; idx += 1;
+    }
+
+    -1
 }
 
 fn hit_line(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32) -> bool {
