@@ -256,6 +256,18 @@ pub struct Renderer {
     material_cache: Option<MaterialCache>,
     pipeline_cache: Option<PipelineCache>,
 
+    /// Buckets de draw BSP pré-résolus (v0.10.2 perf). La résolution
+    /// `shader_name` vers `Material` alloue une `String` lowercased puis
+    /// fait un lookup ; elle ne dépend que du mesh et du cache matériaux,
+    /// tous deux figés après chargement de la map. On la faisait à chaque
+    /// frame — de l'ordre de cent mille allocations par seconde sur une
+    /// grosse map. Désormais calculée une seule fois dans
+    /// `rebuild_bsp_buckets` et seulement référencée dans `render`. Les
+    /// quatre buckets suivent l'ordre `BlendClass` : Opaque, AlphaTest,
+    /// AlphaBlend, Additive.
+    #[allow(clippy::type_complexity)]
+    bsp_buckets: Option<[Vec<(Arc<material::Material>, u32, u32)>; 4]>,
+
     md3: Option<Md3Renderer>,
     sky: SkyRenderer,
 
@@ -939,6 +951,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
             lightmap_array: None,
             lightmap_bind_group: None,
             bsp_mesh: None,
+            bsp_buckets: None,
             terrain_gpu: None,
             drone_gpu: None,
             pending_drones: Vec::new(),
@@ -1031,6 +1044,9 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         let flares = Flare::extract_from(bsp);
         self.flare.set_flares(flares);
 
+        // Nouveau mesh → (re)résout les buckets de draw une bonne fois.
+        self.rebuild_bsp_buckets();
+
         Ok(())
     }
 
@@ -1080,6 +1096,36 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         self.material_cache = Some(mat_cache);
         self.pipeline_cache = Some(pipe_cache);
         self.md3 = Some(md3);
+        // Le cache matériaux vient de changer → (re)construit les buckets.
+        self.rebuild_bsp_buckets();
+    }
+
+    /// **(Re)construit les buckets de draw BSP pré-résolus** (v0.10.2) —
+    /// appelée après `upload_bsp` et `attach_materials`.  Nécessite le mesh
+    /// BSP ET le cache matériaux ; si l'un manque (ordre d'init, ou mode
+    /// terrain), on vide le cache.  Concentre ici l'unique résolution
+    /// `shader_name → Material` par map, au lieu de la refaire chaque frame.
+    fn rebuild_bsp_buckets(&mut self) {
+        use self::material::BlendClass;
+        let (Some(mesh), Some(mats)) =
+            (self.bsp_mesh.as_ref(), self.material_cache.as_mut())
+        else {
+            self.bsp_buckets = None;
+            return;
+        };
+        let mut bucs: [Vec<(Arc<material::Material>, u32, u32)>; 4] =
+            [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for dr in mesh.draws.iter() {
+            let mat = mats.resolve(&dr.shader_name);
+            let slot = match mat.blend_class {
+                BlendClass::Opaque => 0,
+                BlendClass::AlphaTest => 1,
+                BlendClass::AlphaBlend => 2,
+                BlendClass::Additive => 3,
+            };
+            bucs[slot].push((mat, dr.first_index, dr.index_count));
+        }
+        self.bsp_buckets = Some(bucs);
     }
 
     /// **Drone GLB** — upload du mesh partagé pour les drones BR.
@@ -1155,6 +1201,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         // Le BSP devient inactif quand on bascule en mode terrain
         // (mutuellement exclusifs côté gameplay).
         self.bsp_mesh = None;
+        self.bsp_buckets = None;
 
         // Si des fogs ont déjà été chargés par un précédent `upload_bsp`,
         // résout leurs fogparms maintenant qu'un registry shader est dispo.
@@ -1569,39 +1616,26 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
             tg.update_chunks(self.camera.position);
         }
 
-        // Pré-résolution des matériaux hors du render pass — ça termine le
-        // borrow mutable sur `material_cache` / `pipeline_cache` avant
-        // qu'on démarre le pass (qui a besoin de `self.camera_bind_group`
-        // etc.).
+        // **Buckets de draw** — désormais pré-résolus une fois par map
+        // (cf. `rebuild_bsp_buckets`), on ne fait que les référencer.  On
+        // résout seulement les 4 pipelines ici (le `pipeline_cache` a besoin
+        // d'un borrow mutable, qu'on relâche avant le render pass) ; les
+        // pipelines sont des `Arc` bon marché à cloner.
         use self::material::BlendClass;
-        #[allow(clippy::type_complexity)]
-        let mut buckets: Option<[Vec<(Arc<material::Material>, u32, u32)>; 4]> = None;
-        let mut pipelines: Option<[Arc<wgpu::RenderPipeline>; 4]> = None;
-        if let (Some(mesh), Some(mats), Some(pipes)) = (
-            self.bsp_mesh.as_ref(),
-            self.material_cache.as_mut(),
-            self.pipeline_cache.as_mut(),
-        ) {
-            let mut bucs: [Vec<(Arc<material::Material>, u32, u32)>; 4] =
-                [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-            for dr in mesh.draws.iter() {
-                let mat = mats.resolve(&dr.shader_name);
-                let slot = match mat.blend_class {
-                    BlendClass::Opaque => 0,
-                    BlendClass::AlphaTest => 1,
-                    BlendClass::AlphaBlend => 2,
-                    BlendClass::Additive => 3,
-                };
-                bucs[slot].push((mat, dr.first_index, dr.index_count));
-            }
-            pipelines = Some([
-                pipes.get(BlendClass::Opaque),
-                pipes.get(BlendClass::AlphaTest),
-                pipes.get(BlendClass::AlphaBlend),
-                pipes.get(BlendClass::Additive),
-            ]);
-            buckets = Some(bucs);
-        }
+        let pipelines: Option<[Arc<wgpu::RenderPipeline>; 4]> =
+            if self.bsp_buckets.is_some() {
+                self.pipeline_cache.as_mut().map(|pipes| {
+                    [
+                        pipes.get(BlendClass::Opaque),
+                        pipes.get(BlendClass::AlphaTest),
+                        pipes.get(BlendClass::AlphaBlend),
+                        pipes.get(BlendClass::Additive),
+                    ]
+                })
+            } else {
+                None
+            };
+        let buckets = self.bsp_buckets.as_ref();
 
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
@@ -1686,7 +1720,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
                 // transparent/additif qui ne devraient pas projeter
                 // d'ombre franche.  Si pas encore de buckets (1ère
                 // frame), draw tout le mesh par défaut.
-                if let Some(bucs) = buckets.as_ref() {
+                if let Some(bucs) = buckets {
                     for (_, first_idx, idx_count) in &bucs[0] {
                         shadow_pass.draw_indexed(
                             *first_idx..*first_idx + *idx_count,
@@ -1729,7 +1763,7 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-                match (buckets.as_ref(), pipelines.as_ref()) {
+                match (buckets, pipelines.as_ref()) {
                     (Some(bucs), Some(pipes)) => {
                         // Bind group dlight (slot 3) partagé par toutes les
                         // passes matériau : le buffer a déjà été flushé en
