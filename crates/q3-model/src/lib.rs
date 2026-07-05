@@ -143,9 +143,11 @@ impl Md3 {
         }
 
         let name = cstr(&header.name).to_string();
-        let num_frames = header.num_frames as usize;
-        let num_tags = header.num_tags as usize;
-        let num_surfaces = header.num_surfaces as usize;
+        // Bornes anti allocation-bomb (cf. `checked_count`).
+        let num_frames = checked_count(header.num_frames, MD3_MAX_FRAMES, "num_frames")?;
+        let num_tags = checked_count(header.num_tags, MD3_MAX_TAGS, "num_tags")?;
+        let num_surfaces =
+            checked_count(header.num_surfaces, MD3_MAX_SURFACES, "num_surfaces")?;
 
         // Frames
         let frames_bytes = slice_at::<Md3Frame>(
@@ -203,10 +205,27 @@ impl Md3 {
                 )));
             }
 
-            let s_num_frames = surf_header.num_frames as usize;
-            let s_num_shaders = surf_header.num_shaders as usize;
-            let s_num_verts = surf_header.num_verts as usize;
-            let s_num_tris = surf_header.num_triangles as usize;
+            // Compteurs de surface bornés de la même façon. `ofs_end` doit
+            // en outre être strictement positif, sinon `surf_ofs` ne
+            // progresserait pas et on re-parserait la même surface en
+            // boucle (jusqu'au plafond `num_surfaces`, mais inutilement).
+            if surf_header.ofs_end <= 0 {
+                return Err(Error::Parse(format!(
+                    "MD3: surface ofs_end invalide ({})",
+                    surf_header.ofs_end
+                )));
+            }
+            let s_num_frames =
+                checked_count(surf_header.num_frames, MD3_MAX_FRAMES, "surf num_frames")?;
+            let s_num_shaders =
+                checked_count(surf_header.num_shaders, MD3_MAX_SHADERS, "surf num_shaders")?;
+            let s_num_verts =
+                checked_count(surf_header.num_verts, MD3_MAX_VERTS, "surf num_verts")?;
+            let s_num_tris = checked_count(
+                surf_header.num_triangles,
+                MD3_MAX_TRIANGLES,
+                "surf num_triangles",
+            )?;
 
             // Les offsets internes sont relatifs au début de la surface.
             let shaders_abs = surf_ofs + surf_header.ofs_shaders as usize;
@@ -326,6 +345,31 @@ fn safe_normalize(v: Vec3, fallback: Vec3) -> Vec3 {
     }
 }
 
+// **Bornes de cohérence MD3** (anti allocation-bomb sur fichier hostile).
+// Les compteurs de l'en-tête sont des `i32` bruts : un fichier forgé avec
+// `num_surfaces = i32::MAX` (ou négatif → `as usize` géant) faisait
+// `Vec::with_capacity` allouer / paniquer avant toute validation d'offset.
+// Ces plafonds sont TRÈS au-dessus de tout modèle Q3 légitime (Q3 lui-même
+// borne à 32 surfaces / 1024 frames / 4096 verts) mais finis.
+const MD3_MAX_FRAMES: usize = 65_536;
+const MD3_MAX_TAGS: usize = 1_024;
+const MD3_MAX_SURFACES: usize = 1_024;
+const MD3_MAX_SHADERS: usize = 4_096;
+const MD3_MAX_VERTS: usize = 1_048_576;
+const MD3_MAX_TRIANGLES: usize = 1_048_576;
+
+/// Valide un compteur brut `i32` d'en-tête MD3 : rejette les valeurs
+/// négatives (qui deviendraient énormes via `as usize`) et celles au-delà
+/// du plafond, puis retourne la valeur en `usize`.
+fn checked_count(raw: i32, max: usize, what: &str) -> Result<usize> {
+    if raw < 0 || raw as usize > max {
+        return Err(Error::Parse(format!(
+            "MD3: compteur `{what}` invalide ({raw}, max {max})"
+        )));
+    }
+    Ok(raw as usize)
+}
+
 fn slice_at<'a, T: bytemuck::Pod>(
     bytes: &'a [u8],
     offset: usize,
@@ -390,6 +434,52 @@ mod tests {
         // packed = 0 → zenith pure (+Z dans Q3).
         let n = decode_normal(0);
         assert!((n - Vec3::Z).length() < 1e-3, "n = {:?}", n);
+    }
+
+    /// En-tête MD3 minimal valide (magic + version corrects, 0 surface).
+    fn base_header() -> Md3Header {
+        let sz = core::mem::size_of::<Md3Header>() as i32;
+        Md3Header {
+            ident: MD3_IDENT,
+            version: MD3_VERSION,
+            name: [0u8; 64],
+            flags: 0,
+            num_frames: 0,
+            num_tags: 0,
+            num_surfaces: 0,
+            num_skins: 0,
+            ofs_frames: sz,
+            ofs_tags: sz,
+            ofs_surfaces: sz,
+            ofs_eof: sz,
+        }
+    }
+
+    #[test]
+    fn parse_rejects_absurd_surface_count() {
+        // Allocation-bomb : `num_surfaces = i32::MAX` faisait exploser
+        // `Vec::with_capacity` avant le durcissement.
+        let mut h = base_header();
+        h.num_surfaces = i32::MAX;
+        let bytes = bytemuck::bytes_of(&h).to_vec();
+        assert!(Md3::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_negative_counts() {
+        // `-1 as usize` = ~1.8e19 → géant. Doit être rejeté proprement.
+        let mut h = base_header();
+        h.num_frames = -1;
+        let bytes = bytemuck::bytes_of(&h).to_vec();
+        assert!(Md3::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_accepts_zero_surface_header() {
+        // En-tête sain sans surface : doit parser sans erreur.
+        let h = base_header();
+        let bytes = bytemuck::bytes_of(&h).to_vec();
+        assert!(Md3::parse(&bytes).is_ok());
     }
 
     #[test]

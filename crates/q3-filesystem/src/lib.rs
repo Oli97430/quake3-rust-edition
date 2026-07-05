@@ -31,6 +31,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// **Plafond de décompression par fichier** (anti zip-bomb) — 256 MiB.
+/// Très au-dessus de tout asset Q3 légitime (les plus grosses BSP /
+/// textures font quelques dizaines de Mo) mais fini : un pk3 hostile ne
+/// peut plus faire exploser la RAM via une taille déclarée mensongère
+/// ou un ratio de compression extrême.
+const MAX_UNCOMPRESSED: u64 = 256 * 1024 * 1024;
+/// Plafond de pré-allocation : on réserve au plus 64 MiB d'après la
+/// taille déclarée (le `Vec` grandit ensuite si besoin, borné par
+/// `MAX_UNCOMPRESSED`). Évite qu'une taille déclarée de plusieurs Go
+/// alloue avant même de lire un octet.
+const PREALLOC_CAP: u64 = 64 * 1024 * 1024;
+
 /// Entrée dans l'index : référence vers une archive + nom interne, ou un
 /// fichier loose.
 #[derive(Debug, Clone)]
@@ -140,11 +152,35 @@ impl Vfs {
                 let mut zip = zip::ZipArchive::new(cursor).map_err(|e| {
                     Error::archive(format!("{}: {e}", pk3.path.display()))
                 })?;
-                let mut f = zip.by_name(name).map_err(|e| {
+                let f = zip.by_name(name).map_err(|e| {
                     Error::archive(format!("{}/{name}: {e}", pk3.path.display()))
                 })?;
-                let mut out = Vec::with_capacity(*size as usize);
-                f.read_to_end(&mut out)?;
+                // **Anti zip-bomb** (v0.10.2) — `size` est la taille
+                // décompressée DÉCLARÉE dans la central directory : un pk3
+                // forgé peut annoncer plusieurs Go (→ `with_capacity` alloue
+                // avant toute lecture) ou compresser un petit blob qui
+                // s'inflate en immense. On refuse toute taille déclarée
+                // au-delà du plafond, on borne la pré-allocation, et on
+                // limite la décompression réelle à `MAX_UNCOMPRESSED`.
+                if *size > MAX_UNCOMPRESSED {
+                    return Err(Error::archive(format!(
+                        "{}/{name}: taille déclarée {size} > plafond {MAX_UNCOMPRESSED} \
+                         (pk3 corrompu ou zip-bomb)",
+                        pk3.path.display()
+                    )));
+                }
+                let prealloc = (*size).min(PREALLOC_CAP) as usize;
+                let mut out = Vec::with_capacity(prealloc);
+                // `take(MAX+1)` : si le flux inflaté dépasse le plafond, on
+                // s'en aperçoit sans jamais allouer au-delà.
+                let mut limited = f.take(MAX_UNCOMPRESSED + 1);
+                limited.read_to_end(&mut out)?;
+                if out.len() as u64 > MAX_UNCOMPRESSED {
+                    return Err(Error::archive(format!(
+                        "{}/{name}: décompression dépasse {MAX_UNCOMPRESSED} octets (zip-bomb)",
+                        pk3.path.display()
+                    )));
+                }
                 Ok(out)
             }
         }
