@@ -816,6 +816,12 @@ struct PickupGpu {
     respawn_cooldown: f32,
     /// `Some(t)` = ramassé, reviendra à `time_sec >= t`. `None` = disponible.
     respawn_at: Option<f32>,
+    /// **Drop de bot** (v0.10.2) — `Some(t)` = pickup éphémère one-shot
+    /// qui disparaît définitivement à `time_sec >= t` (péremption 30 s)
+    /// OU dès qu'il est ramassé.  `None` = item de map permanent (respawn
+    /// classique).  Sans ça les drops s'accumulaient sans borne (un par
+    /// mort de bot) et « ressuscitaient » toutes les 30 s pour toujours.
+    despawn_at: Option<f32>,
     /// Index de l'entité source dans `World::entities`. Stable des deux
     /// côtés du réseau, sert de clé pour synchroniser l'état dispo /
     /// indispo avec l'autorité serveur en mode client.
@@ -4031,6 +4037,63 @@ impl App {
         }
     }
 
+    /// **Reset d'état commun aux deux chargeurs de map** (v0.10.2) —
+    /// remet à zéro tout l'état de combat / match indépendant de la map
+    /// (entités en vol, bots, triggers, audio en boucle, compteurs de
+    /// match).  Appelé au tout début de `load_map` (BSP) ET de
+    /// `load_terrain_map` (BR).  Avant ce helper, le chemin BR ne
+    /// nettoyait presque rien → téléporteurs / hurt zones / speakers de
+    /// l'ancienne map BSP survivaient (le joueur pouvait être téléporté
+    /// aux coordonnées d'une map précédente, les ambiances audio
+    /// s'empilaient, un `match_winner` périmé gelait le gameplay).
+    ///
+    /// Ne touche PAS à `world` / `terrain` / `br_ring` ni à l'état joueur
+    /// (spawn) : ce sont des responsabilités propres à chaque chargeur.
+    fn reset_map_state(&mut self) {
+        // Entités en vol de l'ancienne instance.
+        self.projectiles.clear();
+        self.explosions.clear();
+        self.particles.clear();
+        // Bots : waypoints + physique liés à l'ancien monde.
+        self.bots.clear();
+        // Triggers de map (reconstruits par le chargeur BSP ; restent
+        // vides en BR — c'est justement le fix : plus de téléporteur
+        // fantôme hérité d'une map BSP précédente).
+        self.jump_pads.clear();
+        self.teleporters.clear();
+        self.hurt_zones.clear();
+        self.on_jumppad_idx = None;
+        self.on_teleport_idx = None;
+        // Props BR (drones/rochers) — vides sur BSP, repeuplés en BR.
+        self.drones.clear();
+        self.rocks.clear();
+        // Pickups — repeuplés par chaque chargeur (BSP items / BR POI).
+        self.pickups.clear();
+        // Audio en boucle : stoppe les ambient speakers AVANT d'en
+        // relancer, sinon chaque changement de map fuiterait un
+        // `SpatialSink` toujours vivant (deux ambiances superposées).
+        if let Some(snd) = self.sound.as_ref() {
+            for h in self.ambient_speakers.drain(..) {
+                snd.stop_loop(h);
+            }
+        } else {
+            self.ambient_speakers.clear();
+        }
+        // Atmosphère BR (éclairs) — désarmée ; le chargeur BR la ré-arme.
+        self.next_lightning_at = f32::INFINITY;
+        self.lightning_flash_until = 0.0;
+        // Compteurs de match + intermission → nouveau match propre.
+        self.frags = 0;
+        self.deaths = 0;
+        self.match_winner = None;
+        self.warmup_until = self.time_sec + WARMUP_DURATION;
+        self.match_start_at = self.warmup_until;
+        self.first_blood_announced = false;
+        self.total_shots = 0;
+        self.total_hits = 0;
+        self.time_warnings_fired = 0;
+    }
+
     fn load_map(&mut self, path: &str) {
         // **Battle Royale terrain** (v0.9.5) — toute map nommée
         // `maps/br_*` est routée vers le pipeline terrain (heightmap +
@@ -4049,20 +4112,14 @@ impl App {
 
         // **Reset état BR** (v0.9.5+) — quand on bascule d'une carte
         // BR vers une carte BSP (ex. via menu), il faut clear le
-        // terrain + ring + drones, sinon `check_match_end` BR voit
-        // 1 entité vivante et déclare immédiatement "VICTORY",
-        // bloquant le gameplay.
+        // terrain + ring, sinon `check_match_end` BR voit 1 entité
+        // vivante et déclare immédiatement "VICTORY", bloquant le
+        // gameplay.
         self.terrain = None;
         self.br_ring = None;
-        // Désarme aussi l'atmosphère BR au cas où on quitte un BR pour
-        // un BSP : empêche le tick_atmosphere de tirer un éclair sur
-        // un BSP indoor (tick_atmosphere gate aussi via terrain.is_none
-        // mais on évite le state stale).
-        self.next_lightning_at = f32::INFINITY;
-        self.lightning_flash_until = 0.0;
-        self.drones.clear();
-        self.rocks.clear();
-        self.match_winner = None;
+        // Reset commun (entités, bots, triggers, audio, compteurs match) —
+        // partagé avec `load_terrain_map`.
+        self.reset_map_state();
 
         let bytes = match self.vfs.read(path) {
             Ok(b) => b,
@@ -4184,6 +4241,7 @@ impl App {
                             kind,
                             respawn_cooldown,
                             respawn_at: None,
+                            despawn_at: None,
                             entity_index: i as u16,
                         });
                         loaded += 1;
@@ -4237,48 +4295,10 @@ impl App {
         // **Lightning beam GLB** — arc electrique volumetrique pour le LG.
         self.load_lightning_beam_asset();
 
-        // Nouvelle map → on remet à zéro les projectiles / explosions de
-        // l'ancienne instance pour éviter des frames fantômes.
-        self.projectiles.clear();
-        self.explosions.clear();
-        self.particles.clear();
-        // Nouveau match : on repart à zéro sur les frags + état d'intermission.
-        self.frags = 0;
-        self.deaths = 0;
-        self.match_winner = None;
-        self.warmup_until = self.time_sec + WARMUP_DURATION;
-        self.first_blood_announced = false;
-        self.total_shots = 0;
-        self.total_hits = 0;
-        self.time_warnings_fired = 0;
-        // On décale virtuellement le départ du chrono à la fin du warmup
-        // pour que `time_remaining` reste borné à `TIME_LIMIT_SECONDS`
-        // pendant le compte à rebours.
-        self.match_start_at = self.warmup_until;
-
-        // Nouvelle map → on purge les bots de la précédente (ils avaient des
-        // waypoints et une physique liés à l'ancien monde).
-        self.bots.clear();
-
-        // Jump pads + téléporteurs — reconstruction complète à chaque map.
-        // Résolution des `target → target_position / misc_teleporter_dest`
-        // via `World::find_by_targetname`, qu'on a déjà.
-        self.jump_pads.clear();
-        self.teleporters.clear();
-        self.hurt_zones.clear();
-        // Stoppe les ambient speakers de la map précédente AVANT d'en
-        // lancer de nouveaux — sinon chaque map change laisserait
-        // fuiter un ou plusieurs `SpatialSink` toujours vivants,
-        // mixant deux ambiances à la fois.
-        if let Some(snd) = self.sound.as_ref() {
-            for h in self.ambient_speakers.drain(..) {
-                snd.stop_loop(h);
-            }
-        } else {
-            self.ambient_speakers.clear();
-        }
-        self.on_jumppad_idx = None;
-        self.on_teleport_idx = None;
+        // Entités / bots / triggers / audio / compteurs de match : déjà
+        // remis à zéro en tête de `load_map` par `reset_map_state()`.
+        // Les jump pads / téléporteurs / hurt zones sont reconstruits
+        // ci-dessous depuis les entités BSP.
         let gravity = self.params.gravity.max(1.0);
         for ent in &world.entities {
             match ent.kind {
@@ -4452,6 +4472,13 @@ impl App {
     ///   (ring shrink, POIs, spawns) pour valider la stack haut niveau.
     fn load_terrain_map(&mut self, name: &str) {
         use q3_terrain::{br::RingShrink, br::reunion_br_phases, Terrain, TerrainMeta};
+
+        // **Reset commun** (v0.10.2) — entités en vol, bots, triggers
+        // BSP hérités, ambient speakers, compteurs de match. Sans ça,
+        // basculer d'une map BSP vers le BR laissait des téléporteurs /
+        // hurt zones / speakers fantômes actifs et un `match_winner`
+        // périmé qui gelait le gameplay.
+        self.reset_map_state();
 
         // Tentative de chargement disque ; sinon fallback synthétique.
         let base_path = format!("assets/maps/{name}");
@@ -7021,10 +7048,12 @@ impl App {
             origin: drop_pos,
             angles: q3_math::Angles::ZERO,
             kind,
-            // Drop éphémère : 30 s avant qu'il ne disparaisse, pour
-            // ne pas saturer la carte si beaucoup de bots meurent.
-            respawn_cooldown: 30.0,
+            // Drop one-shot : ni respawn ni permanence — il disparaît
+            // au ramassage OU au bout de 30 s (péremption via despawn_at),
+            // ce qui empêche l'accumulation sans borne (un drop par mort).
+            respawn_cooldown: 0.0,
             respawn_at: None,
+            despawn_at: Some(self.time_sec + 30.0),
             entity_index: u16::MAX,
         });
     }
@@ -7827,6 +7856,7 @@ impl App {
                     // BR : pas de respawn (un item ramassé est perdu).
                     respawn_cooldown: 9999.0,
                     respawn_at: None,
+                    despawn_at: None,
                     entity_index: u16::MAX,
                 });
                 spawned += 1;
@@ -8763,14 +8793,10 @@ impl App {
     /// fallback), restaure sa santé et réinitialise sa physique. Appelé
     /// quand `respawn_at` est échu.
     fn respawn_player(&mut self) {
-        // Track le timestamp respawn pour le stats overlay "ALIVE".
-        self.last_respawn_time = self.time_sec;
-        // Lookup du spawn : pseudo-aléatoire léger indexé sur time+deaths
-        // pour ne pas retomber au même endroit à chaque mort.
-        let (origin, angles) = {
-            let Some(world) = self.world.as_ref() else {
-                return;
-            };
+        // Lookup du spawn : BSP (world.spawn_points) ou BR (POI terrain).
+        // Pseudo-aléatoire léger indexé sur time+deaths pour ne pas
+        // retomber au même endroit à chaque mort.
+        let (origin, angles) = if let Some(world) = self.world.as_ref() {
             if !world.spawn_points.is_empty() {
                 let seed = (self.time_sec * 1000.0) as usize
                     ^ (self.deaths as usize).wrapping_mul(2654435761);
@@ -8781,7 +8807,41 @@ impl App {
             } else {
                 (Vec3::ZERO, Angles::default())
             }
+        } else if let Some(terrain) = self.terrain.as_ref() {
+            // **BR respawn** (v0.10.2) — pas de `world`, on respawn sur un
+            // POI tier ≥ 3 comme au chargement.  Avant ce fix la fonction
+            // sortait en early-return APRÈS avoir écrit `last_respawn_time`
+            // et SANS clear `respawn_at` → elle rebouclait chaque frame
+            // (le joueur restait mort, l'overlay "ALIVE" lisait ~0).
+            let pois = terrain.pois();
+            let cands: Vec<&q3_terrain::Poi> =
+                pois.iter().filter(|p| p.tier >= 3).collect();
+            let (sx, sy) = if cands.is_empty() {
+                (terrain.center().x, terrain.center().y)
+            } else {
+                let idx = (self.time_sec.to_bits() as usize
+                    ^ (self.deaths as usize).wrapping_mul(2654435761))
+                    % cands.len();
+                (cands[idx].x, cands[idx].y)
+            };
+            let sz = terrain.height_at(sx, sy) + 40.0;
+            let c = terrain.center();
+            let (dx, dy) = (c.x - sx, c.y - sy);
+            let yaw = if dx * dx + dy * dy > 1.0 {
+                dy.atan2(dx).to_degrees()
+            } else {
+                0.0
+            };
+            (Vec3::new(sx, sy, sz), Angles { pitch: 0.0, yaw, roll: 0.0 })
+        } else {
+            // Ni BSP ni terrain : on annule le respawn pour ne pas
+            // reboucler chaque frame, et on sort.
+            self.respawn_at = None;
+            return;
         };
+        // Track le timestamp respawn pour le stats overlay "ALIVE" — après
+        // le calcul du spawn, uniquement quand on respawn réellement.
+        self.last_respawn_time = self.time_sec;
         let new_origin = origin + Vec3::Z * 40.0;
         self.player = PlayerMove::new(new_origin);
         self.player.view_angles = angles;
@@ -8845,6 +8905,13 @@ impl App {
     /// arme le timer de respawn + joue un sfx. Un pickup inactif (timer
     /// en cours) est réactivé quand `time_sec >= respawn_at`.
     fn tick_pickups(&mut self) {
+        // **Purge des drops éphémères** (v0.10.2) — retire les drops de
+        // bots périmés (30 s) ou déjà ramassés (despawn_at ramené à
+        // maintenant au ramassage). Les items de map (`despawn_at = None`)
+        // sont conservés. Empêche l'accumulation sans borne.
+        let now = self.time_sec;
+        self.pickups.retain(|p| p.despawn_at.map_or(true, |t| now < t));
+
         // Réactive les pickups dont le cooldown est échu. On collecte les
         // positions pour déclencher un FX de respawn hors-borrow.
         let mut reborn_positions: Vec<Vec3> = Vec::new();
@@ -9010,8 +9077,14 @@ impl App {
                 }
                 PickupKind::Inert => continue,
             }
-            // Cooldown propre à chaque kind (cf. `PickupKind::from_entity`).
-            p.respawn_at = Some(self.time_sec + p.respawn_cooldown);
+            // Drop de bot (one-shot) → péremption immédiate : la retain
+            // en tête du prochain tick le retire, pas de respawn.
+            // Item de map → respawn classique après cooldown.
+            if p.despawn_at.is_some() {
+                p.despawn_at = Some(self.time_sec);
+            } else {
+                p.respawn_at = Some(self.time_sec + p.respawn_cooldown);
+            }
         }
 
         // Effets hors boucle pour ne pas tenir `self.pickups` en emprunt.
@@ -11884,6 +11957,11 @@ impl App {
                                 let name = bot_driver.bot.name.clone();
                                 self.frags = self.frags.saturating_add(1);
                                 pending_player_frags += 1;
+                                // **Cohérence feedback** (v0.10.2) — un kill
+                                // au ricochet doit ouvrir la fenêtre médaille
+                                // + déclencher son de kill-confirm + marqueur,
+                                // comme tous les autres chemins de kill.
+                                any_kill = true;
                                 pending_kills.push((
                                     KillActor::Player,
                                     KillActor::Bot(name),
