@@ -20158,12 +20158,22 @@ fn queue_bots(
         // - Idle : sinusoïde lente Z (respiration) + micro-rotation épaules
         // - Run : bob vertical plus rapide synchronisé avec le pas
         let idle_bob = if !airborne && !moving {
-            ((time_sec * 1.4 + phase_offset * std::f32::consts::TAU).sin()) * 1.5
+            // Respiration : cosinus surélevé [0, 1.5] — le corps monte
+            // depuis la pose au sol puis y revient, sans jamais passer
+            // SOUS le sol (l'ancienne sinusoïde centrée enfonçait les
+            // pieds de 1.5u sur chaque expiration).
+            (1.0 - (time_sec * 1.4 + phase_offset * std::f32::consts::TAU).cos())
+                * 0.5 * 1.5
         } else if !airborne && moving {
-            // Bob de course : plus ample et plus rapide que l'idle
+            // Bob de course : cosinus surélevé [0, 1.8] à la même cadence
+            // qu'avant, mais borné à zéro par le bas — au contact du pied
+            // le modèle est pile au niveau du sol, entre deux foulées il
+            // remonte.  L'ancienne sinusoïde centrée enfonçait le bot de
+            // ~1.8u dans le sol à chaque pas (bug "bots enfoncés").
             let run_freq = if v_xy > 120.0 { 10.0 } else { 7.0 };
-            ((time_sec * run_freq + phase_offset * std::f32::consts::TAU).sin()) * 1.8
-            * (v_xy / 320.0).min(1.0)
+            (1.0 - (time_sec * run_freq + phase_offset * std::f32::consts::TAU).cos())
+                * 0.5 * 1.8
+                * (v_xy / 320.0).min(1.0)
         } else {
             0.0
         };
