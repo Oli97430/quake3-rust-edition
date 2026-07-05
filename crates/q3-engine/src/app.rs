@@ -2576,6 +2576,9 @@ struct BotDriver {
     /// splash rocket touche plusieurs bots simultanément. Cooldown
     /// par-bot de [`PAIN_SFX_COOLDOWN`] secondes.
     last_pain_sfx_at: f32,
+    /// Dernier pas audible joué (v0.10.2) — cadence les footsteps
+    /// spatialisés du bot selon sa vitesse (cf. `tick_bot_footsteps`).
+    last_footstep_at: f32,
     /// Instant où le bot a quitté le sol (décollage).  On l'utilise
     /// pour détecter le « saut déclenché » vs « vient de marcher dans
     /// le vide » — utile pour ne jouer `LEGS_JUMP` que sur la première
@@ -3010,6 +3013,10 @@ const PLAYER_HULL_MIN_Z: f32 = -24.0;
 /// Durée pendant laquelle le cadavre ragdoll d'un bot reste visible
 /// avant que `respawn_dead_bots` ne le recycle sur un spawn point.
 const BOT_CORPSE_DELAY_SEC: f32 = 3.0;
+/// Portée au-delà de laquelle les pas d'un bot ne sont plus joués
+/// (cf. `tick_bot_footsteps`). ~1400u : audible dans un couloir / une
+/// salle proche, silencieux à l'autre bout de la carte.
+const BOT_FOOTSTEP_AUDIBLE_DIST: f32 = 1400.0;
 const PLAYER_HULL_MAX_Z: f32 = 32.0;
 
 /// Jump pad façon Q3 : un trigger_push qui balance le joueur vers sa cible
@@ -8750,6 +8757,7 @@ impl App {
             last_fire_at: f32::NEG_INFINITY,
             last_damage_at: f32::NEG_INFINITY,
             last_pain_sfx_at: f32::NEG_INFINITY,
+            last_footstep_at: f32::NEG_INFINITY,
             airborne_since: None,
             last_land_at: f32::NEG_INFINITY,
             anim_phase: 0.0,
@@ -10683,6 +10691,58 @@ impl App {
                     expire_at: self.time_sec + 0.40,
                     lifetime: 0.40,
                 });
+            }
+        }
+    }
+
+    /// **Footsteps des bots** (v0.10.2 polish) — joue les mêmes samples
+    /// de pas que le joueur, spatialisés à la position de chaque bot au
+    /// sol qui se déplace, avec une cadence proportionnelle à sa vitesse.
+    /// Donne une vraie présence audio : on entend un adversaire courir
+    /// dans un couloir avant de le voir.  Borné en distance (perf +
+    /// réalisme : pas de pas audibles à l'autre bout de la map) et en
+    /// cadence par-bot (pas de spam qui saturerait le mixer).
+    fn tick_bot_footsteps(&mut self) {
+        if self.sfx_footsteps.is_empty() {
+            return;
+        }
+        let now = self.time_sec;
+        let ear = self.player.origin;
+        let n = self.sfx_footsteps.len();
+        // (position, index de variante) collectés hors du borrow `sound`.
+        let mut plays: Vec<(Vec3, usize)> = Vec::new();
+        for d in self.bots.iter_mut() {
+            if d.health.is_dead() || !d.body.on_ground {
+                continue;
+            }
+            let vx = d.body.velocity.x;
+            let vy = d.body.velocity.y;
+            let v2 = vx * vx + vy * vy;
+            // Seuil marche (~90 u/s) — en dessous, le bot traîne / pivote.
+            if v2 < 90.0 * 90.0 {
+                continue;
+            }
+            // Hors de portée auditive → on ne joue rien (et on ne paie pas
+            // un canal audio pour un pas inaudible).
+            let dist2 = (d.body.origin - ear).truncate().length_squared();
+            if dist2 > BOT_FOOTSTEP_AUDIBLE_DIST * BOT_FOOTSTEP_AUDIBLE_DIST {
+                continue;
+            }
+            // Cadence : ~0.30 s de foulée à pleine course (320 u/s), plus
+            // espacée quand le bot va moins vite.
+            let speed = v2.sqrt();
+            let interval = (96.0 / speed).clamp(0.28, 0.55);
+            if now - d.last_footstep_at < interval {
+                continue;
+            }
+            d.last_footstep_at = now;
+            // Variante pseudo-aléatoire (évite la monotonie), bornée à `n`.
+            let idx = (rand_unit().abs() * n as f32) as usize % n;
+            plays.push((d.body.origin, idx));
+        }
+        if let Some(snd) = self.sound.as_ref() {
+            for (pos, idx) in plays {
+                play_at(snd, self.sfx_footsteps[idx], pos, Priority::Low);
             }
         }
     }
@@ -14888,6 +14948,10 @@ impl ApplicationHandler for App {
                     self.respawn_dead_bots();
                 }
 
+                // Footsteps spatialisés des bots qui courent (présence audio).
+                if self.match_winner.is_none() {
+                    self.tick_bot_footsteps();
+                }
 
                 // Projectiles en vol → avance + impact + splash damage.
                 // Tick même pendant l'intermission pour que les particules
