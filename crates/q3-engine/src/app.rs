@@ -3000,6 +3000,10 @@ const PICKUP_VERT_REACH: f32 = 72.0;
 /// Équivalent de `PLAYER_MINS/PLAYER_MAXS` dans `bg_public.h`.
 const PLAYER_HULL_HALF_XY: f32 = 15.0;
 const PLAYER_HULL_MIN_Z: f32 = -24.0;
+
+/// Durée pendant laquelle le cadavre ragdoll d'un bot reste visible
+/// avant que `respawn_dead_bots` ne le recycle sur un spawn point.
+const BOT_CORPSE_DELAY_SEC: f32 = 3.0;
 const PLAYER_HULL_MAX_Z: f32 = 32.0;
 
 /// Jump pad façon Q3 : un trigger_push qui balance le joueur vers sa cible
@@ -3869,11 +3873,9 @@ impl App {
                 // Spawn les bots demandés au serveur. Les noms sont
                 // séquentiels « bot01..botNN » — une commande console
                 // pour ajouter à la volée pourra venir plus tard.
-                if false && server_bots > 0 {
-                    for i in 0..server_bots {
-                        let name = format!("bot{:02}", i + 1);
-                        let _ = nr.add_server_bot(name, q3_bot::BotSkill::III);
-                    }
+                for i in 0..server_bots {
+                    let name = format!("bot{:02}", i + 1);
+                    let _ = nr.add_server_bot(name, q3_bot::BotSkill::III);
                 }
                 // Enregistrement démo si demandé. Pris en compte
                 // uniquement en mode client (server-side ça n'aurait
@@ -4421,9 +4423,7 @@ impl App {
         // Avant v0.9.3 chaque path drainait à part ou pas du tout, ce
         // qui faisait des bots invisibles via le menu. Centralisé ici,
         // c'est le seul site responsable du spawn initial.
-        //
-        // NOTE(v0.10.0) : bots désactivés temporairement.
-        if false && self.pending_local_bots > 0 {
+        if self.pending_local_bots > 0 {
             let n = self.pending_local_bots;
             self.pending_local_bots = 0;
             self.ensure_player_rig_loaded();
@@ -4437,7 +4437,6 @@ impl App {
                 self.bots.len()
             );
         }
-
     }
 
     /// **Battle Royale terrain loader** (v0.9.5) — pendant de
@@ -4699,10 +4698,8 @@ impl App {
         // le mode terrain et choisit un POI tier ≥ 2 pour le spawn.
         // Gated par cvar `br_bots` (défaut 0 = carte vide pour
         // exploration / tests visuels).
-        //
-        // NOTE(v0.10.0) : bots désactivés temporairement.
         let br_bots_enabled = self.cvars.get_i32("br_bots").unwrap_or(0) != 0;
-        if false && br_bots_enabled && self.pending_local_bots > 0 {
+        if br_bots_enabled && self.pending_local_bots > 0 {
             let n = self.pending_local_bots;
             self.pending_local_bots = 0;
             self.ensure_player_rig_loaded();
@@ -5921,10 +5918,8 @@ impl App {
         let mut best: Option<(usize, f32)> = None;
         for (i, p) in self.rocks.iter().enumerate() {
             let d2 = (p.pos - hit_pos).length_squared();
-            if d2 < 400.0 * 400.0 {
-                if best.map_or(true, |(_, bd)| d2 < bd) {
-                    best = Some((i, d2));
-                }
+            if d2 < 400.0 * 400.0 && best.map_or(true, |(_, bd)| d2 < bd) {
+                best = Some((i, d2));
             }
         }
         if let Some((i, d2)) = best {
@@ -7967,9 +7962,26 @@ impl App {
                     self.load_map(&path);
                 }
                 PendingAction::AddBot(name, skill) => {
-                    // Bots désactivés temporairement.
-                    info!("console/addbot: bots désactivés pour le moment ('{name}' ignoré)");
-                    let _ = (name, skill);
+                    // Dispatch : si on est serveur réseau, le bot va
+                    // sur l'autoritatif côté `ServerState`. Sinon
+                    // (solo / client), le bot est local — comportement
+                    // historique. En mode client, l'addbot local n'a
+                    // pas vraiment de sens (le serveur est autoritatif),
+                    // mais on conserve le comportement pour les tests
+                    // hors-réseau.
+                    if self.net.mode.is_server() {
+                        let bot_skill =
+                            skill.map(q3_bot::BotSkill::from_int).unwrap_or_default();
+                        match self.net.add_server_bot(name.clone(), bot_skill) {
+                            Some(slot_id) => info!(
+                                "console/addbot: bot serveur '{}' (slot {}, skill {:?})",
+                                name, slot_id, bot_skill
+                            ),
+                            None => warn!("console/addbot: serveur plein"),
+                        }
+                    } else {
+                        self.spawn_bot(&name, skill);
+                    }
                 }
                 PendingAction::ClearBots => {
                     let n = self.bots.len();
@@ -11659,32 +11671,12 @@ impl App {
                     // Forward push si tir frontal (effet "knockback")
                     let _ = local_x;
                 }
-                // **Death anim trigger** (v0.9.5++) — au moment exact où
-                // le bot meurt, on enregistre le timestamp pour piloter
-                // BOTH_DEATH1 → BOTH_DEAD1 freeze dans queue_bots.
-                if was_alive && dead && bot_driver.death_started_at.is_none() {
-                    bot_driver.death_started_at = Some(self.time_sec);
-                    // **Ragdoll trigger** (v0.9.6 #2) — initialise la
-                    // simu physique avec un impulse depuis la direction
-                    // du tir.  Le rendu va alors basculer sur une pose
-                    // dynamique au lieu des frames DEATH1/2/3.
-                    bot_driver.ragdoll_active = true;
-                    bot_driver.ragdoll_pos = bot_driver.body.origin;
-                    let dmg_factor = (dmg as f32 / 50.0).clamp(0.5, 4.0);
-                    // Linear : push dans la direction du tir + jump up.
-                    let push_xy = Vec3::new(fwd.x, fwd.y, 0.0).normalize_or_zero() * 220.0 * dmg_factor;
-                    bot_driver.ragdoll_vel = bot_driver.body.velocity * 0.5
-                        + push_xy
-                        + Vec3::Z * 180.0 * dmg_factor; // soulève un peu
-                    bot_driver.ragdoll_quat =
-                        glam::Quat::from_rotation_z(bot_driver.body.view_angles.yaw.to_radians());
-                    // Angular : torque cross-produit fwd × up donne un
-                    // axe latéral, le bot tournoie dans le plan vertical.
-                    let torque_axis = glam::Vec3::new(-fwd.y, fwd.x, 0.0).normalize_or_zero();
-                    let spin = 4.0 + dmg_factor * 2.0; // rad/s
-                    bot_driver.ragdoll_ang_vel = torque_axis * spin
-                        + glam::Vec3::Z * (rand_unit() * 2.0); // spin around axis
-                    bot_driver.ragdoll_settled_at = 0.0;
+                // **Death anim trigger** — délégué au helper commun
+                // `trigger_bot_death` (partagé avec rocket directe,
+                // splash, ricochet, ring BR) pour que tous les chemins
+                // de kill produisent un cadavre ragdoll.
+                if was_alive && dead {
+                    trigger_bot_death(bot_driver, self.time_sec, fwd, dmg);
                 }
                 if taken > 0 {
                     // Horodate la prise de dégât pour déclencher l'anim
@@ -11888,6 +11880,7 @@ impl App {
                                 spark_flesh_color,
                             ));
                             if bot_driver.health.is_dead() {
+                                trigger_bot_death(bot_driver, self.time_sec, reflected, dmg);
                                 let name = bot_driver.bot.name.clone();
                                 self.frags = self.frags.saturating_add(1);
                                 pending_player_frags += 1;
@@ -12646,6 +12639,9 @@ impl App {
                         let taken = bd.health.take_damage(b.direct_damage);
                         let name = bd.bot.name.clone();
                         let dead = bd.health.is_dead();
+                        if taken > 0 && dead {
+                            trigger_bot_death(bd, self.time_sec, b.impact_dir, b.direct_damage);
+                        }
                         if taken > 0 {
                             // Dodge réaction même sur direct hit projectile.
                             bd.bot.notify_damage_taken();
@@ -12818,6 +12814,10 @@ impl App {
                     let taken = bd.health.take_damage(dmg);
                     let dead = bd.health.is_dead();
                     let name = bd.bot.name.clone();
+                    if taken > 0 && dead {
+                        let death_dir = if d > 0.001 { (center - b.pos) / d } else { Vec3::Z };
+                        trigger_bot_death(bd, self.time_sec, death_dir, dmg);
+                    }
                     if taken > 0 {
                         // Dodge réaction sur splash damage aussi —
                         // un bot dans la zone d'effet d'une rocket
@@ -13250,6 +13250,15 @@ impl App {
                 if !d.health.is_dead() {
                     continue;
                 }
+                // **Délai cadavre** (v0.10.1) — laisse le ragdoll jouer
+                // ~3 s avant de recycler le bot.  Sans ce délai, le
+                // respawn arrivait la frame même de la mort : aucune
+                // animation de mort n'était jamais visible sur BSP.
+                if let Some(t) = d.death_started_at {
+                    if self.time_sec - t < BOT_CORPSE_DELAY_SEC {
+                        continue;
+                    }
+                }
                 let (origin, angles) = if !world.spawn_points.is_empty() {
                     let idx = (self.time_sec as usize ^ i.wrapping_mul(2654435761))
                         % world.spawn_points.len();
@@ -13589,17 +13598,6 @@ impl ApplicationHandler for App {
             // CLI explicit → on charge direct.
             self.menu.open = false;
             self.load_map(&map_to_load);
-            // Q3_SPAWN_BOTS=N : spawn N bots immédiatement après le chargement
-            // de la map. Équivalent d'un `addbot` en console, utile pour les
-            // tests CI où on veut un screenshot avec des adversaires visibles
-            // sans avoir à piloter le curseur.
-            if let Ok(s) = std::env::var("Q3_SPAWN_BOTS") {
-                if let Ok(n) = s.parse::<usize>() {
-                    for i in 0..n {
-                        self.spawn_bot(&format!("testbot{i}"), None);
-                    }
-                }
-            }
         } else {
             // Pas de --map → menu reste ouvert (laisse le joueur choisir).
             self.menu.open = true;
@@ -14725,8 +14723,10 @@ impl ApplicationHandler for App {
                                     let factor = (1.0 + outside.min(2.0)).max(1.0);
                                     let dmg_f = dps * dt * factor;
                                     let dmg_i = dmg_f.ceil() as i32;
+                                    let was_alive = !bd.health.is_dead();
                                     bd.health.take_damage(dmg_i);
-                                    if bd.health.is_dead() {
+                                    if was_alive && bd.health.is_dead() {
+                                        trigger_bot_death(bd, self.time_sec, Vec3::Z, dmg_i);
                                         info!("BR: bot '{}' éliminé hors-zone", bd.bot.name);
                                     }
                                 }
@@ -15453,7 +15453,15 @@ impl ApplicationHandler for App {
 
                     if let Some(rig) = self.bot_rig.as_ref() {
                         let terrain_ref = self.terrain.as_deref();
-                        queue_bots(r, rig, &mut self.bots, self.time_sec, dt, terrain_ref);
+                        queue_bots(
+                            r,
+                            rig,
+                            &mut self.bots,
+                            self.time_sec,
+                            dt,
+                            terrain_ref,
+                            self.world.as_ref(),
+                        );
                         queue_remote_players(
                             r,
                             rig,
@@ -19317,6 +19325,33 @@ fn bot_hitscan_profile(dist: f32) -> HitscanProfile {
     }
 }
 
+/// **Déclencheur de mort unifié** (v0.10.1) — arme le timestamp de mort
+/// et l'état ragdoll quel que soit le chemin de kill (hitscan, rocket
+/// directe, splash, ricochet rail, ring BR).  Avant ce helper, seul le
+/// hitscan initialisait le ragdoll : un bot tué autrement disparaissait
+/// sans cadavre ni animation.  `dir` = direction de l'impulsion (tir ou
+/// centre d'explosion → bot), `dmg` module l'amplitude de la projection.
+/// No-op si la mort a déjà été déclenchée.
+fn trigger_bot_death(d: &mut BotDriver, now: f32, dir: Vec3, dmg: i32) {
+    if d.death_started_at.is_some() {
+        return;
+    }
+    d.death_started_at = Some(now);
+    d.ragdoll_active = true;
+    d.ragdoll_pos = d.body.origin;
+    let dmg_factor = (dmg as f32 / 50.0).clamp(0.5, 4.0);
+    // Linear : push dans la direction du tir + jump up.
+    let push_xy = Vec3::new(dir.x, dir.y, 0.0).normalize_or_zero() * 220.0 * dmg_factor;
+    d.ragdoll_vel = d.body.velocity * 0.5 + push_xy + Vec3::Z * 180.0 * dmg_factor;
+    d.ragdoll_quat = glam::Quat::from_rotation_z(d.body.view_angles.yaw.to_radians());
+    // Angular : torque cross-produit dir × up donne un axe latéral,
+    // le bot tournoie dans le plan vertical.
+    let torque_axis = glam::Vec3::new(-dir.y, dir.x, 0.0).normalize_or_zero();
+    let spin = 4.0 + dmg_factor * 2.0; // rad/s
+    d.ragdoll_ang_vel = torque_axis * spin + glam::Vec3::Z * (rand_unit() * 2.0);
+    d.ragdoll_settled_at = 0.0;
+}
+
 /// Conduit chaque bot d'un tick : vision, IA, physique. Retourne les
 /// dégâts hitscan et la liste de projectiles spawné ce tick.
 ///
@@ -19776,8 +19811,10 @@ fn queue_bots(
     time_sec: f32,
     dt: f32,
     terrain: Option<&q3_terrain::Terrain>,
+    world: Option<&World>,
 ) {
     use glam::{Mat4 as GMat4, Quat, Vec3 as GVec3};
+    use q3_collision::Contents;
 
     // Seuils de la machine d'états — en secondes depuis l'évènement.
     const ATTACK_WINDOW_SEC: f32 = 0.40;
@@ -19846,12 +19883,44 @@ fn queue_bots(
                 if !settled {
                     // Gravité Q3 (~800 u/s²).
                     d.ragdoll_vel.z -= 800.0 * dt;
-                    d.ragdoll_pos += d.ragdoll_vel * dt;
+                    // **Collision murs BSP** (v0.10.1 fix) — l'impulsion de
+                    // mort peut projeter le corps à ~880 u/s ; sans trace,
+                    // il traversait murs et sols ("bot disparaît dans le
+                    // sol"). On trace le segment de déplacement et on
+                    // s'arrête juste avant l'impact en tuant la vitesse
+                    // dans la direction bloquée.
+                    let next = d.ragdoll_pos + d.ragdoll_vel * dt;
+                    d.ragdoll_pos = if let Some(w) = world {
+                        let tr = w.collision.trace_ray(d.ragdoll_pos, next, Contents::SOLID);
+                        if tr.fraction < 1.0 {
+                            let hit = d.ragdoll_pos
+                                + (next - d.ragdoll_pos) * (tr.fraction - 0.01).max(0.0);
+                            // Amortit fort : le corps ne rebondit pas sur
+                            // un mur, il glisse et s'affale.
+                            d.ragdoll_vel *= 0.25;
+                            d.ragdoll_ang_vel *= 0.5;
+                            hit
+                        } else {
+                            next
+                        }
+                    } else {
+                        next
+                    };
 
-                    // Collision sol : raycast simple via terrain ou
-                    // floor à pos.z = origin.z initial (proxy).
+                    // Collision sol : hauteur terrain (BR) ou raycast
+                    // vertical sur la géométrie BSP sous le cadavre.
+                    // Fallback : floor au Z du point de mort (proxy).
                     let ground_z = if let Some(t) = terrain {
                         t.height_at(d.ragdoll_pos.x, d.ragdoll_pos.y)
+                    } else if let Some(w) = world {
+                        let start = d.ragdoll_pos + Vec3::Z * 8.0;
+                        let end = d.ragdoll_pos - Vec3::Z * 4096.0;
+                        let tr = w.collision.trace_ray(start, end, Contents::SOLID);
+                        if tr.fraction < 1.0 {
+                            start.z + (end.z - start.z) * tr.fraction
+                        } else {
+                            d.body.origin.z + PLAYER_HULL_MIN_Z
+                        }
                     } else {
                         d.body.origin.z + PLAYER_HULL_MIN_Z
                     };
@@ -20739,8 +20808,6 @@ impl Drone {
         dy.atan2(dx)
     }
 }
-
-// ─────────────────── Zombie mob (v0.10.1) ───────────────────
 
 /// **Adapter Terrain → LosWorld** (v0.9.5) — permet aux bots de
 /// passer le LOS sur la heightmap BR via le trait abstrait défini
