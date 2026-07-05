@@ -800,14 +800,6 @@ fn fs_downsample(in: VsOut) -> @location(0) vec4<f32> {
 //   légèrement chromatique (rouge/cyan) pour évoquer une aberration
 //   chromatique d'optique. Halo radial doux pour le bloom global.
 //   N'utilise QUE le bloom_tex déjà calculé → coût quasi nul.
-// PRNG hash pour le film grain — fonction sin/dot classique, retourne
-// un float dans [0,1) pseudo-aléatoire stable par UV.  L'instabilité
-// temporelle vient du décalage de l'UV par `u_compose.time` côté
-// appelant — sinon le pattern serait figé.
-fn hash21(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-}
-
 // Color grading lift-gamma-gain "blockbuster" — version douce
 // (v0.9.5++) : tints quasi-neutres pour ne pas assombrir les ombres
 // (le shadow_tint < 1.0 sur le canal R faisait perdre de la
@@ -985,15 +977,12 @@ fn fs_compose(in: VsOut) -> @location(0) vec4<f32> {
     let graded = color_grade(hdr_combined);
     let mapped = aces_tonemap(graded);
 
-    // **Film grain** appliqué APRÈS tonemap (en LDR sRGB).  Magnitude
-    // RÉDUITE 0.025 → 0.008 (v0.9.5++ polish) — le user trouvait le
-    // bruit trop présent.  Reste assez visible pour briser les bandes
-    // de gradient sans se voir comme du noise.
-    let grain_uv = in.uv * vec2<f32>(1920.0, 1080.0) + vec2<f32>(u_compose.time * 91.7, u_compose.time * 53.3);
-    let grain = (hash21(grain_uv) - 0.5) * 0.008;
-    let final_color = mapped + vec3<f32>(grain);
-
-    return vec4<f32>(final_color, 1.0);
+    // **Film grain SUPPRIMÉ** (v0.10.1) — même à 0.008 le bruit animé
+    // restait perçu comme une « trame » désagréable sur les scènes
+    // sombres (±1 LSB sur fond ~20/255 = ~5 % relatif, ré-échantillonné
+    // chaque frame).  Troisième retour utilisateur sur cet effet → on
+    // sort l'image tonemappée telle quelle.
+    return vec4<f32>(mapped, 1.0);
 }
 "#;
 

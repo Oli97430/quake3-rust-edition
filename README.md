@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.78+-orange)](https://rustup.rs/)
-[![Status](https://img.shields.io/badge/Status-v0.10.0-brightgreen)]()
+[![Status](https://img.shields.io/badge/Status-v0.10.2-brightgreen)]()
 
 </div>
 
@@ -14,7 +14,7 @@
 
 Réécriture complète de **Quake III Arena** en Rust moderne — pipeline `wgpu` (Vulkan/DX12/Metal), assets glTF, anti-cheat serveur, netcode lag-compensation, audio spatial, post-FX HDR.
 
-> **État** : v0.10.0 — moteur complet, jouable solo + bots IA, mode BR exploration, **9/9 armes en GLB**, animations bots physiques, éditeur de niveau intégré, taunts vocaux, rendu PBR procédural.
+> **État** : v0.10.2 — moteur complet, jouable solo + bots IA (adversaires classiques réactivés), mode BR exploration, **9/9 armes en GLB**, animations bots physiques, éditeur de niveau intégré, taunts vocaux, rendu PBR procédural.
 
 ## ✨ Highlights
 
@@ -185,6 +185,18 @@ Optims clés :
 - Drone scratch buffer (0 alloc heap par frame)
 - TAA Halton jitter (supersampling temporel)
 - Procedural grass/rocks : vertex buffer unique partagé (0 alloc par instance)
+
+## 🐛 Changelog v0.10.2
+
+### Gameplay
+- **Bots de base réactivés** : les adversaires IA classiques de Quake 3 reviennent sur les 4 chemins de spawn (boot serveur `--host`, drain local BSP, drain BR gated par `br_bots`, commande console `addbot`). Un lancement nu a de nouveau 3 bots (`--bots N` pour ajuster).
+- **Zombies retirés** : le mob ogre corps-à-corps expérimental (v0.10.1) est entièrement supprimé — retour au deathmatch pur.
+
+### Fixes
+- **Crash audio au chargement** : un son 3D émis avant le premier tick caméra faisait paniquer rodio (`SpatialSink` : oreilles gauche/droite confondues quand l'axe listener est nul). Fallback sur l'axe +X.
+- **Cadavres de bots qui traversaient le sol** : la simulation ragdoll n'avait aucune collision sur les maps BSP (sol figé au point de mort, aucun test de mur). Ajout d'un raycast sol réel + trace des murs à chaque frame, avec amortissement à l'impact.
+- **Pipeline de mort unifiée** : seul le hitscan armait le ragdoll — un bot tué à la rocket directe, au splash, au ricochet rail ou hors-zone BR disparaissait sans cadavre. Un `trigger_bot_death` commun couvre désormais tous les chemins de kill, et un délai cadavre de 3 s laisse l'animation de mort jouer avant le respawn.
+- **Trame parasite à l'écran** : le film grain animé (post-compose) était perçu comme un fourmillement désagréable sur les scènes sombres. Effet supprimé.
 
 ## 🐛 Changelog v0.10.0
 

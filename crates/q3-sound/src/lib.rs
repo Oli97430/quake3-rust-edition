@@ -87,6 +87,15 @@ pub struct Listener {
     pub right: Vec3,
 }
 
+/// Axe droite « sûr » pour le calcul des oreilles : `Listener::default()`
+/// a un `right` nul (aucun tick caméra encore reçu — cas d'un son 3D
+/// émis pendant le chargement de la map). Avec un axe nul, les deux
+/// oreilles coïncident et `SpatialSink::try_new` panique
+/// (`assertion failed: left_ear != right_ear`). Fallback sur +X.
+fn safe_right(right: Vec3) -> Vec3 {
+    if right.length_squared() > 1e-6 { right } else { Vec3::X }
+}
+
 struct LoadedSound {
     /// Bytes encodés (WAV/OGG). On re-décode à chaque play pour pouvoir
     /// rejouer le même sample sans re-tamponner.
@@ -249,7 +258,7 @@ impl SoundSystem {
         // à l'origine, emitter à la position relative).  La distance
         // interne reflète alors la vraie distance perçue, et notre
         // `volume` calculé en amont (atténuation Q3 + master) prime.
-        let right = st.listener.right;
+        let right = safe_right(st.listener.right);
         let ear_sep = 0.1;
         let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];
         let right_ear = [right.x * ear_sep, right.y * ear_sep, right.z * ear_sep];
@@ -305,7 +314,7 @@ impl SoundSystem {
             decoder.convert_samples();
 
         // Positions initiales relatives (cf. note v0.9.5++ dans `play_3d`).
-        let right = st.listener.right;
+        let right = safe_right(st.listener.right);
         let ear_sep = 0.1;
         let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];
         let right_ear = [right.x * ear_sep, right.y * ear_sep, right.z * ear_sep];
