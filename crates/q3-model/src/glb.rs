@@ -445,10 +445,17 @@ fn extract_texture(
     let source = img.source();
     let (data, mime) = match source {
         Source::View { view, mime_type } => {
-            let buf = &buffers[view.buffer().index()];
+            // **Bornes sur fichier hostile** (v0.10.3) — l'index de buffer
+            // et l'intervalle offset..offset+length viennent de l'en-tête
+            // glTF sans garantie de cohérence avec la taille réelle du
+            // buffer.  Un GLB forgé (index invalide ou length débordante)
+            // faisait paniquer l'indexation.  On valide tout et on skip la
+            // texture proprement (`None`) au lieu de crasher.
+            let buf = buffers.get(view.buffer().index())?;
             let start = view.offset();
-            let end = start + view.length();
-            (buf[start..end].to_vec(), Some(mime_type))
+            let end = start.checked_add(view.length())?;
+            let slice = buf.get(start..end)?;
+            (slice.to_vec(), Some(mime_type))
         }
         Source::Uri { .. } => {
             // Les URIs externes ne sont pas supportées pour les GLB

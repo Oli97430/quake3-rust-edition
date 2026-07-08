@@ -70,10 +70,19 @@ impl Angles {
         Basis { forward, right, up }
     }
 
-    /// Matrice de rotation correspondant à ces angles (row-major, colonne = axe).
+    /// Matrice de **rotation** correspondant à ces angles.
+    ///
+    /// **Correction v0.10.3** — l'ancienne implémentation construisait
+    /// `Mat3::from_cols(forward, right, up)`, dont le déterminant vaut −1
+    /// (une réflexion, pas une rotation : à l'identité on obtenait
+    /// `diag(1, −1, 1)`).  C'est parce que la base Q3 `(forward, right, up)`
+    /// est indirecte — `AnglesToAxis` du jeu original nie `right` en `left`
+    /// justement pour cette raison.  Toute géométrie transformée par cette
+    /// matrice était donc miroir, et elle divergeait de `to_quat` pour les
+    /// mêmes angles.  On la dérive maintenant du quaternion pour garantir
+    /// un déterminant +1 et une cohérence stricte avec `to_quat`.
     pub fn to_mat3(self) -> Mat3 {
-        let b = self.to_vectors();
-        Mat3::from_cols(b.forward, b.right, b.up)
+        Mat3::from_quat(self.to_quat())
     }
 
     /// Quaternion équivalent (utile pour interpoler sans lock-gimbal).
@@ -257,6 +266,32 @@ mod tests {
         // yaw 90° : on regarde vers +Y (gauche dans Q3 donc... vers "left axis")
         let b = Angles::new(0.0, 90.0, 0.0).to_vectors();
         assert!((b.forward - Vec3::Y).length() < 1e-5);
+    }
+
+    #[test]
+    fn to_mat3_is_a_proper_rotation() {
+        // Une matrice de rotation a un déterminant +1 (pas −1 = réflexion)
+        // et transforme forward (X local) sur le forward des angles.
+        for &(p, y, r) in &[
+            (0.0, 0.0, 0.0),
+            (15.0, 40.0, 0.0),
+            (-30.0, 200.0, 25.0),
+            (60.0, -120.0, -45.0),
+        ] {
+            let a = Angles::new(p, y, r);
+            let m = a.to_mat3();
+            assert!(
+                (m.determinant() - 1.0).abs() < 1e-4,
+                "det = {} pour {:?}",
+                m.determinant(),
+                a
+            );
+            // Cohérence stricte avec to_quat (même rotation).
+            let mq = Mat3::from_quat(a.to_quat());
+            for i in 0..3 {
+                assert!((m.col(i) - mq.col(i)).length() < 1e-4);
+            }
+        }
     }
 
     #[test]

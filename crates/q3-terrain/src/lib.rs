@@ -76,9 +76,17 @@ pub enum TerrainError {
     DimMismatch { hm: usize, meta: usize },
     #[error("heightmap vide")]
     Empty,
+    #[error("dimensions terrain invalides : {w}×{h} (max {max})")]
+    BadDimensions { w: usize, h: usize, max: usize },
     #[error("format inattendu : {0}")]
     Format(String),
 }
+
+/// Dimension maximale d'un côté de heightmap acceptée depuis un JSON de
+/// métadonnées (anti allocation-bomb).  16384² samples = 512 Mo de r16,
+/// déjà énorme ; au-delà on refuse plutôt que de risquer un overflow
+/// arithmétique ou une allocation démesurée sur un fichier forgé.
+const MAX_TERRAIN_DIM: usize = 16_384;
 
 /// Terrain heightfield large-échelle.  Une seule instance représente
 /// toute la carte (jusqu'à ±32768 unités), le LOD côté renderer
@@ -126,12 +134,30 @@ impl Terrain {
             meta.name, meta.width, meta.height, meta.z_min, meta.z_max
         );
 
+        // **Bornes sur JSON hostile** (v0.10.3) — width/height viennent
+        // d'un fichier de métadonnées non fiable ; sans borne, `width *
+        // height * 2` peut déborder (usize) et `Vec::with_capacity` réclamer
+        // une allocation démesurée.  On rejette d'abord les dimensions
+        // absurdes puis on calcule en arithmétique checked.
+        if meta.width == 0
+            || meta.height == 0
+            || meta.width > MAX_TERRAIN_DIM
+            || meta.height > MAX_TERRAIN_DIM
+        {
+            return Err(TerrainError::BadDimensions {
+                w: meta.width,
+                h: meta.height,
+                max: MAX_TERRAIN_DIM,
+            });
+        }
+        let sample_count = meta.width * meta.height; // ≤ 16384² sans overflow
+        let expected_bytes = sample_count * 2;
+
         let r16_bytes = std::fs::read(&r16_path)?;
-        let expected_bytes = meta.width * meta.height * 2;
         if r16_bytes.len() != expected_bytes {
             return Err(TerrainError::DimMismatch {
                 hm: r16_bytes.len() / 2,
-                meta: meta.width * meta.height,
+                meta: sample_count,
             });
         }
         // Big-endian u16 pour matcher la convention `.r16` standard
