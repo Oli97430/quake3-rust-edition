@@ -1203,6 +1203,16 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         self.bsp_mesh = None;
         self.bsp_buckets = None;
 
+        // **Purge FX de l'ancienne map** (v0.10.3) — comme `upload_bsp`.
+        // Sans ça, les dlights « loot beam » des POI (lifetime 9999s)
+        // s'accumulaient à chaque rechargement de map BR, saturant le cap
+        // de 16 lights et évinçant muzzle-flashes / explosions ; décales et
+        // particules de la map précédente restaient aussi affichées.
+        self.decal.clear();
+        self.dlight.clear();
+        self.particle.clear();
+        self.flare.set_flares(Vec::new());
+
         // Si des fogs ont déjà été chargés par un précédent `upload_bsp`,
         // résout leurs fogparms maintenant qu'un registry shader est dispo.
         if !self.fog_set.is_empty() {

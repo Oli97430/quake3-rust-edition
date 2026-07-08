@@ -14538,13 +14538,13 @@ impl ApplicationHandler for App {
                 // les transitions de phase, applique les dégâts hors-zone
                 // au joueur. Bots BR : TODO quand le bot path support
                 // terrain pur (cf. spawn_bot dépend de world).
-                if self.terrain.is_some() {
-                    let pois = self.terrain
-                        .as_ref()
-                        .map(|t| t.pois().to_vec())
-                        .unwrap_or_default();
+                if let Some(terrain) = self.terrain.as_ref() {
+                    // Emprunt direct des POI (champ disjoint de `br_ring` /
+                    // `player_*`) — évite un `to_vec()` de toute la liste à
+                    // chaque frame juste pour passer `&[Poi]` au ring.
+                    let pois = terrain.pois();
                     if let Some(ring) = self.br_ring.as_mut() {
-                        let transitioned = ring.tick(dt, &pois);
+                        let transitioned = ring.tick(dt, pois);
                         if transitioned {
                             if let Some(idx) = ring.phase_index() {
                                 info!(

@@ -518,6 +518,13 @@ impl Md3Renderer {
         for (i, inst) in instances.iter().enumerate() {
             pass.set_bind_group(1, &uniform_bgs[base + i], &[]);
             for surf in &inst.mesh.surfaces {
+                // **Surface dégénérée** (v0.10.3) — un MD3 corrompu peut
+                // exposer une surface à 0 frame ou 0 index : slicer alors
+                // `frames_buffer` (vide) sur `frame_stride` déclenche une
+                // erreur de validation wgpu. On skip proprement.
+                if surf.num_frames == 0 || surf.index_count == 0 {
+                    continue;
+                }
                 let mat = mats.resolve(&surf.shader_name);
                 pass.set_bind_group(2, &mat.bind_group, &[]);
                 let fa = inst.frame_a.min(surf.num_frames.saturating_sub(1));
