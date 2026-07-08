@@ -41,6 +41,10 @@ pub struct NetChannel {
     reassembly: BytesMut,
     /// Séquence du message en cours de réassemblage (0 si aucun).
     reassembly_seq: u32,
+    /// Offset attendu du prochain fragment (front contigu de réassemblage).
+    /// Les fragments sont émis en ordre croissant contigu ; un `start` qui
+    /// ne colle pas à ce front trahit un fragment manquant/réordonné.
+    reassembly_expected: usize,
 }
 
 impl NetChannel {
@@ -74,6 +78,19 @@ impl NetChannel {
             packets.push(buf.to_vec());
             offset += take;
         }
+        // **Terminator Q3** — le récepteur reconnaît le dernier fragment à
+        // sa longueur `< chunk_size`. Si `payload.len()` est un multiple
+        // exact de `chunk_size`, le dernier fragment de données fait
+        // pile `chunk_size` et ne serait JAMAIS reconnu comme final → le
+        // message n'est jamais livré et empoisonne le réassemblage. On
+        // émet alors un fragment terminal de longueur 0 (comme Q3).
+        if !payload.is_empty() && payload.len() % chunk_size == 0 {
+            let mut buf = BytesMut::with_capacity(8);
+            buf.put_u32_le(seq | FRAGMENT_BIT);
+            buf.put_u16_le(payload.len() as u16); // start = fin des données
+            buf.put_u16_le(0); // length = 0 → marqueur de fin
+            packets.push(buf.to_vec());
+        }
         packets
     }
 
@@ -88,8 +105,13 @@ impl NetChannel {
         let fragmented = (seq_field & FRAGMENT_BIT) != 0;
         let seq = seq_field & !FRAGMENT_BIT;
 
-        if seq < self.in_sequence {
-            // out-of-order, dropper.
+        // Comparaison de séquence robuste au wrap-around `u32` : on regarde
+        // la distance SIGNÉE. `<= 0` → paquet ancien OU dupliqué → drop.
+        // L'ancien `seq < in_sequence` (non-wrapping) cassait au wrap (après
+        // 2³² paquets le canal restait sourd) ET re-livrait les doublons
+        // (`seq == in_sequence` passait).  Le calcul par différence gère
+        // correctement le retour à zéro : `1u32.wrapping_sub(u32::MAX)` = 2.
+        if (seq.wrapping_sub(self.in_sequence) as i32) <= 0 {
             return Ok(None);
         }
 
@@ -99,6 +121,7 @@ impl NetChannel {
             if self.reassembly_seq != 0 && self.reassembly_seq != seq {
                 self.reassembly.clear();
                 self.reassembly_seq = 0;
+                self.reassembly_expected = 0;
             }
             return Ok(Some(cursor.to_vec()));
         }
@@ -115,6 +138,22 @@ impl NetChannel {
         if self.reassembly_seq != seq {
             self.reassembly.clear();
             self.reassembly_seq = seq;
+            self.reassembly_expected = 0;
+        }
+
+        // **Anti-trou** — les fragments sont émis en ordre croissant
+        // contigu (cf. `prepare_outgoing`). Un `start` qui ne colle pas au
+        // front de réassemblage signifie qu'un fragment a été perdu ou
+        // réordonné : le message est irrécupérable. Sans ce garde, un trou
+        // resté à zéro (via `resize`) était livré comme un message
+        // « complet » — des zéros se décodent en PlayerState valides →
+        // corruption d'état silencieuse. On drop tout ; le prochain
+        // snapshot complet resynchronise.
+        if start != self.reassembly_expected {
+            self.reassembly.clear();
+            self.reassembly_seq = 0;
+            self.reassembly_expected = 0;
+            return Ok(None);
         }
 
         // Cap anti-DoS : un peer hostile pourrait annoncer `start` proche
@@ -133,6 +172,8 @@ impl NetChannel {
             self.reassembly.resize(end, 0);
         }
         self.reassembly[start..end].copy_from_slice(&cursor[..length]);
+        // Avance le front contigu (contrôle anti-trou du prochain fragment).
+        self.reassembly_expected = end;
 
         // Heuristique Q3 : un fragment dont la longueur est < MAX_PAYLOAD - 4
         // est le dernier (cf. `Netchan_Process`).
@@ -140,6 +181,7 @@ impl NetChannel {
         if last_fragment {
             let out = self.reassembly.split().to_vec();
             self.reassembly_seq = 0;
+            self.reassembly_expected = 0;
             self.in_sequence = seq;
             Ok(Some(out))
         } else {
@@ -195,5 +237,59 @@ mod tests {
         rx.process_incoming(&p2).unwrap();
         let older = rx.process_incoming(&p1).unwrap();
         assert!(older.is_none(), "paquet plus ancien doit être ignoré");
+    }
+
+    #[test]
+    fn exact_multiple_of_chunk_size_delivers() {
+        // Bug historique : un payload dont la taille est un multiple exact
+        // de `chunk_size` n'émettait pas de terminator → dernier fragment
+        // jamais reconnu → message perdu. On vérifie qu'il est livré.
+        let chunk = MAX_PAYLOAD - 4;
+        let mut tx = NetChannel::new();
+        let mut rx = NetChannel::new();
+        let big: Vec<u8> = (0..(chunk * 2)).map(|i| (i & 0xFF) as u8).collect();
+        let packets = tx.prepare_outgoing(&big);
+        // 2 fragments de données + 1 terminator zéro-longueur.
+        assert_eq!(packets.len(), 3);
+        let mut last = None;
+        for p in &packets {
+            last = rx.process_incoming(p).unwrap();
+        }
+        assert_eq!(last.expect("message doit être livré"), big);
+    }
+
+    #[test]
+    fn missing_fragment_yields_no_corrupt_message() {
+        // Bug historique : un fragment intermédiaire perdu laissait un trou
+        // de zéros livré comme message « complet ». On saute le 1er fragment.
+        let mut tx = NetChannel::new();
+        let mut rx = NetChannel::new();
+        let big: Vec<u8> = (0..3500u32).map(|i| (i & 0xFF) as u8).collect();
+        let packets = tx.prepare_outgoing(&big);
+        assert!(packets.len() >= 3);
+        // On ne délivre PAS packets[0] (fragment perdu), puis les suivants.
+        let mut delivered = None;
+        for p in &packets[1..] {
+            if let Some(m) = rx.process_incoming(p).unwrap() {
+                delivered = Some(m);
+            }
+        }
+        assert!(
+            delivered.is_none(),
+            "un message avec un fragment manquant ne doit jamais être livré"
+        );
+    }
+
+    #[test]
+    fn duplicate_packet_is_dropped() {
+        // `seq == in_sequence` (doublon) ne doit pas être re-livré.
+        let mut tx = NetChannel::new();
+        let mut rx = NetChannel::new();
+        let p = tx.prepare_outgoing(b"once").into_iter().next().unwrap();
+        assert_eq!(rx.process_incoming(&p).unwrap().unwrap(), b"once");
+        assert!(
+            rx.process_incoming(&p).unwrap().is_none(),
+            "un doublon doit être ignoré"
+        );
     }
 }
