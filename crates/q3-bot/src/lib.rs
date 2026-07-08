@@ -159,6 +159,22 @@ impl BotSkill {
             Self::V => 0.70,
         }
     }
+
+    /// **Fraction d'anticipation** appliquée au leading des projectiles
+    /// (rockets) côté engine.  `0` = tire sur la position actuelle (facile
+    /// à esquiver), `1` = interception parfaite.  Un bot I mène à peine, un
+    /// bot V mène presque parfaitement — c'est le principal levier qui rend
+    /// les rockets d'un bot fort réellement menaçantes contre un joueur qui
+    /// se déplace.
+    pub fn lead_fraction(self) -> f32 {
+        match self {
+            Self::I => 0.25,
+            Self::II => 0.45,
+            Self::III => 0.65,
+            Self::IV => 0.85,
+            Self::V => 1.00,
+        }
+    }
 }
 
 
@@ -192,11 +208,15 @@ pub struct Bot {
     pub strafe_phase: f32,
     /// Accumulateur jump périodique pendant le strafe-jump (0.6s).
     pub jump_phase: f32,
-    /// **Combat strafe phase** (v0.9.5) — accumulateur pour alterner
-    /// G/D en combat de manière cohérente (période ~0.7s) au lieu d'un
-    /// coin-flip par frame qui produisait du jitter visuel et zéro
-    /// déplacement net.
+    /// **Combat strafe phase** (v0.9.5) — accumulateur pour le
+    /// circle-strafe : on tient une direction pendant une demi-période
+    /// puis on l'inverse (cf. `combat_orbit_dir`).
     pub combat_strafe_phase: f32,
+    /// **Sens d'orbite courant** (v0.10.3) — +1 = strafe droite, -1 =
+    /// gauche. Tenu ~2.6s puis inversé pour que le bot ORBITE autour du
+    /// joueur (mouvement latéral continu, dur à tracker) au lieu
+    /// d'osciller sur place.
+    pub combat_orbit_dir: f32,
     /// **Dodge** (v0.9.5) — fenêtre pendant laquelle le bot esquive en
     /// strafe-jump dur après avoir reçu un hit. Set par
     /// `notify_damage_taken()`. Pendant la fenêtre, le bot strafe à
@@ -283,6 +303,7 @@ impl Bot {
             strafe_phase: 0.0,
             jump_phase: 0.0,
             combat_strafe_phase: 0.0,
+            combat_orbit_dir: 1.0,
             dodge_until: f32::NEG_INFINITY,
             dodge_dir: 1.0,
             clock: 0.0,
@@ -514,22 +535,27 @@ impl Bot {
             };
         }
 
-        // **Combat strafe cohérent** — phase périodique 0.7s qui
-        // alterne G/D au lieu d'un coin-flip par frame.  Avant v0.9.5,
-        // `strafe_direction()` retournait un bit aléatoire chaque tick
-        // → le bot tremblait sur place sans déplacement net. Avec une
-        // phase, il fait des allers-retours visibles, donc plus dur à
-        // toucher au railgun.
+        // **Circle-strafe / orbite** (v0.10.3) — le bot tient une
+        // direction de strafe pendant `ORBIT_HALF_PERIOD` puis l'inverse.
+        // Combiné au forward/back qui maintient `preferred_distance`, ça
+        // le fait ORBITER autour du joueur : mouvement latéral continu,
+        // bien plus dur à suivre au railgun que l'ancien va-et-vient sur
+        // place (période 0.7s, déplacement net nul). Un petit saut au
+        // moment du changement de sens ("juke") casse en plus la mire
+        // verticale sans transformer le bot en sauteur permanent.
+        const ORBIT_HALF_PERIOD: f32 = 2.6;
         self.combat_strafe_phase += dt;
-        if self.combat_strafe_phase > 1.4 {
-            self.combat_strafe_phase -= 1.4;
+        let mut juke = false;
+        if self.combat_strafe_phase >= ORBIT_HALF_PERIOD {
+            self.combat_strafe_phase -= ORBIT_HALF_PERIOD;
+            self.combat_orbit_dir = -self.combat_orbit_dir;
+            juke = true;
         }
-        let strafe = if self.combat_strafe_phase < 0.7 { 1.0 } else { -1.0 };
 
         BotCmd {
             forward_move: forward,
-            right_move: strafe,
-            up_move: 0.0,
+            right_move: self.combat_orbit_dir,
+            up_move: if juke { 1.0 } else { 0.0 },
             view_angles: self.view_angles,
             fire,
         }
@@ -546,6 +572,14 @@ pub fn turn_toward(current: f32, target: f32, max_step: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Monde de test sans obstacle : la ligne de vue est toujours dégagée.
+    struct OpenWorld;
+    impl LosWorld for OpenWorld {
+        fn is_clear(&self, _start: Vec3, _end: Vec3) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn turn_converges() {
@@ -593,5 +627,37 @@ mod tests {
     fn skill_reaction_time_monotonic() {
         // Plus on monte, plus le bot réagit vite.
         assert!(BotSkill::I.reaction_time_sec() > BotSkill::V.reaction_time_sec());
+    }
+
+    #[test]
+    fn skill_lead_fraction_monotonic() {
+        // Plus on monte, plus le bot anticipe (mène) ses rockets.
+        assert!(BotSkill::I.lead_fraction() < BotSkill::II.lead_fraction());
+        assert!(BotSkill::II.lead_fraction() < BotSkill::III.lead_fraction());
+        assert!(BotSkill::III.lead_fraction() < BotSkill::IV.lead_fraction());
+        assert!(BotSkill::IV.lead_fraction() < BotSkill::V.lead_fraction());
+        // Bornes saines : dans [0, 1].
+        assert!(BotSkill::I.lead_fraction() >= 0.0);
+        assert!(BotSkill::V.lead_fraction() <= 1.0);
+    }
+
+    #[test]
+    fn combat_orbit_flips_over_time() {
+        // Le sens d'orbite doit s'inverser au fil du combat (circle-strafe)
+        // et non rester figé — sinon le bot ne tournerait jamais.
+        let mut b = Bot::with_skill("orbit", Vec3::ZERO, BotSkill::III);
+        b.target_enemy = Some(Vec3::new(300.0, 0.0, 0.0));
+        let world = OpenWorld;
+        let start_dir = b.combat_orbit_dir;
+        let mut flipped = false;
+        // ~6 s de combat à 60 fps : au moins une inversion attendue.
+        for _ in 0..360 {
+            b.tick(1.0 / 60.0, &world);
+            if b.combat_orbit_dir != start_dir {
+                flipped = true;
+                break;
+            }
+        }
+        assert!(flipped, "le sens d'orbite ne s'est jamais inversé");
     }
 }

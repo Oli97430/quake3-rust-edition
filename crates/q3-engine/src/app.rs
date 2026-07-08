@@ -14604,6 +14604,7 @@ impl ApplicationHandler for App {
                         self.params,
                         world,
                         self.player.origin,
+                        self.player.velocity,
                         alive,
                         invisible,
                         &self.rocket_mesh,
@@ -19507,6 +19508,7 @@ fn tick_bots(
     params: PhysicsParams,
     world: &World,
     player_origin: Vec3,
+    player_velocity: Vec3,
     player_alive: bool,
     player_invisible: bool,
     rocket_mesh: &Option<Arc<Md3Gpu>>,
@@ -19853,16 +19855,28 @@ fn tick_bots(
         // le gameplay. Évité en close range (BOT_ROCKET_MIN_DIST) pour que
         // le bot ne se suicide pas sur son propre splash, et coupé au
         // delà de BOT_ROCKET_MAX_DIST (railgun takes over à cette portée).
-        //
-        // Le skill joue ici sur la *cadence* uniquement (pas d'aim error
-        // parce que la rocket vole vers `to_player_norm` et le joueur
-        // peut l'esquiver ; on ne simule pas un écart à l'émission).
         if visible
             && reacted
             && (BOT_ROCKET_MIN_DIST..=BOT_ROCKET_MAX_DIST).contains(&dist)
             && now >= d.next_rocket_at
         {
-            let to_player_norm = to_player / dist;
+            // **Target leading** (v0.10.3) — au lieu de tirer sur la
+            // position actuelle (que le joueur esquive trivialement en
+            // marchant), on vise le point d'interception : où sera le
+            // joueur quand la rocket l'atteindra.  Temps de vol estimé
+            // `t = dist / vitesse`, raffiné une fois avec la distance au
+            // point prédit.  L'anticipation est calibrée par le skill
+            // (`lead_fraction`) : un bot niveau I anticipe peu (rocket
+            // facile à esquiver), un niveau V mène presque parfaitement.
+            let lead = skill.lead_fraction();
+            let mut aim = player_eye;
+            for _ in 0..2 {
+                let t = (aim - bot_eye).length() / BOT_ROCKET_SPEED;
+                aim = player_eye + player_velocity * (t * lead);
+            }
+            let to_aim = aim - bot_eye;
+            let aim_dist = to_aim.length().max(1.0);
+            let to_player_norm = to_aim / aim_dist;
             let spawn = bot_eye + to_player_norm * 16.0;
             out.projectiles.push(Projectile {
                 origin: spawn,
