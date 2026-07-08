@@ -141,21 +141,6 @@ impl NetChannel {
             self.reassembly_expected = 0;
         }
 
-        // **Anti-trou** — les fragments sont émis en ordre croissant
-        // contigu (cf. `prepare_outgoing`). Un `start` qui ne colle pas au
-        // front de réassemblage signifie qu'un fragment a été perdu ou
-        // réordonné : le message est irrécupérable. Sans ce garde, un trou
-        // resté à zéro (via `resize`) était livré comme un message
-        // « complet » — des zéros se décodent en PlayerState valides →
-        // corruption d'état silencieuse. On drop tout ; le prochain
-        // snapshot complet resynchronise.
-        if start != self.reassembly_expected {
-            self.reassembly.clear();
-            self.reassembly_seq = 0;
-            self.reassembly_expected = 0;
-            return Ok(None);
-        }
-
         // Cap anti-DoS : un peer hostile pourrait annoncer `start` proche
         // de `u16::MAX` pour forcer l'allocation de ~128 KiB par flux.
         // Q3 original tranche à `MAX_MSGLEN = 16 KiB` — on fait pareil et
@@ -168,6 +153,37 @@ impl NetChannel {
                 format!("fragment trop grand : {end} > {MAX_REASSEMBLY}"),
             ));
         }
+
+        // **Anti-trou, tolérant aux doublons/réordos** — les fragments sont
+        // émis en ordre croissant contigu (cf. `prepare_outgoing`). Trois
+        // cas selon la position du fragment vs le front de réassemblage :
+        //   * `start > expected` → un fragment MANQUE devant celui-ci. Sans
+        //     garde, le trou resté à zéro (via `resize`) serait livré comme
+        //     un message « complet » (des zéros se décodent en PlayerState
+        //     valides → corruption silencieuse). On drop tout ; le prochain
+        //     snapshot complet resynchronise.
+        //   * `start < expected` ET entièrement dans le préfixe déjà rempli
+        //     → simple duplication/réordonnancement UDP d'un fragment déjà
+        //     reçu → on l'ignore sans casser le réassemblage en cours.
+        //   * chevauchement partiel incohérent → suspect → drop.
+        if start > self.reassembly_expected {
+            self.reassembly.clear();
+            self.reassembly_seq = 0;
+            self.reassembly_expected = 0;
+            return Ok(None);
+        }
+        if start < self.reassembly_expected {
+            if end <= self.reassembly_expected {
+                // Redite bénigne d'un fragment déjà intégré → no-op.
+                return Ok(None);
+            }
+            // Recouvrement partiel qui ne colle pas au flux ordonné → drop.
+            self.reassembly.clear();
+            self.reassembly_seq = 0;
+            self.reassembly_expected = 0;
+            return Ok(None);
+        }
+
         if self.reassembly.len() < end {
             self.reassembly.resize(end, 0);
         }
@@ -277,6 +293,30 @@ mod tests {
         assert!(
             delivered.is_none(),
             "un message avec un fragment manquant ne doit jamais être livré"
+        );
+    }
+
+    #[test]
+    fn duplicated_interior_fragment_is_tolerated() {
+        // UDP peut dupliquer un fragment interne. Une redite ne doit PAS
+        // détruire le message en cours de réassemblage : A,A,B,C se
+        // réassemble comme A,B,C.
+        let mut tx = NetChannel::new();
+        let mut rx = NetChannel::new();
+        let big: Vec<u8> = (0..3500u32).map(|i| (i & 0xFF) as u8).collect();
+        let packets = tx.prepare_outgoing(&big);
+        assert!(packets.len() >= 3);
+        // Rejoue le 1er fragment une 2e fois avant les suivants.
+        let order = [0usize, 0, 1, 2];
+        let mut delivered = None;
+        for &i in &order {
+            if let Some(m) = rx.process_incoming(&packets[i]).unwrap() {
+                delivered = Some(m);
+            }
+        }
+        assert_eq!(
+            delivered.expect("message doit être livré malgré le doublon"),
+            big
         );
     }
 

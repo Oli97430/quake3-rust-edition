@@ -90,8 +90,10 @@ pub struct Listener {
 /// Axe droite « sûr » pour le calcul des oreilles : `Listener::default()`
 /// a un `right` nul (aucun tick caméra encore reçu — cas d'un son 3D
 /// émis pendant le chargement de la map). Avec un axe nul, les deux
-/// oreilles coïncident et `SpatialSink::try_new` panique
-/// (`assertion failed: left_ear != right_ear`). Fallback sur +X.
+/// oreilles coïncident : rodio `Spatial` fait alors un `debug_assert!
+/// (left_ear != right_ear)` → panique en build debug, et un panning
+/// dégénéré (division par 0 → NaN, masqué par le clamp de volume) en
+/// release. Fallback sur +X pour éviter les deux.
 fn safe_right(right: Vec3) -> Vec3 {
     if right.length_squared() > 1e-6 { right } else { Vec3::X }
 }
@@ -416,7 +418,13 @@ impl SoundSystem {
         // double-borrow sur `st` (on lit `listener` / `master_volume` et
         // on écrit dans `loops`).  Coords relatives (cf. note `play_3d`).
         let pos = st.listener.position;
-        let right = st.listener.right;
+        // **Axe sûr** (v0.10.3) — même garde qu'à la création des sinks :
+        // tant que la caméra n'a pas tické, `listener.right` est nul et les
+        // deux oreilles coïncideraient → `SpatialSink` panique
+        // (`debug_assert left_ear != right_ear`) / panning NaN en release.
+        // Sans ce `safe_right`, les emitters en boucle (ambient speakers
+        // lancés au chargement) ré-introduisaient le crash chaque frame.
+        let right = safe_right(st.listener.right);
         let master = st.master_volume;
         let ear_sep = 0.1;
         let left_ear = [-right.x * ear_sep, -right.y * ear_sep, -right.z * ear_sep];

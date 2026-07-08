@@ -14298,18 +14298,6 @@ impl ApplicationHandler for App {
                 let physics_ok = !self.console.is_open()
                     && !self.player_health.is_dead()
                     && self.match_winner.is_none();
-                // **Debug one-shot** : log les conditions une seule fois
-                // si la physique est bloquée (diagnostic "WASD ne fait rien").
-                if !physics_ok && self.time_sec < 10.0 {
-                    warn!(
-                        "PHYSICS BLOCKED: console={}, dead={}, winner={:?}, hp={}/{}",
-                        self.console.is_open(),
-                        self.player_health.is_dead(),
-                        self.match_winner,
-                        self.player_health.current,
-                        self.player_health.max,
-                    );
-                }
                 if physics_ok {
                     // Pas fixe Q3 : 8ms (125Hz). L'original simule la
                     // physique à cette fréquence quelle que soit la

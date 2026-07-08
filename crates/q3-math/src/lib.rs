@@ -270,8 +270,8 @@ mod tests {
 
     #[test]
     fn to_mat3_is_a_proper_rotation() {
-        // Une matrice de rotation a un déterminant +1 (pas −1 = réflexion)
-        // et transforme forward (X local) sur le forward des angles.
+        // Une matrice de rotation a un déterminant +1 (pas −1 = réflexion,
+        // le bug corrigé) et est orthonormée (M·Mᵀ = I).
         for &(p, y, r) in &[
             (0.0, 0.0, 0.0),
             (15.0, 40.0, 0.0),
@@ -286,11 +286,24 @@ mod tests {
                 m.determinant(),
                 a
             );
-            // Cohérence stricte avec to_quat (même rotation).
-            let mq = Mat3::from_quat(a.to_quat());
-            for i in 0..3 {
-                assert!((m.col(i) - mq.col(i)).length() < 1e-4);
-            }
+            // Orthonormalité : M·Mᵀ = identité (colonnes orthonormées).
+            let d = m * m.transpose() - Mat3::IDENTITY;
+            let max_err = d
+                .x_axis
+                .abs()
+                .max_element()
+                .max(d.y_axis.abs().max_element())
+                .max(d.z_axis.abs().max_element());
+            assert!(max_err < 1e-4, "non orthonormée pour {:?}", a);
+            // La matrice tourne bien X_local sur le `forward` des angles
+            // (colonne 0 de to_vectors), preuve qu'elle encode la rotation
+            // attendue et pas une autre.
+            let fwd = a.to_vectors().forward;
+            assert!(
+                (m * Vec3::X - fwd).length() < 1e-4,
+                "M·X ≠ forward pour {:?}",
+                a
+            );
         }
     }
 
