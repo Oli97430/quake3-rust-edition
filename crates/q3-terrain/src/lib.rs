@@ -150,6 +150,15 @@ impl Terrain {
                 max: MAX_TERRAIN_DIM,
             });
         }
+        // `units_per_sample` est un diviseur dans height_at / normal_at :
+        // 0 (ou non-fini) produirait des NaN propagés dans la collision.
+        // Le JSON n'est pas fiable → on rejette.
+        if !(meta.units_per_sample.is_finite() && meta.units_per_sample > 0.0) {
+            return Err(TerrainError::Format(format!(
+                "units_per_sample invalide ({})",
+                meta.units_per_sample
+            )));
+        }
         let sample_count = meta.width * meta.height; // ≤ 16384² sans overflow
         let expected_bytes = sample_count * 2;
 

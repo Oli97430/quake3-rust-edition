@@ -228,10 +228,24 @@ impl Md3 {
             )?;
 
             // Les offsets internes sont relatifs au début de la surface.
-            let shaders_abs = surf_ofs + surf_header.ofs_shaders as usize;
-            let tris_abs = surf_ofs + surf_header.ofs_triangles as usize;
-            let st_abs = surf_ofs + surf_header.ofs_st as usize;
-            let xyz_abs = surf_ofs + surf_header.ofs_xyz_normal as usize;
+            // Ce sont des i32 bruts du fichier : on rejette les valeurs
+            // négatives (qui deviendraient énormes via `as usize`) et on
+            // additionne en checked (l'addition avait lieu AVANT slice_at,
+            // donc hors de son durcissement → panic d'overflow en dev).
+            let sub_off = |ofs: i32, what: &str| -> Result<usize> {
+                if ofs < 0 {
+                    return Err(Error::Parse(format!(
+                        "MD3: offset surface `{what}` négatif ({ofs})"
+                    )));
+                }
+                surf_ofs.checked_add(ofs as usize).ok_or_else(|| {
+                    Error::Parse(format!("MD3: offset surface `{what}` déborde"))
+                })
+            };
+            let shaders_abs = sub_off(surf_header.ofs_shaders, "ofs_shaders")?;
+            let tris_abs = sub_off(surf_header.ofs_triangles, "ofs_triangles")?;
+            let st_abs = sub_off(surf_header.ofs_st, "ofs_st")?;
+            let xyz_abs = sub_off(surf_header.ofs_xyz_normal, "ofs_xyz_normal")?;
 
             let shaders_raw = slice_at::<Md3Shader>(bytes, shaders_abs, s_num_shaders, "shaders")?;
             let shaders: Vec<String> =

@@ -258,23 +258,26 @@ fn scan_root(
             }
         };
         let archive_idx = archives.len();
-        let zip = zip::ZipArchive::new(Cursor::new(&data)).map_err(|e| {
+        // **Parse unique** (fix v0.10.3) — on parse le central directory UNE
+        // fois puis on réutilise `zip.by_index`. Avant, une nouvelle
+        // `ZipArchive` (re-parse complet du directory) était construite à
+        // CHAQUE entrée → O(n²) : un pk3 à très nombreuses entrées faisait
+        // hang le démarrage.
+        let mut zip = zip::ZipArchive::new(Cursor::new(&data)).map_err(|e| {
             Error::archive(format!("{}: {e}", path.display()))
         })?;
         let mut file_count = 0usize;
         for i in 0..zip.len() {
-            // On récupère juste les métadonnées ici — pas de lecture.
-            let mut zip_copy = zip::ZipArchive::new(Cursor::new(&data)).map_err(|e| {
-                Error::archive(format!("{}: {e}", path.display()))
-            })?;
-            let f = match zip_copy.by_index(i) {
-                Ok(f) => f,
+            // On récupère juste les métadonnées ici — pas de lecture. Tout
+            // extraire dans le bras `match` clôt l'emprunt de `zip` avant
+            // l'insertion dans `index`.
+            let (name, is_dir, size) = match zip.by_index(i) {
+                Ok(f) => (f.name().to_string(), f.is_dir(), f.size()),
                 Err(_) => continue,
             };
-            if f.is_dir() {
+            if is_dir {
                 continue;
             }
-            let name = f.name().to_string();
             let key = normalize_path(&name);
             if key.is_empty() {
                 continue;
@@ -283,7 +286,7 @@ fn scan_root(
             index.entry(key).or_insert(Entry::Pk3 {
                 archive: archive_idx,
                 name,
-                size: f.size(),
+                size,
             });
             file_count += 1;
         }

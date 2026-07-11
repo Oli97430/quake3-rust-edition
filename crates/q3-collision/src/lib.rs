@@ -178,7 +178,7 @@ impl CollisionWorld {
 
         // Walk BSP depuis le root (node 0).
         if !self.bsp.nodes.is_empty() {
-            self.recurse_tree(0, 0.0, 1.0, start, end, &mut work);
+            self.recurse_tree(0, 0.0, 1.0, start, end, &mut work, 0);
         }
 
         let frac = work.trace.fraction;
@@ -282,6 +282,7 @@ impl CollisionWorld {
 
     /// Récursif : descend l'arbre BSP. `p1f`, `p2f` = fraction du trace sur
     /// l'entrée et la sortie du node courant (utilisé pour clipper).
+    #[allow(clippy::too_many_arguments)]
     fn recurse_tree(
         &self,
         node_num: i32,
@@ -290,7 +291,18 @@ impl CollisionWorld {
         p1: Vec3,
         p2: Vec3,
         work: &mut trace::TraceWork,
+        depth: u32,
     ) {
+        // **Garde-fou anti-cycle / anti-débordement de pile** (v0.10.3) —
+        // les indices `children` d'un node viennent bruts du fichier BSP,
+        // sans validation d'acyclicité. Un BSP forgé avec un cycle (ou un
+        // arbre pathologiquement profond) provoquerait une récursion infinie
+        // → stack overflow → abort. La profondeur d'un arbre BSP légitime est
+        // O(log n) (quelques dizaines) ; MAX_TRACE_DEPTH est très au-dessus
+        // mais fini.
+        if depth > MAX_TRACE_DEPTH {
+            return;
+        }
         if work.trace.fraction <= p1f {
             // Déjà un impact plus proche, inutile d'aller plus loin.
             return;
@@ -329,11 +341,11 @@ impl CollisionWorld {
 
         if t1 >= offset && t2 >= offset {
             // totalement du côté + du plan
-            self.recurse_tree(node.children[0], p1f, p2f, p1, p2, work);
+            self.recurse_tree(node.children[0], p1f, p2f, p1, p2, work, depth + 1);
             return;
         }
         if t1 < -offset && t2 < -offset {
-            self.recurse_tree(node.children[1], p1f, p2f, p1, p2, work);
+            self.recurse_tree(node.children[1], p1f, p2f, p1, p2, work, depth + 1);
             return;
         }
 
@@ -365,8 +377,8 @@ impl CollisionWorld {
         let child_near = node.children[side_near];
         let child_far = node.children[1 - side_near];
 
-        self.recurse_tree(child_near, p1f, pf_enter, p1, mid_enter, work);
-        self.recurse_tree(child_far, pf_leave, p2f, mid_leave, p2, work);
+        self.recurse_tree(child_near, p1f, pf_enter, p1, mid_enter, work, depth + 1);
+        self.recurse_tree(child_far, pf_leave, p2f, mid_leave, p2, work, depth + 1);
     }
 
     fn trace_leaf(&self, leaf_idx: usize, work: &mut trace::TraceWork) {
@@ -374,7 +386,7 @@ impl CollisionWorld {
             return;
         };
         let start_brush = leaf.first_leaf_brush as usize;
-        let end_brush = start_brush + leaf.num_leaf_brushes as usize;
+        let end_brush = start_brush.saturating_add(leaf.num_leaf_brushes as usize);
         if let Some(lbrushes) = self.bsp.leaf_brushes.get(start_brush..end_brush) {
             for &brush_ref in lbrushes {
                 let brush_idx = brush_ref as usize;
@@ -397,7 +409,7 @@ impl CollisionWorld {
             return;
         }
         let start_surf = leaf.first_leaf_surface as usize;
-        let end_surf = start_surf + leaf.num_leaf_surfaces as usize;
+        let end_surf = start_surf.saturating_add(leaf.num_leaf_surfaces as usize);
         if let Some(lsurfs) = self.bsp.leaf_surfaces.get(start_surf..end_surf) {
             for &surf_ref in lsurfs {
                 let Some(patch_slot) = self.surface_to_patch.get(surf_ref as usize) else {
@@ -547,7 +559,7 @@ impl CollisionWorld {
         let mut clip_plane: Option<Plane> = None;
 
         let first = brush.first_side as usize;
-        let last = first + brush.num_sides as usize;
+        let last = first.saturating_add(brush.num_sides as usize);
         for side_i in first..last {
             let Some(side) = self.bsp.brush_sides.get(side_i) else {
                 continue;
@@ -628,7 +640,7 @@ fn compute_brush_bounds(bsp: &Bsp, first_side: i32, num_sides: i32) -> Aabb {
     // plans axis-aligned. Pour chaque axe, on cherche la face `+axis` et la
     // face `-axis`. Si un axe n'a pas les deux, on fallback sur infini.
     let first = first_side as usize;
-    let last = first + num_sides as usize;
+    let last = first.saturating_add(num_sides as usize);
     let mut maxs = [f32::INFINITY; 3];
     let mut mins = [f32::NEG_INFINITY; 3];
     let mut have = [(false, false); 3];
@@ -659,6 +671,10 @@ fn compute_brush_bounds(bsp: &Bsp, first_side: i32, num_sides: i32) -> Aabb {
 
 const SPLIT_EPSILON: f32 = 0.125;
 const SURFACE_CLIP_EPSILON: f32 = 0.125;
+/// Profondeur de récursion max de `recurse_tree` (anti-cycle sur BSP forgé).
+/// Un arbre BSP légitime est profond de quelques dizaines de niveaux ;
+/// 2048 est très au-dessus tout en restant loin d'un débordement de pile.
+const MAX_TRACE_DEPTH: u32 = 2048;
 
 #[cfg(test)]
 mod tests {
