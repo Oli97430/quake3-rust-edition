@@ -371,6 +371,51 @@ impl Bot {
         let desired_yaw = to.y.atan2(to.x).to_degrees();
         self.view_angles.yaw = turn_toward(self.view_angles.yaw, desired_yaw, self.turn_rate * dt);
 
+        // **Anti-stuck** (fix v0.10.3 : évalué AVANT le strafe-jump) —
+        // check le déplacement effectué depuis le dernier sample. Si le
+        // bot stagne (< STUCK_MIN_TRAVEL en STUCK_THRESHOLD_SEC), on entre
+        // en mode évasion : saut + strafe latéral + skip waypoint. Évite le
+        // bug "bot collé au mur indéfiniment". AVANT ce déplacement, le
+        // return anticipé de la branche strafe-jump (dist>200) court-
+        // circuitait ce bloc : un bot bloqué avec un waypoint lointain ne
+        // déclenchait jamais l'évasion et tapait le mur sans fin.
+        self.stuck_timer += dt;
+        if self.stuck_timer >= STUCK_THRESHOLD_SEC {
+            let traveled = (self.position - self.last_check_pos).length();
+            if traveled < STUCK_MIN_TRAVEL {
+                // Bot bloqué → drop le waypoint courant + active phase
+                // évasion. Sans drop, il retournera taper le même mur
+                // dès la fin de l'évasion.
+                self.waypoints.remove(0);
+                self.stuck_strafe_phase = UNSTUCK_DURATION;
+                trace!(
+                    "bot {} STUCK detected (traveled {traveled:.1}u) → drop wp + escape",
+                    self.name
+                );
+            }
+            self.stuck_timer = 0.0;
+            self.last_check_pos = self.position;
+        }
+
+        // Mode évasion en cours ? (prioritaire sur le strafe-jump)
+        if self.stuck_strafe_phase > 0.0 {
+            self.stuck_strafe_phase = (self.stuck_strafe_phase - dt).max(0.0);
+            // Strafe latéral alterné — sign du time pour avoir un
+            // pattern G-D-G qui décolle d'un coin rentrant.
+            let strafe = if self.stuck_strafe_phase > UNSTUCK_DURATION * 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
+            return BotCmd {
+                forward_move: 0.5, // continue à pousser
+                right_move: strafe,
+                up_move: 1.0,      // jump pour décoller d'une marche
+                view_angles: self.view_angles,
+                fire: false,
+            };
+        }
+
         // **Bot strafe-jump** (G4a) — quand le bot a un long chemin
         // (>200u), il alterne strafe G/D toutes les 0.4s + jump
         // périodique pour gagner ~20-25% de vitesse via la mécanique
@@ -398,49 +443,6 @@ impl Bot {
                 forward_move: 1.0,
                 right_move: side * 0.6, // strafe partiel pour rester orienté wp
                 up_move: if do_jump { 1.0 } else { 0.0 },
-                view_angles: self.view_angles,
-                fire: false,
-            };
-        }
-
-        // **Anti-stuck** : check le déplacement effectué depuis le
-        // dernier sample. Si le bot stagne (< STUCK_MIN_TRAVEL en
-        // STUCK_THRESHOLD_SEC), on entre en mode évasion : saut +
-        // strafe latéral + skip waypoint. Évite le bug "bot collé au
-        // mur indéfiniment" caractéristique d'une IA waypoint naïve
-        // sans navmesh.
-        self.stuck_timer += dt;
-        if self.stuck_timer >= STUCK_THRESHOLD_SEC {
-            let traveled = (self.position - self.last_check_pos).length();
-            if traveled < STUCK_MIN_TRAVEL {
-                // Bot bloqué → drop le waypoint courant + active phase
-                // évasion. Sans drop, il retournera taper le même mur
-                // dès la fin de l'évasion.
-                self.waypoints.remove(0);
-                self.stuck_strafe_phase = UNSTUCK_DURATION;
-                trace!(
-                    "bot {} STUCK detected (traveled {traveled:.1}u) → drop wp + escape",
-                    self.name
-                );
-            }
-            self.stuck_timer = 0.0;
-            self.last_check_pos = self.position;
-        }
-
-        // Mode évasion en cours ?
-        if self.stuck_strafe_phase > 0.0 {
-            self.stuck_strafe_phase = (self.stuck_strafe_phase - dt).max(0.0);
-            // Strafe latéral alterné — sign du time pour avoir un
-            // pattern G-D-G qui décolle d'un coin rentrant.
-            let strafe = if self.stuck_strafe_phase > UNSTUCK_DURATION * 0.5 {
-                1.0
-            } else {
-                -1.0
-            };
-            return BotCmd {
-                forward_move: 0.5, // continue à pousser
-                right_move: strafe,
-                up_move: 1.0,      // jump pour décoller d'une marche
                 view_angles: self.view_angles,
                 fire: false,
             };

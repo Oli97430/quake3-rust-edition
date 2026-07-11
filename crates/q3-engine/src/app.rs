@@ -4099,6 +4099,11 @@ impl App {
         self.total_shots = 0;
         self.total_hits = 0;
         self.time_warnings_fired = 0;
+        // État médailles (Excellent/Impressive) — sinon un tir railgun qui
+        // touchait sur la map précédente octroyait une fausse médaille au
+        // 1er hit de la map suivante (le chemin BR ne les reset pas).
+        self.last_frag_at = f32::NEG_INFINITY;
+        self.rg_last_hit = false;
     }
 
     fn load_map(&mut self, path: &str) {
@@ -4216,15 +4221,8 @@ impl App {
         }
 
         self.load_common_sfx();
-        // Reset du timer "dernier frag" pour qu'un kill en début de
-        // nouvelle map ne déclenche pas un Excellent hérité de la map
-        // précédente. NEG_INFINITY → `time_sec - last_frag_at > 2.0s`
-        // garanti pour le 1er frag.
-        self.last_frag_at = f32::NEG_INFINITY;
-        // Et pareil pour le combo Railgun : une nouvelle map remet le
-        // tracker à zéro, on ne veut pas qu'un hit RG de la map
-        // précédente valide un Impressive sur le premier hit d'après.
-        self.rg_last_hit = false;
+        // (last_frag_at / rg_last_hit désormais reset dans reset_map_state,
+        // partagé avec le chemin BR.)
 
         // Pickups : pour chaque entité avec un MD3 conventionnel, on
         // charge le mesh et on stocke (mesh, origin, angles). Les erreurs
@@ -8853,7 +8851,14 @@ impl App {
         let new_origin = origin + Vec3::Z * 40.0;
         self.player = PlayerMove::new(new_origin);
         self.player.view_angles = angles;
-        self.player_health.respawn();
+        // **Santé au respawn** (fix v0.10.3) — on repart du max de BASE
+        // (100), pas du `max` gonflé par un overheal (megahealth monte le
+        // cap à 200 pour la vie courante). `Health::respawn()` restaurait
+        // `current = max` → un joueur ayant ramassé une bulle de vie
+        // renaissait à 200 HP toute la manche. `Health::full()` = 100/100,
+        // cohérent avec Q3 (l'overheal ne persiste pas à la mort) et avec
+        // les resets de chargement/restart.
+        self.player_health = Health::full();
         self.player_armor = 0;
         // Poumons pleins au respawn : on ne veut pas que le joueur sorte
         // du purgatoire respawn en étant déjà "à bout de souffle".

@@ -20,6 +20,20 @@ use q3_common::cvar::CvarRegistry;
 use q3_renderer::Renderer;
 use winit::keyboard::KeyCode;
 
+/// Tronque `s` à `max` **caractères** (pas octets) avec un suffixe « ... »
+/// en cas de dépassement.  Slicer par octets (`&s[..n]`) panique si `n`
+/// tombe au milieu d'un caractère multi-octets — ce qui arrive avec des
+/// noms de fichiers utilisateur accentués / emoji.  On coupe donc sur des
+/// frontières de caractères.
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{cut}...")
+    } else {
+        s.to_string()
+    }
+}
+
 /// Pages du menu. `Root` est l'entrée, `Play` liste les maps, `Options`
 /// expose les cvars ajustables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1109,11 +1123,7 @@ impl Menu {
                         .file_name()
                         .and_then(|s| s.to_str())
                         .unwrap_or("?");
-                    let truncated = if short.len() > 40 {
-                        format!("{}...", &short[..37])
-                    } else {
-                        short.to_string()
-                    };
+                    let truncated = truncate_ellipsis(short, 40);
                     let now_playing = self
                         .music_now_playing
                         .as_ref()
@@ -1137,11 +1147,7 @@ impl Menu {
                 let cap = self.mapdl_catalog.len().min(12);
                 for i in 0..cap {
                     let (_, label) = &self.mapdl_catalog[i];
-                    let truncated = if label.len() > 50 {
-                        format!("{}...", &label[..47])
-                    } else {
-                        label.clone()
-                    };
+                    let truncated = truncate_ellipsis(label, 50);
                     v.push(format!("  {}", truncated));
                 }
                 if self.mapdl_catalog.is_empty() {
