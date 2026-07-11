@@ -65,6 +65,12 @@ pub const MAX_PLAYERS_PER_SNAPSHOT: usize = 64;
 /// en l'air, 256 est large.
 pub const MAX_ENTITIES_PER_SNAPSHOT: usize = 256;
 
+/// Nombre maximal de pickups dans un (delta-)snapshot. Une map Q3 a au plus
+/// quelques dizaines d'items ; 512 est large. Borne le `Vec::with_capacity`
+/// alimenté par un compteur u16 réseau non fiable (sinon un en-tête forgé
+/// force une préallocation de ~256 Ko par paquet).
+pub const MAX_PICKUPS_PER_SNAPSHOT: usize = 512;
+
 // ---------------------------------------------------------------------------
 // Boutons du joueur (bitset)
 // ---------------------------------------------------------------------------
@@ -729,6 +735,11 @@ impl Snapshot {
             return Err(Error::Network("Snapshot: pickup_count tronqué".into()));
         }
         let pickup_count = cur.get_u16_le() as usize;
+        if pickup_count > MAX_PICKUPS_PER_SNAPSHOT {
+            return Err(Error::Network(format!(
+                "Snapshot: pickup_count {pickup_count} > {MAX_PICKUPS_PER_SNAPSHOT}"
+            )));
+        }
         let mut pickups = Vec::with_capacity(pickup_count);
         for _ in 0..pickup_count {
             pickups.push(PickupState::read(&mut cur)?);
@@ -1216,6 +1227,11 @@ impl SnapshotDelta {
             return Err(Error::Network("SnapshotDelta: pickup_count tronqué".into()));
         }
         let dirty_pickup_count = cur.get_u16_le() as usize;
+        if dirty_pickup_count > MAX_PICKUPS_PER_SNAPSHOT {
+            return Err(Error::Network(format!(
+                "SnapshotDelta: dirty_pickup_count {dirty_pickup_count} > {MAX_PICKUPS_PER_SNAPSHOT}"
+            )));
+        }
         let mut dirty_pickups = Vec::with_capacity(dirty_pickup_count);
         for _ in 0..dirty_pickup_count {
             dirty_pickups.push(PickupState::read(&mut cur)?);

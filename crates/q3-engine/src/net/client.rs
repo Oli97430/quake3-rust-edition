@@ -453,8 +453,11 @@ impl ClientState {
         // Indépendant du décodage : si on n'a pas le bon format on
         // n'écrit rien, mais snapshots OK et deltas OK passent.
         if matches!(payload[0], q3_net::TAG_SNAPSHOT | q3_net::TAG_SNAPSHOT_DELTA) {
-            let payload_clone = payload.clone();
-            self.write_demo_record(&payload_clone);
+            // `payload` est un Vec local (issu de process_incoming), pas un
+            // champ de self → emprunt direct, pas de clone. Le clone
+            // allouait une copie complète par snapshot (~20 Hz) même sans
+            // enregistrement démo actif.
+            self.write_demo_record(&payload);
         }
         match payload[0] {
             q3_net::TAG_SNAPSHOT => match Snapshot::decode(&payload) {
