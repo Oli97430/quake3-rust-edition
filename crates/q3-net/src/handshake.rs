@@ -157,7 +157,16 @@ pub enum SlotState {
 struct ClientSlot {
     state: SlotState,
     challenge: u32,
+    /// Ordre d'insertion (compteur monotone) — sert à évincer le plus
+    /// ancien slot `Authorizing` quand la table atteint son plafond.
+    seq: u64,
 }
+
+/// Plafond de slots de handshake simultanés (anti-DoS mémoire). Un flood de
+/// `getchallenge` depuis des adresses usurpées ne peut plus faire croître la
+/// table sans fin : à plein, on évince le plus ancien slot encore en
+/// `Authorizing`. Aligné sur `MAX_CHALLENGES` de Q3 vanilla.
+const MAX_HANDSHAKE_SLOTS: usize = 1024;
 
 /// Handshake côté serveur : maintient un slot par `SocketAddr`.
 pub struct ServerHandshake {
@@ -165,6 +174,8 @@ pub struct ServerHandshake {
     /// Générateur pseudo-aléatoire interne. Seedé au [`Self::new`] — les
     /// tests utilisent [`Self::new_with_seed`] pour la reproductibilité.
     rng_state: u64,
+    /// Compteur monotone d'insertion pour l'éviction LRU des slots.
+    next_seq: u64,
 }
 
 impl ServerHandshake {
@@ -182,6 +193,7 @@ impl ServerHandshake {
         Self {
             slots: HashMap::new(),
             rng_state: seed | 1, // éviter 0 (LCG dégénère)
+            next_seq: 0,
         }
     }
 
@@ -211,12 +223,38 @@ impl ServerHandshake {
         let msg = OobMessage::parse(bytes)?;
         match msg.command.as_str() {
             "getchallenge" => {
+                // **Anti-DoS** : borne la table. Si pleine et que `addr`
+                // n'y est pas déjà, on évince le plus ancien slot encore en
+                // `Authorizing` (jamais un `Connected`). Si tout est
+                // Connected (cas improbable vu max_clients), on refuse.
+                if !self.slots.contains_key(&addr)
+                    && self.slots.len() >= MAX_HANDSHAKE_SLOTS
+                {
+                    let oldest = self
+                        .slots
+                        .iter()
+                        .filter(|(_, s)| s.state == SlotState::Authorizing)
+                        .min_by_key(|(_, s)| s.seq)
+                        .map(|(a, _)| *a);
+                    match oldest {
+                        Some(a) => {
+                            self.slots.remove(&a);
+                        }
+                        None => {
+                            warn!("handshake: table pleine de Connected, getchallenge de {addr} refusé");
+                            return Ok(None);
+                        }
+                    }
+                }
                 let challenge = self.next_challenge();
+                let seq = self.next_seq;
+                self.next_seq = self.next_seq.wrapping_add(1);
                 self.slots.insert(
                     addr,
                     ClientSlot {
                         state: SlotState::Authorizing,
                         challenge,
+                        seq,
                     },
                 );
                 debug!("handshake: challenge {challenge} émis pour {addr}");
@@ -419,6 +457,25 @@ mod tests {
         assert_eq!(server.slot_count(), 1);
         assert!(server.drop_client(&addr()));
         assert_eq!(server.slot_count(), 0);
+    }
+
+    #[test]
+    fn handshake_slots_are_capped() {
+        // Un flood de getchallenge depuis des adresses distinctes ne doit
+        // pas faire croître la table au-delà du plafond.
+        let mut server = ServerHandshake::new_with_seed(7);
+        for i in 0..(MAX_HANDSHAKE_SLOTS as u32 + 200) {
+            let a: SocketAddr =
+                format!("10.0.{}.{}:1", (i >> 8) & 0xff, i & 0xff).parse().unwrap();
+            let c = OobMessage { command: "getchallenge".into(), payload: vec![] }.to_bytes();
+            let _ = server.handle(a, &c).unwrap();
+        }
+        assert!(
+            server.slot_count() <= MAX_HANDSHAKE_SLOTS,
+            "slots={} > cap {}",
+            server.slot_count(),
+            MAX_HANDSHAKE_SLOTS
+        );
     }
 
     #[test]

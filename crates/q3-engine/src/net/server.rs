@@ -338,6 +338,9 @@ pub struct ServerSlot {
     /// `Instant::now()` de la dernière réception de paquet. Préparé pour
     /// le timeout de slot (étape future) — non utilisé encore.
     pub last_packet_at: Instant,
+    /// `Instant` du dernier message de chat accepté — impose un cooldown
+    /// (anti-flood `say`, cf. [`CHAT_COOLDOWN`]).
+    last_chat_at: Option<Instant>,
     /// Compteur de snapshots envoyés à ce client depuis le dernier full.
     /// Après `FULL_SNAPSHOT_INTERVAL`, on rebascule en full pour rafraîchir
     /// la baseline et permettre la récupération si le client a manqué
@@ -463,6 +466,7 @@ impl ServerSlot {
             frags: 0,
             deaths: 0,
             last_packet_at: Instant::now(),
+            last_chat_at: None,
             // Forcer un full au tout premier snapshot envoyé.
             snapshots_since_full: u32::MAX,
             last_fire_at: None,
@@ -998,7 +1002,17 @@ pub struct ServerState {
     intermission_until: Option<Instant>,
     pub packets_in: u64,
     pub packets_out: u64,
+    /// Anti-réflexion : instant de la dernière réponse `infoResponse`
+    /// émise. Un intervalle minimal global borne le débit d'amplification
+    /// UDP `getinfo` (adresse source usurpable → réflecteur DDoS).
+    last_info_response_at: Option<Instant>,
 }
+
+/// Intervalle minimal global entre deux réponses `getinfo` (anti-
+/// amplification). ~20 réponses/s max, sans impact sur un poll LAN normal.
+const MIN_INFO_RESPONSE_INTERVAL: Duration = Duration::from_millis(50);
+/// Cooldown de chat par slot (anti-flood `say`). ~2 messages/s max.
+const CHAT_COOLDOWN: Duration = Duration::from_millis(500);
 
 impl ServerState {
     pub fn new(bind_addr: SocketAddr, max_clients: u8, io: NetIo) -> Self {
@@ -1045,6 +1059,7 @@ impl ServerState {
             intermission_until: None,
             packets_in: 0,
             packets_out: 0,
+            last_info_response_at: None,
         }
     }
 
@@ -1245,6 +1260,17 @@ impl ServerState {
         // Le challenge sert à filtrer les réponses non-sollicitées.
         if let Some(msg) = &parsed {
             if msg.command == "getinfo" {
+                // **Anti-amplification** : l'adresse source est usurpable ;
+                // sans throttle, le serveur devient un réflecteur DDoS
+                // (petite requête → plus grosse réponse vers la victime).
+                // Intervalle minimal global entre deux infoResponse.
+                let now = Instant::now();
+                if let Some(last) = self.last_info_response_at {
+                    if now.duration_since(last) < MIN_INFO_RESPONSE_INTERVAL {
+                        return;
+                    }
+                }
+                self.last_info_response_at = Some(now);
                 let challenge = std::str::from_utf8(&msg.payload)
                     .unwrap_or("")
                     .trim();
@@ -1277,13 +1303,24 @@ impl ServerState {
         // en amont et on retourne (pas de réponse OOB attendue).
         if let Some(msg) = &parsed {
             if msg.command == "say" {
-                if let Some(slot) = self.slots.get(&dg.addr) {
+                if let Some(slot) = self.slots.get_mut(&dg.addr) {
+                    // **Anti-flood** : cooldown par slot. Sans lui, un client
+                    // (ou une adresse connectée usurpée) spammant `say`
+                    // remplit `pending_events` puis force N clones/encodages
+                    // par broadcast → famine de snapshots pour tous.
+                    let now = Instant::now();
+                    if let Some(last) = slot.last_chat_at {
+                        if now.duration_since(last) < CHAT_COOLDOWN {
+                            return;
+                        }
+                    }
                     let slot_id = slot.slot_id;
                     let text = std::str::from_utf8(&msg.payload)
                         .unwrap_or("")
                         .trim()
                         .trim_matches('"');
                     if !text.is_empty() {
+                        slot.last_chat_at = Some(now);
                         debug!("net/server: chat slot {slot_id} : {text}");
                         self.pending_events
                             .push(ServerEvent::new_chat(slot_id, text));
