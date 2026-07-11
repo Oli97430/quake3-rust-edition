@@ -666,11 +666,12 @@ impl GpuParticleSystem {
     /// compute — seules les particules vivantes generent des vertices.
     pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_pipeline(&self.render_pipeline);
-        // Le render bind group correspondant lit le buffer DESTINATION
-        // du compute qui vient de s'executer (ping a deja ete flippe
-        // dans `update`, donc le render_bind_group[ping_actuel] lit le
-        // bon buffer).
-        pass.set_bind_group(1, &self.render_bind_groups[self.ping], &[]);
+        // Le render doit lire le buffer DESTINATION du compute qui vient de
+        // s'exécuter. `update` a déjà flippé `ping` APRÈS le dispatch, donc
+        // le buffer fraîchement écrit correspond à `render_bind_groups[1 -
+        // ping]` (indexer `[ping]` lisait le buffer d'ENTRÉE du compute →
+        // rendu en retard d'une frame).
+        pass.set_bind_group(1, &self.render_bind_groups[1 - self.ping], &[]);
         // Draw indirect : 4 vertices par instance (triangle strip quad),
         // instance_count = nombre de particules vivantes (ecrit par compute).
         pass.draw_indirect(&self.indirect_buffer, 0);

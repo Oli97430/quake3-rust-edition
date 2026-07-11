@@ -1038,6 +1038,12 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         self.decal.clear();
         self.dlight.clear();
         self.particle.clear();
+        // Purge les textures matériaux résolues de la map précédente (elles
+        // se re-résolvent à la demande) — sinon la VRAM cumulait les
+        // textures de toutes les maps jouées dans la session.
+        if let Some(m) = self.material_cache.as_mut() {
+            m.clear_resolved();
+        }
 
         // Flares embarqués dans la map (coronas sur lampes, textures
         // émissives…) — extraits une fois et conservés toute la partie.
@@ -1212,6 +1218,9 @@ fn vs_main(in: VsIn) -> @builtin(position) vec4<f32> {
         self.dlight.clear();
         self.particle.clear();
         self.flare.set_flares(Vec::new());
+        if let Some(m) = self.material_cache.as_mut() {
+            m.clear_resolved();
+        }
 
         // Si des fogs ont déjà été chargés par un précédent `upload_bsp`,
         // résout leurs fogparms maintenant qu'un registry shader est dispo.

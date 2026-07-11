@@ -526,6 +526,16 @@ impl MaterialCache {
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }
+
+    /// Vide les matériaux résolus (et leurs textures GPU) — le registre de
+    /// shaders et le fallback sont conservés. Appelé au chargement de map
+    /// pour que la VRAM ne cumule pas indéfiniment les textures des maps
+    /// précédentes ; elles seront re-résolues à la demande pour la map
+    /// courante. Les `Arc<Material>` encore référencés ailleurs (buckets de
+    /// draw) restent vivants jusqu'à leur remplacement.
+    pub fn clear_resolved(&mut self) {
+        self.by_name.clear();
+    }
 }
 
 /// Cache de `RenderPipeline` par `BlendClass` + format de surface.
